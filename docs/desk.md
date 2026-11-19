@@ -851,10 +851,14 @@ where the kind has a key, the Codex fields and the login note, once. Under it,
 **Models** lists a row per entry on that connection, the card's own entry first,
 then every entry whose `connection` names it: the entry's name (what lanes and
 Status call it), its model and effort, its own Ping, its rest and top-up, and
-Remove. **Add a model** under the list asks a name (the rule and refusal of
-**Add provider**'s, shown at that field), a model and an effort, and adds
+Remove. **Add a model** under the list asks a name, a model and an effort, and adds
 `{"connection": <the card's entry>, "model", "effort"}`; Save adds one typed and
-not yet added. A card no row names offers **Uses the connection of**: choosing
+not yet added. The name fields in **Add provider** and **Add a model** show the
+name rule and say when a provider already has the name. **Add a model** also
+says when the name is already a model on that card, or points to **Uses the
+connection of** on a standalone card that can be joined. A name repeated among
+pending rows is marked as already used on the page when saving. A card no row
+names offers **Uses the connection of**: choosing
 another card makes the entry a row there, and its connection fields leave the
 settings on save. A key saved for it before stays in the desk's `secrets/` and is
 no longer used; **Clear key** before choosing removes it. A row's **Own

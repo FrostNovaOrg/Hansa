@@ -49088,7 +49088,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       change(nameBox("T.priceName"), "price-only"); await run("saveSettings()");
       check(posted.settings.prices["price-only"]?.out === 0 && !run("newPriceName"), "price-only save lost its name");
     } else if (ask === "settings-fix-invalid-pending-names") {
-      for (const [label, value, reason] of [["T.providerName", "Bad Name", "T.invalidName"], ["T.providerName", "claude", "T.invalidName"],
+      for (const [label, value, reason] of [["T.providerName", "Bad Name", "T.invalidName"],
           ["T.priceName", "example/engine", "T.invalidModel"], ["T.priceName", "   ", "T.invalidModel"]]) {
         await run("loadSettings()");
         const box = find(el => el.tag === "input" && el.attrs["aria-label"] === run(label)); change(box, value);
@@ -49103,17 +49103,6 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       check(rule && rule.textContent === run("T.nameRule") && box().attrs["aria-describedby"] === "new-provider-note", "no name rule at the field");
       for (const word of zh ? ["小写字母", "数字", "'-'", "32"] : ["lowercase letters, digits and '-'", "32"])
         check(rule.textContent.includes(word), "name rule lacks the validation's words: " + rule.textContent);
-    } else if (ask === "settings-fix-provider-name-at-field") {
-      const box = () => find(el => el.tag === "input" && el.attrs["aria-label"] === run("T.providerName"));
-      for (const save of [false, true]) {
-        await run("loadSettings()"); change(box(), "Bad Name"); document.activeElement = document.body;
-        if (save) await run("saveSettings()");
-        else await find(el => el.tag === "button" && el.textContent === run("T.addProvider")).click();
-        const error = ids["#new-provider-error"];
-        check(error && !error.hidden && error.textContent === run("T.invalidName"), "refused name not shown at its field");
-        check(box().parentElement.parentElement.contains(error) && box().attrs["aria-invalid"] === "true", "refusal is away from the name field");
-        check(document.activeElement === box() && box().scrolled, "name field not brought into view and focused");
-      }
     } else if (ask === "settings-fix-mailbox-trim") {
       const label = find(el => el.tag === "label" && el.textContent === run("T.mailboxAllowTitle"));
       const box = label && ids["#" + label.attrs.for];
@@ -49754,25 +49743,72 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(row("fast").textContent.includes(message), "the rest is not at its row");
         check(!row("compatible").textContent.includes(message) && !card("claude").textContent.includes(message), "the rest shows at another row");
         check(!zh || !/does not know|rests until/.test(message), "the Chinese page shows the server's English: " + message);
-      } else if (ask === "settings-fix-models-name") {
-        for (const value of ["Bad Name", "claude", "fast"]) {
-          for (const save of [false, true]) {
-            await run("loadSettings()");
-            change(addBox("compatible", "data-new-model-name"), value); change(addBox("compatible", "data-new-model-model"), "m2");
-            document.activeElement = document.body;
-            const posts = settingsPostCount;
-            if (save) await run("saveSettings()"); else await button(run("T.addModel"), addRow("compatible")).click();
-            check(settingsPostCount === posts, "a refused name was saved");
-            const error = ids["#new-model-compatible-error"], box = addBox("compatible", "data-new-model-name");
-            check(error && !error.hidden && error.textContent === run("T.invalidName") && addRow("compatible").contains(error),
-              "the refusal is not at the row's name field: " + value);
-            check(box.attrs["aria-invalid"] === "true" && document.activeElement === box && box.value === value, "the name field not marked and focused");
-            check(ids["#new-model-compatible-note"].textContent === run("T.nameRule"), "the rule is not under the field");
-            check(ids["#new-provider-error"].hidden && ids["#new-model-claude-error"].hidden, "the refusal shows at another name field");
-            check(!run("S.providers['Bad Name']") && same(rows("compatible"), ["compatible", "fast"]), "a refused row was added");
+      } else if (ask.startsWith("settings-fix-models-name-")) {
+        const nameBox = card => card ? addBox(card, "data-new-model-name")
+          : find(el => el.tag === "input" && el.attrs["aria-label"] === run("T.providerName"), panel());
+        const attempt = async (drafts, save) => {
+          await run("loadSettings()");
+          for (const [card, value] of drafts) change(nameBox(card), value);
+          document.activeElement = document.body;
+          const posts = settingsPostCount;
+          if (save) await run("saveSettings()");
+          else {
+            const [card] = drafts[0];
+            await button(run(card ? "T.addModel" : "T.addProvider"), card ? addRow(card) : panel()).click();
+          }
+          check(settingsPostCount === posts && same(run("S.providers"), before), "a refused name changed the providers");
+        };
+        const refusal = (card, value, other = []) => {
+          const id = card ? "new-model-" + card : "new-provider";
+          const box = nameBox(card), error = ids["#" + id + "-error"];
+          check(error && !error.hidden && box.parentElement.parentElement.contains(error), "no refusal at the name field: " + value);
+          check(box.attrs["aria-invalid"] === "true" && document.activeElement === box && box.scrolled && box.value === value,
+            "the name field did not keep its text, mark the error or get focus");
+          check(box.attrs["aria-describedby"] === id + "-note " + id + "-error"
+            && ids["#" + id + "-note"].textContent === run("T.nameRule"), "the rule or refusal is not linked to the field");
+          for (const otherCard of ["", ...cards()].filter(n => n !== card && !other.includes(n)))
+            check(ids[otherCard ? "#new-model-" + otherCard + "-error" : "#new-provider-error"].hidden, "the refusal shows at another field");
+          return error.textContent;
+        };
+        const words = (message, required, forbidden = []) => {
+          for (const part of required) check(message.includes(part), "missing " + part + " in: " + message);
+          for (const part of forbidden) check(!message.includes(part), "unexpected " + part + " in: " + message);
+        };
+        const rule = zh ? "只能用小写字母" : "Use lowercase letters";
+        const exists = zh ? "已有名为" : "There is already a provider named";
+        const join = run("T.joinConnection");
+        const cases = ask.endsWith("-form") ? [["", "Bad Name"], ["compatible", "Bad Name"]]
+          : ask.endsWith("-provider") ? [["", "claude"]]
+          : ask.endsWith("-own") ? [["compatible", "compatible"], ["compatible", "fast"]]
+          : ask.endsWith("-join") ? [["cx", "cx-other"]]
+          : [["compatible", "claude-fast"], ["compatible", "claude"]];
+        if (ask.endsWith("-pending")) {
+          for (const first of ["", "claude"]) {
+            await attempt([[first, "twice"], ["compatible", "twice"]], true);
+            words(refusal("compatible", "twice"), ["twice", zh ? "此页面上已使用" : "already used on this page"], [rule, join, exists]);
+          }
+          await attempt([["compatible", "Bad Name"], ["claude", "twice"], ["cx", "twice"]], true);
+          check(refusal("compatible", "Bad Name", ["cx"]) === run("T.invalidName"), "the pending duplicate changed the form refusal");
+          words(ids["#new-model-cx-error"].textContent, ["twice", zh ? "此页面上已使用" : "already used on this page"], [rule, join]);
+        } else {
+          for (const [card, value] of cases) for (const save of [false, true]) {
+            await attempt([[card, value]], save);
+            const message = refusal(card, value);
+            if (ask.endsWith("-form")) {
+              check(message === run("T.invalidName") && message.includes(run("T.nameRule")), "the name form refusal changed");
+            } else if (ask.endsWith("-own")) {
+              words(message, [value, zh ? "已是这张卡片下的模型" : "already a model of this card"], [rule, join, exists]);
+            } else if (ask.endsWith("-join")) {
+              const select = joinOf(value);
+              check(select?.kids.some(o => o.value === card && !o.disabled), "the source card has no join choice for " + card);
+              words(message, [value, zh ? "已有自己的服务商卡片" : "already a provider with its own card", join,
+                zh ? "选为“cx”" : "to “cx”", zh ? "保存" : "save"], [rule]);
+            } else {
+              words(message, [exists, value], [rule, join]);
+            }
           }
         }
-        await run("loadSettings()");
+      } else if (ask === "settings-fix-models-add") {
         change(addBox("compatible", "data-new-model-name"), "fast-two"); change(addBox("compatible", "data-new-model-model"), "k2-mini");
         choose(addBox("compatible", "data-new-model-effort"), "low");
         await button(run("T.addModel"), addRow("compatible")).click();
@@ -52720,6 +52756,8 @@ else if (ask === "task-steps")'''))
                 "kind": "codex", "model": "gpt-example", "effort": "", "codex_path": "/opt/codex/bin/codex",
                 "codex_home": "/opt/codex-home", "ca_file": "", "web_search": "disabled", "disabled_features": ["apps"]}
             public["settings"]["providers"]["cx-mini"] = {"connection": "cx", "model": "gpt-mini", "effort": "medium"}
+            if scenario == "models-name-join":
+                public["settings"]["providers"]["cx-other"] = {**public["settings"]["providers"]["cx"], "model": "gpt-other"}
         if scenario == "models-remove":
             saved = self.desk.settings()
             s = copy.deepcopy(saved)
@@ -52823,8 +52861,26 @@ else if (ask === "task-steps")'''))
     def test_a_rows_rest_for_an_unknown_model_shows_at_that_row_in_the_pages_words(self):
         self.run_settings_fix_scenario("models-rest")
 
-    def test_add_a_model_refuses_a_bad_or_taken_name_at_its_field_and_adds_only_connection_model_and_effort(self):
-        self.run_settings_fix_scenario("models-name")
+    def test_add_a_model_adds_only_connection_model_and_effort(self):
+        self.run_settings_fix_scenario("models-add")
+
+    def test_a_bad_provider_or_model_name_keeps_the_rule_refusal_at_its_field(self):
+        self.run_settings_fix_scenario("models-name-form")
+
+    def test_a_taken_new_provider_name_says_the_provider_is_already_here_at_its_field(self):
+        self.run_settings_fix_scenario("models-name-provider")
+
+    def test_a_cards_own_or_model_name_says_it_is_already_a_model_of_that_card(self):
+        self.run_settings_fix_scenario("models-name-own")
+
+    def test_a_standalone_provider_name_tells_how_to_join_it_at_its_card(self):
+        self.run_settings_fix_scenario("models-name-join")
+
+    def test_a_model_elsewhere_or_card_with_other_models_only_says_the_provider_is_already_here(self):
+        self.run_settings_fix_scenario("models-name-elsewhere")
+
+    def test_a_repeated_pending_name_says_it_is_already_used_on_the_page(self):
+        self.run_settings_fix_scenario("models-name-pending")
 
     def test_a_card_joins_another_and_a_row_gets_a_copy_of_the_connection_of_its_own(self):
         self.run_settings_fix_scenario("models-join")
@@ -52897,9 +52953,6 @@ else if (ask === "task-steps")'''))
 
     def test_the_provider_name_rule_is_under_the_name_field_in_the_validations_words(self):
         self.run_settings_fix_scenario("provider-name-rule")
-
-    def test_a_refused_provider_name_shows_at_the_name_field_which_gets_focus(self):
-        self.run_settings_fix_scenario("provider-name-at-field")
 
     def test_mailbox_allowlist_trims_line_edges_and_keeps_internal_spaces_for_validation(self):
         self.run_settings_fix_scenario("mailbox-trim")
