@@ -20,6 +20,8 @@ no release may send out, the mailbox rule and its address/domain allowlist
 The page also shows what goes on, and asks the principal about each release
 ([Releases](releases.md)).
 
+The principal decides what to do with a blocked task or verification.
+
 What workers may not read, no worker, verifier, setup or check reads, and Read
 is denied there to the session `hansa coordinator` starts too. No lane's
 repository may be such a folder or inside one (an entry inside a repository is
