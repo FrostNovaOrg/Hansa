@@ -23,6 +23,9 @@ they show what is merged, missing evidence and released; `show` also gives the g
   bind local ports, say: they belong to the repository's own CI), or its check, outside it, from
   your session, in a clean clone or anywhere else: that runs the workers' code with nothing around
   it, before a release too.
+- Re-queue a `blocked` task or verification under a new id, or retry it on your own. Hansa keeps the
+  run from your session on purpose, so never ask why it stopped or look for its report, branch,
+  conversation record, the lane's worktree or the folder hansa set aside.
 - Edit code in the lanes' repositories (code changes go through workers, so each gets a branch, the
   lane's check and a merge; a commit made there directly is shown to the principal with the release
   that sends it; paths under `.claude`, `.codex` or `.agents` are the principal's), `lanes/<lane>/brief.md`
@@ -35,6 +38,10 @@ they show what is merged, missing evidence and released; `show` also gives the g
   instructions; or tell the principal.
 
 ## Tell the principal
+- In the conversation, say that a task or verification is `blocked` and a to-do is open for them.
+  Give the task's title and what it was for. When they decide, close the to-do with their words
+  (`hansa ask --close N "<outcome>"`), then act as they say with `hansa retry` (a new conversation),
+  `hansa verify` for a new verification, or `hansa close`.
 - In the conversation, what you changed and why, after each change to a lane's `allow`, network
   list, write list, setup, check or merge check, or to a release target: each is recorded.
 - In the conversation: that a ticked target's release waits while the desk is paused; that `hansa
@@ -55,7 +62,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
    If the task changed something and the lane has a check,
    hansa runs it on the branch itself, so the result does not depend on what the worker says.
    More: `hansa help time-limits`.
-4. hansa tells your session when a task finishes or fails (Hearing from hansa).
+4. hansa tells your session when a task ends (Hearing from hansa).
 5. You review and merge, or send it back with `hansa retry` and what to change. On the same lane,
    provider and model (not Codex), a follow-up goes on in the earlier task's conversation (once it
    starts, `hansa show` says whether, and why not); `--lane L` or `--fresh` starts a new one. Its text carries only
@@ -76,10 +83,10 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
 | `hansa git L [--worktree] <git command>` | a git command that reads, in lane L's repository (with every `task/<id>` branch) or worktree, keys hidden |
 | `hansa merge <id> [--recheck] [--despite-check]` | merge into the lane's base branch (Merging) |
-| `hansa retry <id> "<what to change>" [--lane L] [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces |
+| `hansa retry <id> "<what to change>" [--lane L] [--fresh \| --update] [...]` | a follow-up (new id), usually from the task's last commit |
 | `hansa verify <id> ["what to look at"] [--lane L] [...]` | a worker runs the change to see whether it holds |
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
-| `hansa close <id>` | close a finished or failed task or verification without merging |
+| `hansa close <id>` | close a finished, failed or blocked task or verification without merging |
 | `hansa notify [on \| off]` | the sessions hansa posts to; start or stop this one |
 | `hansa wait [id ...] [--timeout MIN]` | return when a watched task ends (no ids: all queued/running/merging); return at once with no tasks, serve down, or all watched tasks queued while paused or under a floor; still wait for running/merging tasks |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart queued tasks, releases without asking and new bench runs; running work finishes; lane tries, merge checks and releases the principal said yes to can still start |
@@ -177,7 +184,8 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   on old code; requested coverage tests may pass on both, judged on whether they test what their
   names say. Its verdict ("holds", "holds, with notes", "does not hold", "unsure") shows in
   `hansa show <id>`; hansa will not merge
-  while it runs, nor after "does not hold" unless you say `--despite-check`.
+  while it runs, nor after "does not hold" (or a follow-up of a round that did not hold, until a
+  verification of it holds) unless you say `--despite-check`.
   "Holds, with notes" counts as "holds", but read each note in its report first: one saying that
   something worked before the change and no longer does, or that part of what the task asked is not
   done, is a defect: send the task back naming it; the other notes go to `hansa gaps`, to be marked.
@@ -260,9 +268,10 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 ## Hearing from hansa
 hansa serve repairs recent saved task ends missing from the event log when it starts, even after a
 long stop, so their usual end notices still reach you once. More: `hansa help inbox`.
-hansa posts to your session when something needs you: a task, verification, merge
-check or release ended or failed, the principal answered a release, the server stopped or got stuck, free space
-went under the floor, or a provider's timed rest left tasks without a ready provider.
+hansa posts to your session when a task, verification, merge check or release ends. The post for a
+blocked task or verification names the principal's to-do. hansa also posts when the principal answers
+a release, the server stops or gets stuck, free space goes under the floor, or a provider's timed rest
+leaves tasks without a ready provider.
 Each message is a `[hansa]` header with the desk, then a bullet line per event,
 the latest per task or subject; a task's line carries `next:`, others when one applies. When a
 provider an open to-do names became ready, the to-do may be done: if so,
@@ -346,10 +355,10 @@ or ask `scout` when reading is enough; say what you need back.
 ## Facts you can rely on
 - The optional Linux VM bench is off by default. When enabled, newly started Claude Code and Codex
   workers can submit offline server, browser and terminal checks. More: `hansa help test-bench`.
-- A provider at its usage limit rests (until the reset time the error gives, else
-  the desk's `cool_minutes`), and the task moves to the lane's next
-  provider without using a try (5 times); one that refuses a task (its content filter) does not
-  rest. Credit rests until the principal confirms a top-up on the page or saves a new key.
+- A provider at its usage limit rests (until the reset time the error gives, else the desk's
+  `cool_minutes`), and the task moves to the lane's next provider without using a try (5 times).
+  A run stopped by its provider's safety check ends `blocked`, with no retry or change of model or
+  provider. Credit rests until the principal confirms a top-up on the page or saves a new key.
   A lost login (an expired Claude login included) rests that provider until it logs in and
   `hansa ping NAME` answers; the task moves on without using a try. A task or verification hansa
   starts again by itself on the same lane, provider and model (not Codex) goes on in its earlier

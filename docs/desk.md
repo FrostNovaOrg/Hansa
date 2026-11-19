@@ -1725,7 +1725,8 @@ Enter on what looks like an empty box: it may send the guess as if they wrote it
 | The event log | `events.jsonl` | a few hundred bytes per event, append-only; never trimmed |
 | Server output from `hansa up` | `.hansa/serve.log`, `serve.log.1` | the log rotates on the next start when over 20 MB; one backup |
 | A release's output | `.hansa/releases/<id>.log` | whatever its command prints; kept |
-| A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
+| A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends, or set aside if blocked |
+| A blocked run's output | `.hansa/blocked/` | grows only when runs are blocked. hansa never removes it. The principal may delete a run's folder once the matter is settled. |
 | Pictures a run kept for the principal | `tasks/<id>/pictures/` (mode 0700), one folder per task or verification | at most 8 pictures of at most 2 MB each per run, so up to 16 MB a run; kept, never trimmed; grows with every run that leaves some (see [Pictures a run keeps](tasks.md#pictures-a-run-keeps)) |
 | Each lane's worktree | `worktrees/<lane>/` | the repository's checkout, and what builds leave in it (see [Free space](#free-space)) |
 | The bench's system image | `.hansa/bench-image/` | about 340 MB: one image, the one the [bench](bench.md) recipe names; kept between rebuilds, replaced when the recipe names another |

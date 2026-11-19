@@ -14,7 +14,7 @@ from pathlib import Path
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, pictures, plugin, release, up
 from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, connected_providers, connection_users, provider_entry, key_name, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError, old_codex_provider)
-from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
+from .run import (disk_short, earlier_not_held, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
                   codex_login, credit_text, model_text, provider_problem, providers_waited_for, quota_probe_text, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
@@ -2126,6 +2126,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
            "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
     if v and v["verdict"] in ("does not hold", "unsure") and m["state"] == "done":
         nxt["done"] = _verification_next(m, desk.meta(v["task"]))
+    before = (earlier_not_held(desk, m) if m["state"] == "done" and m.get("commits") and (not chk or chk["ok"])
+              and not (v and v["verdict"] == "does not hold") else None)
+    if before:  # a follow-up of a round that did not hold: hansa merge refuses it until a verification holds
+        nxt["done"] = (f"hansa verify {tid} ({before[1]['id']} found that {before[0]['id']}, an earlier round of this "
+                       f"change, does not hold; hansa merge {tid} waits for a verification that holds) · "
+                       f"hansa retry {tid} \"what to change\" · hansa merge {tid} --despite-check")
     newest = (v.get("latest") or v) if v else None
     if newest and newest["state"] in ("queued", "running") and m["state"] == "done":
         nxt["done"] = (f"wait for the verification: {notify.wait_step(desk, newest['task'], heard)} "

@@ -293,50 +293,8 @@ lane, or waits for one.
   rest/top-up times, with no key, endpoint, path, model name or error text in clear.
   Workers, setups and checks cannot read that folder. If the file is missing, unreadable or damaged,
   each desk uses its own rests as before.
-- **A safety stop is for a person.** A run its provider's safety check stops ends `blocked`: hansa tries
-  nothing else, the provider does not rest, and hansa opens a to-do for the principal. What the run wrote,
-  its changes (as patches git can apply) and its conversation record go to `.hansa/blocked/<id>/`, which the
-  coordinator's session and workers cannot read; no branch or other ref of the lane's repository keeps the
-  run's commits. Those commits stay in git's object store, named by nothing, until git's own clean-up removes
-  them: hansa does not prune it, as other lanes write to the same store at the same time. A run that left HEAD
-  off its branch (a rebase or bisect half done, a detached HEAD, another branch checked out) is cleared the
-  same way: what git keeps of the rebase, bisect, merge or cherry-pick is removed and HEAD put back before
-  the patches are made, and the commits on its branch go in `branch.patch`. A branch or other ref the run
-  made or moved (the refs at its start against those at its end) that holds a commit it made is removed, its
-  changes kept in `other-ref-N.patch`; one it made on a commit already there holds nothing of the run and
-  stays, as another lane may have made it. Command lines of what it left running, written to `events.jsonl` at
-  a ceiling before the stop, are rewritten there to process ids and their count. When clearing fails, the
-  task's record says so in hansa's words only, never git's. hansa's runs (workers, verifiers, their continuations and
-  `hansa ping`) never change model when the provider's safety check flags a request: Claude Code's switch to
-  another model is off (`switchModelsOnFlag: false`, `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`), so the
-  flagged run ends with an error instead of finishing on another model.
-- **A blocked task waits for the principal, then for what they said.** The principal decides what happens
-  to it, outside hansa; the coordinator tells them, then closes the to-do with their words
-  (`hansa ask --close N "<outcome>"`). Nothing else closes that to-do: not hansa, not a retry or a close.
-  While it is open, the task is *held*:
-  - `hansa show B`, in every form (`--report`, `--full`, `--check`, `--check-log`, `--merge-check-log`), and the
-    page's task view give the same short text: id, title, lane, provider and model, when it stopped, the task's
-    own text as queued, one sentence that the safety check stopped it and its output is set aside on purpose,
-    the to-do's number and `next:`. Never its report, notes, last call, denials, check, changes or pictures,
-    nor why it was stopped. Once the to-do is closed, the same with its outcome.
-  - `hansa diff B`, and `hansa git L ...` naming `task/B`, say there is no commit of that run.
-  - `hansa retry B` and `hansa close B` are refused while it is held. Once the to-do is closed, `hansa retry B
-    "..."` (with `--lane` too) always starts over from the base in a new conversation, given the task's text and
-    the note only (`--update` is refused), and `hansa close B` closes it; it stays `blocked`, and what was set
-    aside stays.
-  - `hansa verify B` and `hansa merge B` are refused (it is not done), and `hansa cancel B` (it has ended).
-  - `hansa wait B` returns at once with one line, the same line hansa posts to the coordinator's session when
-    it stops: `tB blocked: its provider's safety check stopped it · to-do #N is open for the principal: tell
-    them · do not retry it or look for its output`.
-  - `hansa status` lists it under "blocked, waiting for the principal" (in `--json`: `state: "blocked"`,
-    `reason: "safety"`, `action: "human_review"`, `todo: N`); once the to-do is closed, with the ended tasks
-    waiting for the coordinator, with `next:`. `hansa goal list`, `hansa goal show` and `hansa desks` count it
-    apart from failed work while it is held. `hansa ask` marks its to-do as opened by hansa.
-  - A task whose verification is blocked: `hansa show T` says so, with the to-do; `hansa merge T` (even with
-    `--despite-check`) and `hansa verify T` wait until that to-do is closed. `hansa retry T` works as ever, and
-    neither a follow-up nor a later verification is given any text of a blocked run.
-- **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
-  dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on the
+- **Every try costs, and counts.** When a task goes back to the queue for another try (after a usage limit or a
+  dropped connection, for example), that run's tokens, turns and worth are kept on the
   task's record of its tries; a run an earlier `hansa serve` started and lost track of is read from its session record
   as the task goes back. A run hansa resumed counts with the run before it, the resumed part read from
   the session record after the resume only (when those rows carry no counts, from its answer, less the run
@@ -409,30 +367,29 @@ If a credit rest still holds, the ping says it stays until the principal confirm
 or saves a new key.
 
 After `hansa lane set L providers ...`, queued tasks, including those waiting for a resting provider,
-use the new order: first ready provider excluding prior refusals; otherwise they wait. A
-dropped-connection retry keeps its provider if still listed. Running work keeps its provider.
+use the first ready provider in the new order. If none is ready, they wait.
+A dropped-connection retry keeps its provider if still listed. Running work keeps its provider.
 `lane set` and `lane add --providers` accept comma-separated names with spaces around them
 (quote `"claude, spare"` in the shell). Each provider must appear only once, to avoid repeating a
 fallback entry; a duplicate is refused by name before anything changes. Existing saved lists with
 duplicates still load and run.
-`hansa retry` uses its destination lane's current order, skipping providers that refused any earlier round
-in its chain, including with `--fresh`. Those refusals remain the earlier rounds' runs and tries; they
-use none of the follow-up's tries. `hansa show` names the providers left out and the rounds they refused
-in one line. This avoids spending every follow-up on the same content filter; it is unnecessary if
-providers no longer refuse individual requests.
 
-If every provider in the destination lane refused earlier rounds, hansa ignores the inherited refusals
-and tries the providers in the lane's order. This includes a lane with only one provider, whether the
-lane was inherited or explicitly chosen with `hansa retry ID "..." --lane L`, and prevents a follow-up
-from waiting forever when the inherited refusals exclude its whole lane. No provider is listed as left
-out in `hansa show` in that case. A provider that refuses the follow-up itself is still excluded for the
-rest of that round; if they all refuse it, the task fails with "no other provider in the lane to try".
-A failed refusal's `next:` line offers the lane command alongside the usual retry, to choose a lane on
-the same repository and base. New tasks (`hansa add`) keep their usual provider order and do not inherit
-another task's refusals.
+`hansa retry` uses its destination lane's current provider order.
 
 Verification on L uses L's current order;
 on a verify lane, that lane's order. Neither inherits the parent's provider; readiness decides which runs.
+
+### When a provider's safety check stops a run
+
+The task or verification ends `blocked`. hansa tries nothing else and changes neither model nor provider.
+It sets the run's output aside in `.hansa/blocked/<id>/` and opens a to-do for the principal.
+hansa tells the coordinator that the run stopped and a to-do is open, keeping the output out of their session.
+The coordinator tells the principal in the conversation what happened and what the task was for.
+The principal tells the coordinator what to do with the task (try it again, give it to another lane, drop it, or wait).
+The task waits until the coordinator closes the to-do with the principal's words (`hansa ask --close N "<outcome>"`).
+The coordinator then follows that decision. `hansa retry` starts from the base in a new conversation.
+
+hansa acts only on how the run ends. Setting its output aside guards against reading it by accident.
 
 ## A check's output
 
@@ -629,8 +586,6 @@ Advice, not a rule hansa enforces:
 
 - A task about a tool's own behaviour (its options, settings, hooks, plugins) goes to a model made for
   that tool or that knows it, and the task pastes in the parts of the tool's documentation it needs.
-- A task a provider's content filter may refuse (probing a sandbox from inside, say) goes to another
-  provider.
 - With a provider that tends to write long, give long text tasks a word limit.
 
 ## Merging, the merge check and conflicts
@@ -719,8 +674,16 @@ again replaces it, recording who and when. Records persist in
 
 `hansa merge ID` merges a task's branch into its lane's base branch. A failed
 check blocks it unless the coordinator says `--despite-check` (recorded), and
-so does a verification that does not hold. That flag skips the merge check
-even when the base moved; it never overrides release files or a key.
+so does a verification that does not hold. So does a follow-up (`hansa retry`,
+with or without `--fresh` or `--update`) with no verification of its own that
+holds when the latest verified earlier round of its change did not hold: the
+refusal names that verification and the round it judged, and the ways on are
+`hansa verify ID` or `hansa merge ID --despite-check`; `hansa show ID` names
+`hansa verify ID` first. When that latest earlier verdict was `unsure`, or an
+earlier round held, the merge goes on with a note, as before. That is decided
+at `hansa merge`; a merge already waiting its turn is not judged again. That
+flag skips the merge check even when the base moved; it never overrides
+release files or a key.
 
 The last definite verdict (`holds`, `holds, with notes`, or `does not hold`)
 stands until a later verification gives another definite verdict. A cancelled
