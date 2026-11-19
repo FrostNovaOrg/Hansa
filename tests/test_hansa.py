@@ -38370,6 +38370,33 @@ def save():'''))
         self.assertEqual(len(self.hansa("gaps").splitlines()), 6)
         self.assertIn(f"{vid}.3  {tid}  - Failed write.", self.hansa("gaps"))
 
+    def test_verification_gaps_stop_at_not_looked_at(self):
+        tid = None
+        for heading, unchecked in (
+            ("Notes:", "\nNot looked at:\n- Phone width"),
+            ("## Notes", "\nNot looked at: nothing I know of"),
+            ("## Notes", "\n## Not looked at:\n- Phone width"),
+            ("## Notes", "\nNot looked at:\n- Phone width"),
+            ("Notes:", "Not looked at: phone"),
+        ):
+            report = f"{heading}\n- A gap.\n{unchecked}"
+            with self.subTest(report=report):
+                tid, vid = self.gaps_verification(report, tid=tid)
+                listed = self.hansa("gaps")
+                self.assertIn(f"{vid}.1  {tid}  - A gap.", listed)
+                notes = self.desk.meta(vid)["verification_notes"]
+                self.assertEqual([n["text"] for n in notes], ["- A gap."], listed)
+                self.assertIn(unchecked.strip(), self.hansa("show", vid, "--report"))
+
+    def test_verification_gaps_recognize_formatted_not_looked_at_outside_code(self):
+        from hansa.gaps import split_notes
+
+        report = "```md\nNot looked at: an example\n```\n## Notes\n- A gap.\n"
+        for marker in ("not looked at:", "**Not looked at:**", "### __not looked at:__"):
+            with self.subTest(marker=marker):
+                self.assertEqual(split_notes(report + f"{marker}\n- Phone width\n## Notes\n- Later text"),
+                                 ["- A gap."])
+
     def test_verification_gaps_split_a_bold_notes_line_and_numbered_items(self):
         tid, vid = self.gaps_verification(
             "**Notes:**\n1. Restart during cleanup.\n2. Old settings.\n3. Failed write.")

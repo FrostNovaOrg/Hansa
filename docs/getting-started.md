@@ -141,24 +141,22 @@ Ask the coordinator:
 > it when it holds. Do not release it.
 
 For an empty project, ask for a Python function and unittest.
-The coordinator sets the check (for example `hansa lane set a check "python3 -m unittest discover"`)
-and [lists each download host](sandbox.md#a-lanes-network-list) with `hansa lane set a network HOST ...`.
-The list starts empty.
+The coordinator sets the check, for example
+`hansa lane set a check "python3 -m unittest discover"`, and the download hosts
+with `hansa lane set a network HOST ...`. The default list is empty;
+list each required host. See [network lists](sandbox.md#a-lanes-network-list).
 
-`hansa lane try a` runs setup and checks in the sandbox. Confirm it passes and
-`hansa explain server` reports `hansa serve tried srt` and `it ran`.
-Workers must pass their own sandbox probe. Without srt, setup and checks say
-**could not run** because of a machine setup problem. Workers wait if setup
-cannot run. Fix the server's tools on `PATH`, restart it, and recheck before
-merging (`hansa merge ID --recheck`).
+`hansa lane try a` runs the setup and check in the lane's sandbox. Confirm
+it passes and `hansa explain server` reports `hansa serve tried srt` and
+`it ran`. Workers need their own sandbox probe to pass too.
+Without srt, setup and check commands say **could not run** because of a machine
+setup problem; the task itself has not failed. If configured setup cannot run,
+workers do not start. Fix the tools on the server's PATH, restart it, and
+recheck before merging (`hansa merge ID --recheck`).
 
 Follow progress on Status. The coordinator reads `hansa show ID` and
 `hansa diff ID`; hansa commits the worker's changes and checks them. The task is
 finished when reviewed and merged into the lane's base branch.
-
-### Before you say yes
-
-Open the task on Status and [check its report, pictures, verdict and what went untested](principles.md#10-work-stays-on-record-the-principal-need-not-read-code).
 
 ## Work over SSH
 
