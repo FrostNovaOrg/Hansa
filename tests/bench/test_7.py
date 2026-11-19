@@ -389,7 +389,10 @@ class BenchManagementTest(unittest.TestCase):
                 else:
                     kept.write_bytes(self.image)
                 if not kept.is_dir():
-                    os.chmod(kept, 0o640 if kind == "group-readable" else 0o600, follow_symlinks=False)
+                    # Modes go on real files only: a link's own mode means nothing to the check, and
+                    # Linux's Python has no chmod that leaves a link's target alone. The link's
+                    # target is made private so that being a link is the kept image's only defect.
+                    os.chmod(target if kind == "link" else kept, 0o640 if kind == "group-readable" else 0o600)
                 downloads = self.downloads
                 self.command("rebuild")
                 self.assertEqual(self.downloads, downloads + 1)
