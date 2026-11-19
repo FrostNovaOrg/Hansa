@@ -21,7 +21,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from . import account, after, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
-from .desk import (EFFORTS, Desk, connected_providers, provider_entry, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entry, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
@@ -2369,14 +2369,15 @@ def cmd_coordinator(a):
     from .run import PROVIDER_VARS, claude_bin, no_read_rules
     # the plan may be the account's to write, and it goes on root's command line and into root's environment
     model, effort = plan.get("model"), plan.get("effort") or ""
-    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._:/\[\]][A-Za-z0-9._:/\[\]-]*", model):
+    if not isinstance(model, str) or not MODEL_NAME.fullmatch(model):
         raise SystemExit(f"hansa: the coordinator's model {model!r} is not a model name "
                          "(letters, digits and ._:-/[], not starting with -)")
     if effort not in EFFORTS:
         raise SystemExit(f"hansa: the coordinator's effort {effort!r} is not one of {', '.join(EFFORTS[1:])}")
     # nor what a start hands hansa's mod: only this start's (a session started from another's shell has them)
+    # nor a switch that would make Claude Code ignore the helpers' model and refuse one a call names (helper_text)
     env = {k: v for k, v in without_session(os.environ).items()
-           if not k.startswith("ANTHROPIC_") and not k.startswith("HANSA_MOD_")}
+           if not k.startswith("ANTHROPIC_") and not k.startswith("HANSA_MOD_") and k != "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"}
     # only the variables provider_env sets for the provider, by name: others (HOME, PATH, and CLAUDE_*
     # ones that change how Claude Code runs commands) are not the desk owner's to set for root
     given = plan.get("env") if isinstance(plan.get("env"), dict) else {}
@@ -2590,9 +2591,14 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
     p = provider_entry(s, co["provider"])
     if p["kind"] == "codex":  # also refuse a hand-edited file before preparing a Claude Code session
         raise SystemExit(f"hansa: coordinator provider {co['provider']} is codex; the coordinator's session is Claude Code")
+    helpers_model = s.get("helpers_model") or ""
+    if not isinstance(helpers_model, str) or (helpers_model and not MODEL_NAME.fullmatch(helpers_model)):
+        raise SystemExit(f"hansa: the helpers' model {helpers_model!r} is not a model name (letters, digits and "
+                         "._:-/[], not starting with -); the principal changes it on the page (Settings, Coordinator)")
     card_said = bring_card(desk, starting=True)
     for f in sorted(HELPERS.glob("*.md")):
-        _bring(desk, f.read_text(encoding="utf-8"), desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
+        _bring(desk, helper_text(f.read_text(encoding="utf-8"), helpers_model),
+               desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
     mine = desk.root / ".claude" / "settings.json"  # hansa keeps its rules current there; the rest is left as it is
     cs = read_json(mine, {})
     cs = {**cs, "permissions": permissions(desk)} if isinstance(cs, dict) else {"permissions": permissions(desk)}
@@ -2616,6 +2622,16 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
             "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started,
             "language": s.get("alert_language"),  # the status line's, until hansa serve's summary gives it
             "card_said": card_said}  # what became of the copy of the card hansa notify on wrote (up.refresh_copy)
+
+
+def helper_text(text: str, model: str) -> str:
+    """A helper's definition as the desk gets it: with the principal's helpers' model (settings helpers_model) as its
+    own model field; with none, as hansa ships it, so it runs on the coordinator's model. A model the coordinator names
+    for one call of the Agent tool comes before either (Claude Code's order)."""
+    if not model:
+        return text
+    head, sep, rest = text.partition("\n---\n")
+    return f"{head}\nmodel: {json.dumps(model)}{sep}{rest}"
 
 
 def _record_roots_mod(theirs: str, desk: Desk, rec: dict) -> str:

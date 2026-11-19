@@ -27341,6 +27341,100 @@ def save():'''))
         deny = json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"]["deny"]
         self.assertIn(f"Read(//{str(self.desk.root).lstrip('/')}/secrets/**)", deny)
 
+    def start_coordinator(self, **env):
+        """hansa coordinator with a Claude Code that prints its arguments and two variables: (exit, stdout, stderr)."""
+        echo = self.tmp / "echo-claude"
+        echo.write_text("#!/bin/sh\necho \"$@\"\necho \"force=${CLAUDE_CODE_SUBAGENT_MODEL_FORCE-unset}\"\n")
+        echo.chmod(0o755)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "coordinator"], capture_output=True, text=True,
+                           env={**os.environ, "HANSA_CLAUDE": str(echo), **env})
+        return r.returncode, r.stdout, r.stderr
+
+    def test_the_helpers_run_on_the_principals_helpers_model_else_on_the_coordinators(self):
+        code = Path(__file__).resolve().parent.parent / "hansa" / "agents"
+        agents = self.desk.root / ".claude" / "agents"
+        shipped = {f.name: f.read_text() for f in code.glob("*.md")}
+        self.assertEqual(sorted(shipped), ["operator.md", "reviewer.md", "scout.md"])
+        # every desk, new or existing: empty, the coordinator's model, the definitions as hansa ships them
+        self.assertEqual(self.desk.settings()["helpers_model"], "")
+        self.assertEqual(self.start_coordinator()[0], 0)
+        self.assertEqual({n: (agents / n).read_text() for n in shipped}, shipped)
+        self.assertFalse(any(x.startswith("model:") for t in shipped.values() for x in t.splitlines()))
+        # the principal's value, on the page: the definitions get it at the coordinator's next start, not before
+        self.assertEqual(self.page_save(lambda s: s.update(helpers_model="sonnet")), {"ok": True, "problems": []})
+        self.assertEqual(self.desk.settings()["helpers_model"], "sonnet")
+        self.assertEqual({n: (agents / n).read_text() for n in shipped}, shipped)
+        exit_code, out, err = self.start_coordinator()
+        self.assertEqual(exit_code, 0, err)
+        self.assertIn("--model opus", out)  # the coordinator's own model is its own
+        for name, text in shipped.items():
+            with self.subTest(helper=name):
+                given = (agents / name).read_text()
+                head = given.split("\n---\n", 1)[0].splitlines()
+                self.assertIn('model: "sonnet"', head)  # in the definition's frontmatter
+                # the rest, efforts, tools and limits among it, as hansa ships it
+                self.assertEqual("\n".join(x for x in given.splitlines() if x != 'model: "sonnet"'),
+                                 "\n".join(text.splitlines()))
+        self.assertIn("effort: medium", (agents / "scout.md").read_text())
+        self.assertIn("effort: high", (agents / "reviewer.md").read_text())
+        self.assertIn("effort: medium", (agents / "operator.md").read_text())
+        # emptied again: back to the coordinator's model
+        self.assertEqual(self.page_save(lambda s: s.update(helpers_model="")), {"ok": True, "problems": []})
+        self.assertEqual(self.start_coordinator()[0], 0)
+        self.assertEqual({n: (agents / n).read_text() for n in shipped}, shipped)
+
+    def test_the_helpers_model_is_checked_as_the_coordinators_model_is(self):
+        for good in ("haiku", "claude-sonnet-5-5", "opus[1m]", "kimi-k2:latest", "vendor/model.v2"):
+            with self.subTest(good=good):
+                self.assertEqual(self.page_save(lambda s: s.update(helpers_model=good)), {"ok": True, "problems": []})
+        for bad in ("-x", "two words", "a\nb", 5, None, ["haiku"], "x" * 201, 'q"uote'):
+            with self.subTest(bad=bad):
+                said = self.page_save(lambda s: s.update(helpers_model=bad))
+                self.assertFalse(said["ok"])
+                self.assertTrue(said["problems"][0].startswith("helpers_model: "), said)
+                self.assertEqual(said["problem_details"][0]["values"]["field"], "helpers_model")
+        self.assertEqual(self.desk.settings()["helpers_model"], "vendor/model.v2")
+        # a value written by hand that the page would refuse: the coordinator does not start, as with its own model
+        s = read_json(self.desk.settings_path, {})
+        s["helpers_model"] = "-p"
+        self.desk.settings_path.write_text(json.dumps(s))
+        exit_code, out, err = self.start_coordinator()
+        self.assertNotEqual(exit_code, 0)
+        self.assertIn("the helpers' model '-p' is not a model name", err)
+        self.assertEqual(out, "")
+
+    def test_only_the_principal_sets_the_helpers_model_and_explain_says_where_it_comes_from(self):
+        said = self.hansa("explain")
+        self.assertIn("helpers (scout, reviewer, operator): the coordinator's model (opus)", said)
+        self.assertIn("you cannot change it (hansa ask)", said)
+        self.assertEqual(self.page_save(lambda s: s.update(helpers_model="haiku")), {"ok": True, "problems": []})
+        said = self.hansa("explain")
+        self.assertIn("helpers (scout, reviewer, operator): haiku, the principal's setting (web page)", said)
+        self.assertIn("One call may name another model", said)
+        s = self.desk.settings()
+        s["helpers_model"] = "opus"
+        self.assertEqual(self.desk.save_settings(s, by="coordinator"),
+                         ["helpers_model is the principal's, set only on the web page (Settings); ask with hansa ask"])
+        self.assertEqual(self.desk.settings()["helpers_model"], "haiku")
+
+    def test_nothing_in_the_coordinators_session_refuses_a_model_named_for_one_helper_call(self):
+        self.assertEqual(self.page_save(lambda s: s.update(helpers_model="haiku")), {"ok": True, "problems": []})
+        # a switch from the shell that would ignore the definitions' model and refuse one a call names stays out
+        exit_code, out, err = self.start_coordinator(CLAUDE_CODE_SUBAGENT_MODEL_FORCE="1")
+        self.assertEqual(exit_code, 0, err)
+        self.assertIn("force=unset", out)
+        # only Claude Code's own helpers are denied, by name; no rule names the Agent tool alone or a model
+        argv = out.splitlines()[0].split()
+        denied = [x for x in argv if x.startswith("Agent")]
+        self.assertTrue(denied)
+        self.assertTrue(all(x.startswith("Agent(") and x.endswith(")") and "model" not in x for x in denied), denied)
+        settings = json.loads((self.desk.root / ".claude" / "settings.json").read_text())
+        self.assertNotIn("availableModels", settings)
+        self.assertFalse([r for r in settings["permissions"].get("deny", []) if r == "Agent" or r.startswith("Agent(")])
+        for f in (self.desk.root / ".claude" / "agents").glob("*.md"):
+            self.assertNotIn("disallowedTools", f.read_text())
+
     def page_save(self, change):
         """Load the settings as the page does, change them, save (what POST /api/settings does); what the page
         is told."""
@@ -42457,6 +42551,20 @@ def save():'''))
                     self.assert_settings_refused_from_outside(*self.settings_post(path, body, headers)[:2])
                     self.assertEqual(self.settings_and_keys(), before)
 
+    def test_the_outside_page_shows_the_helpers_model_and_cannot_save_it(self):
+        self.assertEqual(self.page_save(lambda s: s.update(helpers_model="haiku")), {"ok": True, "problems": []})
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        s = self.desk.settings()
+        for headers in self.outside_cases():
+            with self.subTest(headers=headers):
+                code, reply, _ = self.web_request("/api/settings", headers={**auth, **headers})
+                self.assertEqual((code, reply["from_outside"], reply["settings"]["helpers_model"]), (200, True, "haiku"))
+                before = self.settings_and_keys()
+                self.assert_settings_refused_from_outside(*self.settings_post(
+                    "/api/settings", {"settings": {**s, "helpers_model": "opus"}, "rev": self.desk.settings_rev()},
+                    headers)[:2])
+                self.assertEqual(self.settings_and_keys(), before)
+
     def test_settings_from_loopback_hosts_change_as_now(self):
         for i, host in enumerate(self.LOCAL_HOSTS):
             with self.subTest(host=host):
@@ -50930,6 +51038,34 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       check(JSON.stringify(posted.settings.release_mailbox_allow) === '["me@example.com","@project.example"]', "allow-list edges not trimmed");
       change(ids["#" + find(el => el.tag === "label" && el.textContent === run("T.mailboxAllowTitle")).attrs.for], "me @example.com");
       await run("saveSettings()"); check(posted.settings.release_mailbox_allow[0] === "me @example.com", "inner space was removed");
+    } else if (ask === "settings-fix-helpers-model" || ask === "settings-fix-helpers-model-outside") {
+      // Settings, Coordinator: one model for the three helpers, blank for the coordinator's
+      const zh = process.argv[4] === "zh";
+      const label = find(el => el.tag === "label" && el.textContent === run("T.helpersModel"));
+      check(label, "no helpers' model field");
+      const box = ids["#" + label.attrs.for];
+      check(label.parentElement.textContent.includes(run("T.helpersModelHint")), "the field does not say what it does");
+      for (const word of zh ? ["空", "协调员的模型"] : ["blank", "coordinator's model"])
+        check(label.textContent.includes(word), "the label does not say what blank means: " + label.textContent);
+      check(box._settingMeta.group === "coordinator", "the field is not in the Coordinator group");
+      if (ask.endsWith("-outside")) {
+        check(run("SETTINGS_LOCKED") && box.value === "haiku" && box.readOnly, "the outside page does not show the value read-only");
+      } else {
+      check(box.value === "", "a desk's helpers' model is not blank by default");
+      change(box, "sonnet"); await run("saveSettings()");
+      check(posted.settings.helpers_model === "sonnet", "the save did not send the helpers' model");
+      const message = run("settingsSaveState.textContent");
+      for (const part of zh ? ["助手的模型", "下次启动"] : ["helpers' model", "next start"])
+        check(message.includes(part), "the save does not say when it applies: " + message);
+      change(box, "-bad");
+      settingsPostReply = {ok:false, problems:["helpers_model: the helpers' model must be empty (the coordinator's model) or a model name"],
+        problem_details:[{code:"field_rule", values:{field:"helpers_model", reason:"model_name"}}]};
+      await run("saveSettings()");
+      const shown = find(el => el.tag === "label" && el.textContent === run("T.helpersModel"));
+      check(ids["#" + shown.attrs.for].attrs["aria-invalid"] === "true", "the refusal is not at the field");
+      const error = find(el => el.className === "field-error" && !el.hidden && el.textContent.includes(run("T.validationRules.model_name")));
+      check(error && shown.parentElement.contains(error), "the refusal's words are not under the field");
+      }
     } else if (ask === "settings-fix-blank-defaults") {
       const rest = number(); change(rest, ""); await run("saveSettings()");
       check(posted.settings.cool_minutes === 30, "blank rest did not use default 30");
@@ -54599,9 +54735,11 @@ else if (ask === "task-steps")'''))
             problems = [p for p in validate(s, self.desk.root, page=True, before=saved)
                         if p.detail["values"].get("reason") == "connection_removed"]
             self.assertTrue(problems)
-        if scenario == "models-outside":
+        if scenario in ("models-outside", "helpers-model-outside"):
             public["from_outside"] = True
             public["settings"]["settings_from_outside"] = False
+        if scenario == "helpers-model-outside":
+            public["settings"]["helpers_model"] = "haiku"
         public["settings"]["cool_minutes"] = 37
         public["settings"]["coordinator"].pop("model", None)
         public["settings"]["coordinator_alert"] = {}
@@ -54774,6 +54912,12 @@ else if (ask === "task-steps")'''))
 
     def test_coordinator_save_distinguishes_next_start_from_idle_decision(self):
         self.run_settings_fix_scenario("saved-coordinator")
+
+    def test_the_helpers_model_is_set_beside_the_coordinators_and_applies_at_its_next_start(self):
+        self.run_settings_fix_scenario("helpers-model")
+
+    def test_the_outside_page_shows_the_helpers_model_read_only(self):
+        self.run_settings_fix_scenario("helpers-model-outside")
 
     def test_discard_confirms_unadded_provider_and_price_names(self):
         self.run_settings_fix_scenario("discard")

@@ -303,9 +303,10 @@ out with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`). Do not `m
 them: a shell command there asks.
 
 ## Your helpers
-Three helpers run inside this session, on your model. `scout` (medium effort) answers one question
-about the desk or a repository with file:line; `reviewer` (high effort) reads one finished task's
-change for high-stakes cases, for what a test run would miss; both only read. `operator` (medium)
+Three helpers run inside this session, on the principal's helpers' model, else on yours
+(`hansa explain` says which); one call may name another (the Agent tool's `model`). `scout` (medium effort)
+answers one question about the desk or a repository with file:line; `reviewer` (high effort) reads one
+finished task's change for high-stakes cases, for what a test run would miss; both only read. `operator` (medium)
 does one hands-on job on this machine (installing software, setting up a tool) with your rights, each
 command with the principal's permission; like you, it cannot read `secrets/` or edit the lanes'
 repositories. It reports what it changed, where, and how to undo it. Brief a helper as a task: one
