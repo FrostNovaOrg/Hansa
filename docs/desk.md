@@ -1565,29 +1565,30 @@ or when their followers count as live.
 
 #### From the desktop app or another device
 
-Type `/remote-control` in the coordinator's terminal, then open the session in the Claude app. Remote Control is Claude
-Code's feature. hansa neither starts nor uses it and works without it. The same process keeps its deny rules, turn hooks,
-mod and `--autocompact`, stays listed in `claude agents --json` and gets hansa's posts. Messages join a running turn or
-start one if idle. While the dialog is open, `hansa status` shows it waiting for an answer in its own window and posts wait.
+Type `/remote-control` in the coordinator's terminal, then open the session in the Claude app. hansa neither starts nor
+uses Claude Code's Remote Control and works without it. The same process keeps its deny rules, turn hooks, mod and
+`--autocompact`, stays in `claude agents --json` and gets hansa's posts. App messages join a running turn or start one if idle.
+Posts wait while the dialog is open. `hansa status` shows “waiting for an answer in its own window” when its follower sees `waiting`.
 
 Claude Code's documentation says you can answer permission prompts and questions, interrupt and run `/compact`, `/clear`
 and `/model`, but cannot run `/plugin`, `/resume` or `!` shell commands. The `/clear` hook works the same from the app.
 Claude Code's documentation says Anthropic's servers carry and keep the conversation while connected. You choose whether to connect.
 
 Claude Code's documentation says you need a claude.ai subscription sign-in directly with Anthropic. An API key,
-another provider's address or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` prevents connection. `hansa coordinator`
-sets that variable, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` for compatible providers. A subscription's custom folder
-only changes `CLAUDE_CONFIG_DIR`. `notify-launch` inherits `hansa up`'s clean environment and adds no provider variables.
+another provider's address or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` prevents connection. For compatible providers,
+`hansa coordinator` sets the switch to `1` and sets `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. For subscriptions
+it supplies none of the three and uses `CLAUDE_CONFIG_DIR` for a custom folder. `notify-launch` inherits `hansa up`'s
+filtered environment, which keeps a saved `CLAUDE_CONFIG_DIR` and omits the switch, address and token.
 
 Claude Code's documentation says you can use `--remote-control` at launch or `remoteControlAtStartup` in your user
-settings (project settings cannot enable it). `hansa coordinator --remote-control` passes the flag to connect at startup.
-`hansa up` keeps the flag on restart. Claude Code's documentation says the entry goes offline when the process stops
-and Claude Code reconnects to that entry on `--resume` of the same conversation.
+settings (project settings cannot enable it). `hansa coordinator --remote-control` passes the flag to Claude Code.
+`hansa up` keeps the flag from the saved command. Claude Code's documentation says the entry goes offline when the
+process stops and Claude Code reconnects to that entry on `--resume` of the same conversation.
 
 **Do not move the coordinator's session into the app.** Claude Code's documentation says `/desktop` in the terminal or
 `/resume` in the app after closing the terminal continues in a process the app starts. It loses hansa's launch-time
-deny rules, turn hooks, mod and `--autocompact`. hansa sees the terminal session as gone and `hansa up` would resume the
-same conversation in tmux while the app has it open. Use Remote Control. See [a session started in the app](#desktop-session).
+deny rules, turn hooks, mod and `--autocompact`. With that terminal launch still recorded, hansa sees the session as gone.
+`hansa up` can resume its conversation in tmux while the app has it open. Use Remote Control. See [a session started in the app](#desktop-session).
 
 ### How each of the coordinator's turns ended
 
