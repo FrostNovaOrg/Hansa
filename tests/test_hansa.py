@@ -49784,11 +49784,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         };
         const rule = zh ? "只能用小写字母" : "Use lowercase letters";
         const exists = zh ? "已有名为" : "There is already a provider named";
+        const move = zh ? ["服务商。要在", "自己的卡片上删除", "在这里加为模型"]
+          : ["”. To use it on this card", "remove it from its own card", "add it here as a model"];
         const cases = ask.endsWith("-form") ? [["", "Bad Name"], ["compatible", "Bad Name"]]
           : ask.endsWith("-provider") ? [["", "claude"]]
           : ask.endsWith("-own") ? [["compatible", "compatible"], ["compatible", "fast"]]
           : ask.endsWith("-move") ? [["cx", "cx-other"]]
-          : [["compatible", "claude-fast"], ["compatible", "claude"]];
+          : ask.endsWith("-elsewhere") ? [["compatible", "claude-fast"]]
+          : [["compatible", "claude"]];
         if (ask.endsWith("-pending")) {
           for (const first of ["", "claude"]) {
             await attempt([[first, "twice"], ["compatible", "twice"]], true);
@@ -49805,11 +49808,10 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
               check(message === run("T.invalidName") && message.includes(run("T.nameRule")), "the name form refusal changed");
             } else if (ask.endsWith("-own")) {
               words(message, [value, zh ? "已是这张卡片下的模型" : "already a model of this card"], [rule, oldChoice, exists]);
-            } else if (card && cards().includes(value)) {
-              words(message, [exists, value, ...(zh ? ["自己的卡片上删除", "在这里加为模型"]
-                : ["remove it from its own card", "add it here as a model"])], [rule, oldChoice]);
+            } else if (ask.endsWith("-move")) {
+              words(message, [exists, value, ...move], [rule, oldChoice]);
             } else {
-              words(message, [exists, value], [rule, oldChoice, zh ? "在这里加为模型" : "add it here as a model"]);
+              words(message, [exists, value], [rule, oldChoice, ...move]);
             }
           }
         }
@@ -49843,12 +49845,18 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(settingsPostCount === 1, "the settings were not sent for validation");
         checkRefusals();
       } else if (ask === "settings-fix-models-remove") {
+        const checkRemoveRefusal = message => {
+          for (const part of ["compatible", "fast", ...(zh ? ["使用它的连接", "请先删除它们"] : ["use its connection", "Remove them first"])])
+            check(message.includes(part), "the removal refusal lacks " + part + ": " + message);
+          check(!message.includes(zh ? "给它们单独的连接" : "give them their own connection"),
+            "the removal refusal suggests giving models their own connection: " + message);
+        };
         await button(run("T.remove"), row("compatible")).click();
         check(run("!!S.providers.compatible"), "a card its rows use was removed");
-        const said = run('settingsProblems.join(" ")');
-        for (const word of zh ? ["compatible", "fast", "连接"] : ["compatible", "fast", "connection"]) check(said.includes(word), "the refusal lacks " + word + ": " + said);
+        checkRemoveRefusal(run('settingsProblems.join(" ")'));
         const error = ids["#remove-error-compatible"];
-        check(error && !error.hidden && error.textContent.includes("fast") && row("compatible").contains(error), "the refusal is not at the Remove pressed");
+        check(error && !error.hidden && row("compatible").contains(error), "the refusal is not at the Remove pressed");
+        checkRemoveRefusal(error.textContent);
         check(document.activeElement === button(run("T.remove"), row("compatible")), "the Remove refused is not focused");
         run('S.lanes.a.providers = ["claude-fast"]; renderSettings([])');
         await button(run("T.remove"), row("claude-fast")).click();
@@ -49859,8 +49867,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         await button(run("T.remove"), row("compatible")).click();
         check(run("!S.providers.compatible"), "the card was not removed once no row used it");
         settingsPostReply = given.connectionRemoved; await run("saveSettings()");
-        const server = run('settingsProblems.join(" ")');
-        check(server.includes("fast") && server.includes("compatible") && (!zh || !server.includes("cannot be removed")), "the server's refusal: " + server);
+        checkRemoveRefusal(run('settingsProblems.join(" ")'));
       } else if (ask === "settings-fix-models-outside") {
         check(run("SETTINGS_LOCKED") && same(rows("compatible"), ["compatible", "fast"]) && same(rows("claude"), ["claude", "claude-fast"]), "the cards and rows differ outside");
         noConnectionControls(panel());
@@ -52886,8 +52893,11 @@ else if (ask === "task-steps")'''))
     def test_a_standalone_provider_name_tells_how_to_remove_it_and_add_it_as_a_model(self):
         self.run_settings_fix_scenario("models-name-move")
 
-    def test_a_model_elsewhere_and_a_card_with_other_models_get_different_name_refusals(self):
+    def test_a_model_on_another_card_gets_the_taken_name_refusal_without_move_advice(self):
         self.run_settings_fix_scenario("models-name-elsewhere")
+
+    def test_a_card_with_other_models_gets_the_taken_name_refusal_without_move_advice(self):
+        self.run_settings_fix_scenario("models-name-with-rows")
 
     def test_a_repeated_pending_name_says_it_is_already_used_on_the_page(self):
         self.run_settings_fix_scenario("models-name-pending")

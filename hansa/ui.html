@@ -919,11 +919,11 @@ Object.assign(T, ZH ? {
   nameRule:"只能用小写字母、数字和 '-'，最多 32 个字符，以字母或数字开头，且不能与已有的服务商重名。", invalidModel:"模型名称不能为空或重复。",
   providerNameTaken:name => `已有名为“${name}”的服务商。`,
   providerNameOnCard:name => `“${name}”已是这张卡片下的模型。`,
-  providerNameMove:"要在这张卡片下使用它，请先在它自己的卡片上删除它，再在这里加为模型。",
+  providerNameMove:message => `${message}要在这张卡片下使用它，请先在它自己的卡片上删除它，再在这里加为模型。`,
   providerNameUsedHere:name => `名称“${name}”在此页面上已使用。`,
   providerUsedByCoordinator:name => `不能移除 ${name}：协调员正在使用它。请先为协调员选择另一家服务商。`,
   providerUsedByLanes:(name, lanes) => `不能移除 ${name}：工作线 ${lanes} 正在使用它。工作线由协调员更换服务商，请先让协调员将这些工作线移到另一家服务商。`,
-  providerUsedByModels:(name, rows) => `不能移除 ${name}：${rows} 使用它的连接。请先删除它们，或给它们单独的连接。`,
+  providerUsedByModels:(name, rows) => `不能移除 ${name}：${rows} 使用它的连接。请先删除它们。`,
   models:"模型", addModel:"加一个模型",
   defaultMinutes:n => `留空使用默认值 ${n} 分钟。`, defaultTokens:n => `留空使用默认值 ${n} token。`,
   compactIdleWarning:"警告：空闲压缩阈值大于或等于工作压缩阈值，空闲时不会触发压缩。",
@@ -1020,11 +1020,11 @@ Object.assign(T, ZH ? {
   nameRule:"Use lowercase letters, digits and '-': at most 32 characters, starting with a letter or digit, and not the name of a provider already here.", invalidModel:"Enter a unique, non-empty model name.",
   providerNameTaken:name => `There is already a provider named “${name}”.`,
   providerNameOnCard:name => `“${name}” is already a model of this card.`,
-  providerNameMove:"To use it on this card, remove it from its own card, then add it here as a model.",
+  providerNameMove:message => `${message} To use it on this card, remove it from its own card, then add it here as a model.`,
   providerNameUsedHere:name => `The name “${name}” is already used on this page.`,
   providerUsedByCoordinator:name => `Cannot remove ${name}: the coordinator uses it. Choose another provider for the coordinator first.`,
   providerUsedByLanes:(name, lanes) => `Cannot remove ${name}: lanes ${lanes} use it. The coordinator moves lanes to another provider; ask the coordinator to do that first.`,
-  providerUsedByModels:(name, rows) => `Cannot remove ${name}: ${rows} use its connection. Remove them first, or give them their own connection.`,
+  providerUsedByModels:(name, rows) => `Cannot remove ${name}: ${rows} use its connection. Remove them first.`,
   models:"Models", addModel:"Add a model",
   defaultMinutes:n => `Blank uses the default, ${n} minutes.`, defaultTokens:n => `Blank uses the default, ${n} tokens.`,
   compactIdleWarning:"Warning: the idle compaction threshold is at or above the working threshold, so compaction will not happen when idle.",
@@ -3082,7 +3082,7 @@ function providerNameProblem(name, card = "", taken = []) {
   if (card) {
     const owner = connectionCard(name);
     if (owner === card) return T.providerNameOnCard(name);
-    if (owner === name) return T.providerNameTaken(name) + " " + T.providerNameMove;
+    if (owner === name && !connectionUsers(name).length) return T.providerNameMove(T.providerNameTaken(name));
   }
   return T.providerNameTaken(name);
 }
