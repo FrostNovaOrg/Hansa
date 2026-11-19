@@ -35,6 +35,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - Task ids are `t` and digits; other spellings are refused unread. Commands on a replaced task name its last follow-up.
 - `hansa retry` keeps the turn ceiling and refuses, without `--fresh`, a change holding a known key.
 - `hansa show` marks a requested cancel and lists a task's options and each try's start.
+- Pictures a worker or verifier saves for you stay with the task after the run ends.
+  `hansa show` lists the pictures and where to find them.
 - A finished verification's next step fits its verdict; `hansa wait` gives the verdict.
 - `hansa ask` alone lists open to-dos in full; `--closed` lists closed ones with outcomes.
 - `hansa goal reopen` and `hansa goal tie`; `goal done` lists open work; `goal show` lists newest first.
@@ -134,6 +136,9 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   `/work`, `/out`, `/tmp` and `/dev/shm`. Timeouts keep output and files; teardown finishes before commit.
   `hansa bench off` cancels hand-ins; failures leave task handling running. Valid artifacts return if others are rejected.
   `hansa bench status` explains holds; `hansa serve` prints a bench failure reason only when it changes.
+- `hansa bench rebuild` keeps the downloaded system image and reuses a good copy from this machine's Lima cache
+  when one is there, saving another 338 MB download. Each build checks the image against the recipe's SHA-512 checksum.
+  The command reports a failed download in one plain sentence.
 
 ### Merging and checks
 
@@ -290,6 +295,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - [The desk guide](docs/desk.md#opening-the-page-from-outside-the-machine) explains sign-in proxy precautions and how either the browser or proxy supplies the page key.
 - English and Chinese views show the pipeline, active lanes, waiting decisions and searchable tasks.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.
+- The page shows pictures left by workers and verifiers in the task's details and at its verification step.
+  Click a picture to enlarge it. Each of a goal's task chains shows how many pictures it has.
 - On phones, Status tables scroll sideways inside their own boxes with readable columns; the page itself stays within the screen.
 - Header tabs stay in one scrolling row; at phone width the mark stays visible and the desk name is hidden.
 - The header links to Hansa's repository on GitHub.
@@ -363,6 +370,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - A successful `hansa ping` or page check clears shared usage rests across desks for the same configured model; another model frees only that provider.
 - With no ready alternative for waiting work, `hansa serve` checks long usage rests with reset times every `cool_minutes`. Success ends the rest; another limit prevents checking the next rest. `hansa status` and `hansa explain provider` say which applies.
 - Providers rejecting their configured model with 400 or 404 rest until a check passes or the principal changes their model or saves a key on the page. Tasks move on without a try; the coordinator hears once. Server errors remain outages.
+- When a provider's safety check flags a request in a run hansa started, the run now ends with an error.
+  This replaces the automatic switch to another model.
 - When a timed rest holds tasks, the coordinator hears once with the provider, reason, end time and waiting tasks; `hansa wait` shows the reason.
 - Use Claude's login or compatible providers, with per-provider models, effort and ordered lane
   selection. Known keys are redacted from published text and logs.
@@ -412,6 +421,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - `hansa up` starts a coordinator on a desk that never had one, including with tasks added from a shell.
   It resumes the coordinator's own conversation by session id, or starts a new one when none remains, and says which;
   older records still continue the folder's latest conversation until its id is recorded.
+- For a coordinator session in the Claude desktop app, `hansa up` replaces the tmux restart attempt with a message
+  naming the app and telling you to reopen the session there.
 - When the coordinator fails to start, `hansa up` reports its last output and the command to run by hand;
   a failed resume also gives the command for a new conversation. Only starts ending within their first minute
   leave the pane's last screen on disk.
@@ -440,6 +451,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - `hansa help TOPIC` prints the docs' links as the topic or file to read.
 - The Chinese README links to Simplified Chinese guides for getting started, concepts,
   how a desk is run and push services. Tests keep each guide's headings and code blocks in step with English.
+- The maintainers' suggestions on models and effort for the coordinator, workers and verifiers are in the new guide,
+  [Choosing models](docs/models.md) ([Chinese](docs/zh-CN/models.md)).
 - The [backup instructions](docs/desk.md#backing-up-and-moving-a-desk) keep goals and decisions.
 
 ### Codex, a provider of its own kind
