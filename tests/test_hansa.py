@@ -7636,6 +7636,16 @@ def save():'''))
         env = run.worker_env(self.desk, "t0001", "a", s["lanes"]["a"], "claude", s["providers"]["claude"], tmp)
         self.assertEqual(env["HANSA_PICTURES_DIR"], str(folder))
 
+    def test_worker_and_verifier_instructions_match_picture_formats_and_limits(self):
+        from hansa import pictures, run
+        mib = str(pictures.LIMIT / (1024 * 1024)).removesuffix(".0")
+        for role, prompt in (("worker", run.PROTOCOL), ("verifier", run.VERIFY_PROTOCOL)):
+            with self.subTest(role=role):
+                self.assertIn(f"`{pictures.ENV}`", prompt)
+                for kind in sorted(set(pictures.EXTENSIONS.values())):
+                    self.assertRegex(prompt.lower(), rf"\b{kind}\b")
+                self.assertIn(f"up to {pictures.MOST} per run and {mib} MiB each", prompt)
+
     def test_pictures_are_kept_with_the_task_under_safe_names(self):
         tmp, folder = self.picture_run()
         files = {"Shot one!.PNG": self.PNG, "page.jpeg": self.JPEG, "c.webp": self.WEBP,

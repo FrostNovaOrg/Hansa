@@ -303,6 +303,11 @@ on branch task/{tid}, which was made for this task.
   say in the report what you saw; if you could not, say why.
 - When you change what a page or a command shows, say in the report what it showed before and
   what it shows now, for the case you changed.
+- For visible changes (page, screen, printed document, chart, command output), save pictures in `HANSA_PICTURES_DIR`.
+  Use PNG, JPEG or WebP, up to 8 per run and 2 MiB each. Name each for what it shows.
+  Where applicable, save one at desktop width, one at phone width and one per language.
+  Keep keys, tokens, passwords and people's private data out of every picture.
+  The principal checks them on the page without reading code. Changes nobody sees need no pictures.
 - When the task says to leave something as it is, or not to do something yet, leave it, even where
   a change looks better, and name it in the report.
 - End with a short report: what you changed, how you checked it, and anything left undone.
@@ -338,6 +343,11 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
   base commit the task names: `git show <base>:path`).
 - A later command cannot stop a background process an earlier one started (kill is refused):
   stop background work within the command that started it, or wait for it there.
+- For visible changes, take your own pictures of what you saw and save them in `HANSA_PICTURES_DIR`.
+  Use PNG, JPEG or WebP, up to 8 per run and 2 MiB each. Keep private data and credentials out.
+- Before the verdict line, give `Not looked at:` its own line after a blank line or a heading for a short list.
+  In plain words, say what you did not see or try that someone might assume you did (width, language, browser,
+  state, page opened from outside). If there is nothing to list, write `Not looked at: nothing I know of`.
 {long}- Stop or wait for any background work you started before you write your report: your last
   message is taken as your report.
 - Nobody will wake you later or answer questions: wait for your own work before you report.
@@ -7006,6 +7016,7 @@ truncation notices. Artifacts appear automatically under broker-chosen names in 
 temporary folder. Edit source on the Mac and report Linux-specific limits. Guest
 state is deleted after every run. The command prints a request ID; wait for its
 ID.reply in HANSA_BENCH_DIR, then read the report it names there.
+Copy a screenshot the bench returns into `HANSA_PICTURES_DIR` to keep it with the task.
 """
 
 

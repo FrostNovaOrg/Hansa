@@ -109,12 +109,15 @@ hansa web
 > 看看工作线 a，用已经配置好的服务商。设置一条有用的检查命令，并列出下载依赖需要访问的主机。先试运行工作线，再做一处小改进，要能测试。审查并检查结果，必要时另做核验，确认站得住后合并。不要发布。
 
 如果是空项目，可以让它写一个 Python 函数和 unittest 测试。
-协调员会设置检查命令，例如 `hansa lane set a check "python3 -m unittest discover"`，并用 `hansa lane set a network HOST ...` 设置下载所需的主机。默认的网络名单是空的，要逐个列出所需的软件包仓库或下载主机，见[工作线的网络名单（英文）](../sandbox.md#a-lanes-network-list)。
+协调员会设置检查命令（例如 `hansa lane set a check "python3 -m unittest discover"`），并用 `hansa lane set a network HOST ...` [逐个列出下载所需的主机（英文）](../sandbox.md#a-lanes-network-list)。网络名单起初是空的。
 
-`hansa lane try a` 会在工作线的沙箱里运行准备步骤和检查。确认它通过了，并且 `hansa explain server` 显示服务的沙箱探测结果为 `hansa serve tried srt` 和 `it ran`。工作智能体自己的沙箱探测也必须通过。
-如果没有 srt，准备步骤和检查会显示 **could not run**，表示机器的运行环境有问题，任务本身还没有失败。如果配置好的准备步骤无法运行，工作智能体就不会启动。把工具装到服务能通过 `PATH` 找到的位置，重启服务，合并前再检查一次（`hansa merge ID --recheck`）。
+`hansa lane try a` 会在沙箱里运行准备步骤和检查。确认它通过了，并且 `hansa explain server` 显示 `hansa serve tried srt` 和 `it ran`。工作智能体自己的沙箱探测也必须通过。如果没有 srt，准备步骤和检查会显示 **could not run**，表示机器的运行环境有问题。准备步骤无法运行时，工作智能体会等待。把工具装到服务能通过 `PATH` 找到的位置，重启服务，合并前再检查一次（`hansa merge ID --recheck`）。
 
 在网页的 **状态** 里查看进展。协调员会读 `hansa show ID` 和 `hansa diff ID`；工作智能体的改动由 hansa 提交并检查。任务经过审查、合并进工作线的基础分支后，就算完成。
+
+### 同意发布前
+
+在网页的**状态**里打开任务，[看过报告、图片、核验结论和没试过的内容](principles.md#10-工作都有记录负责人不必读代码)再同意发布。
 
 ## 通过 SSH 使用
 
