@@ -351,6 +351,7 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - On the page (**Settings, Providers**) a connection is filled in once and holds several models, each a row with
   its own name, effort, Ping and Remove, added with **Add a model**. To move a provider set up separately, remove it
   from its own card and add it as a model on the destination card.
+- On **Settings, Providers**, a taken name now gets a message at the field where it was typed, replacing the full name rule. It says that a provider named NAME is already here, NAME is already a model of this card or the name is already used on this page. If the provider has its own card and no other models, the message also says to remove it there and add it here as a model.
 - Entries on one connection (the same login as for shared usage rests) rest together when it is out of credit,
   loses its login or has its key rejected; one alert, or one line to the coordinator, names them all. A top-up,
   a good ping or a new key for the connection brings them all back. An unknown model still rests only its own entry.
