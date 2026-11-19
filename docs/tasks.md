@@ -293,8 +293,12 @@ lane, or waits for one.
   rest/top-up times, with no key, endpoint, path, model name or error text in clear.
   Workers, setups and checks cannot read that folder. If the file is missing, unreadable or damaged,
   each desk uses its own rests as before.
-- **A refusal is not a limit.** A provider that refuses one task (its content filter) does not rest: that
-  task alone moves to the lane's next provider. hansa's runs (workers, verifiers, their continuations and
+- **A safety stop is for a person.** A run its provider's safety check stops ends `blocked`: hansa tries
+  nothing else, the provider does not rest, and hansa opens a to-do for the principal. What the run wrote,
+  its changes (as patches git can apply) and its conversation record go to `.hansa/blocked/<id>/`, which the
+  coordinator's session and workers cannot read; no branch or other ref of the lane's repository keeps the
+  run's commits. Those commits stay in git's object store, named by nothing, until git's own clean-up removes
+  them: hansa does not prune it, as other lanes write to the same store at the same time. hansa's runs (workers, verifiers, their continuations and
   `hansa ping`) never change model when the provider's safety check flags a request: Claude Code's switch to
   another model is off (`switchModelsOnFlag: false`, `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`), so the
   flagged run ends with an error instead of finishing on another model.
@@ -1120,6 +1124,7 @@ say so.
 | `merged` | merged into the lane's base branch |
 | `cancelled` | stopped or closed on request |
 | `replaced` | a follow-up task took its place |
+| `blocked` | its provider's safety check stopped the run: it is over, nothing tries it again, its output is set aside where this session does not read, and a to-do is open for the principal |
 
 A process hansa cannot look at is not taken as ended: only a lookup that says there is no such process (`ESRCH`), or a start time that reads differently from the one hansa saved, counts as gone. `EPERM`, `EACCES`, `EIO` and other errors leave the run as it is. A task an earlier server left `starting` fails after five minutes if hansa still cannot read the process list, as before; its lane then takes no other task until a look that works finds no process of that run. `hansa status` says why on the lane's line, and a queued task waiting for that lane says the same.
 

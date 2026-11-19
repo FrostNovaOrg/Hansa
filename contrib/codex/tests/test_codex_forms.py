@@ -140,10 +140,10 @@ class OtherForms(unittest.TestCase):
                 kind, net, run = read(text)
                 self.assertEqual((kind, net), ("", "the provider was overloaded (HTTP 529)"))
 
-    def test_content_filter_is_a_refusal_not_a_drop(self):
+    def test_content_filter_is_a_safety_stop_not_a_drop(self):
         kind, net, run = read("stream disconnected before completion: Incomplete response returned, reason: "
                               "content_filter")
-        self.assertEqual(kind, "refused")
+        self.assertTrue(hansa_run.safety_stopped(run))  # hansa asks this first: the run ends blocked
         self.assertEqual(run["stop_reason"], "content_filter")
         self.assertNotIn("Connection dropped", run["result"])
 
@@ -199,9 +199,9 @@ class Runs(Scratch):
         self.assertNotIn("Reconnecting", run["result"])
         self.assertEqual(hansa_run.network_reason(run, self.err), DROPPED)
 
-    def test_refusal_run(self):
+    def test_safety_stop_run(self):
         run = self.failed_run("content_filter.jsonl")
-        self.assertEqual(hansa_run.unusable_reason(run, self.err)[0], "refused")
+        self.assertTrue(hansa_run.safety_stopped(run))
 
     def test_strict_config_failure(self):
         for fixture, said in (("strict_config.jsonl", "unknown configuration field `approvals_reviewer`"),
