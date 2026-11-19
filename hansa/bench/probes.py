@@ -63,6 +63,10 @@ e.update(dns=dns(), external=connected(('1.1.1.1', 80)))
 Path('/out/evidence.txt').write_bytes(b'bench artifact\\n')
 print(json.dumps(e))
 '''
+# Match a font that can render 国, 國, あ and 한.
+CJK_FONT = '''fonts = run('fc-list', ':charset=56fd 570b 3042 d55c', 'family')
+print(json.dumps(dict(glyphs=bool(fonts.strip()))))
+'''
 ACCOUNT = '''e = dict(line.split(' ', 1) for line in run('/usr/sbin/sshd', '-T', '-C', 'user=bench,host=localhost,addr=127.0.0.1').splitlines())
 account = pwd.getpwnam('bench')
 e['unprivileged'] = account.pw_uid != 0 and run('id', '-G', 'bench').split() == [str(account.pw_gid)]
@@ -153,7 +157,7 @@ CAPS = {
 def fixtures():
     """Runner wraps source in python3 -I; admin scopes use limactl shell, never SSH."""
     table = dict(sandbox=('submission', SANDBOX), account=('root', ACCOUNT), disk_limit=('submission', DISK_LIMIT),
-                 **{'edge-control': ('root', EDGE_CONTROL)},
+                 **{'cjk-font': ('bench', CJK_FONT), 'edge-control': ('root', EDGE_CONTROL)},
                  inspect=('root', INSPECT), **{n + '-edge': (n, EDGE) for n in ('root', 'bench')})
     table.update({'descendant-' + mode: ('submission', DESCENDANT + ('' if mode == 'normal' else 'signal.pause()\n'))
                   for mode in ('normal', 'timeout', 'disconnect', 'gateway-death')})
@@ -189,6 +193,7 @@ def firewall(text, uid):
 EXPECTED = {
     'edge-control': dict(host=True, lan=True),
     'disk_limit': dict(shared=True, enospc=True),
+    'cjk-font': dict(glyphs=True),
     'sandbox': dict(fresh=True, http=200, browser=0, pty=True, tmux=True, interfaces=['lo'],
                     readonly=True, credentials=True, nproc=[256, 256], dns=False, external=False),
     'account': dict.fromkeys(('permittty allowtcpforwarding allowstreamlocalforwarding allowagentforwarding '

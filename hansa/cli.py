@@ -718,8 +718,21 @@ def _model_note(lane: str | None) -> None:
 
 
 def cmd_status(a):
-    st = views.status(Desk.find(a.desk))
+    desk = Desk.find(a.desk)
+    st = views.status(desk)
     print(json.dumps(st, ensure_ascii=False, indent=1) if a.json else views.status_text(st))
+    if a.json:
+        return
+    bench = desk.settings()["bench"]
+    if not isinstance(bench, dict) or not bench.get("enabled"):
+        return
+    from .bench.manage import recipe_problem
+    try:
+        problem = recipe_problem(bench)
+    except (KeyError, OSError):
+        return  # The optional bench has its own status command for errors.
+    if problem:
+        print("bench: on, not in use: " + problem)
 
 
 def cmd_desks(a):

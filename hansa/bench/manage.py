@@ -25,14 +25,22 @@ def recipe_hash():
     return hashlib.sha256(b"".join(p.name.encode() + b"\0" + p.read_bytes() for p in files)).hexdigest()
 
 
+def recipe_problem(bench):
+    if bench["build"] == "ready" and bench["recipe"] != recipe_hash():
+        return ("the recipe changed since the bench was built. "
+                "Run hansa bench off, hansa bench rebuild, hansa bench selftest, then hansa bench on.")
+    return ""
+
+
 def acceptance_problem(bench):
     """CLI and serve share the gate; an upgrade cannot reuse stale isolation evidence."""
+    if problem := recipe_problem(bench):
+        return problem
     from .selftest import complete
     accepted = bench["acceptance"] or {}
     if (bench["build"] != "ready" or bench["generation"] < 1
             or accepted.get("status") != "passed" or not complete(accepted)
-            or accepted.get("generation") != bench["generation"]
-            or bench["recipe"] != recipe_hash()):
+            or accepted.get("generation") != bench["generation"]):
         return "bench needs a passing selftest for the current build"
     return ""
 
@@ -125,7 +133,9 @@ def command(a):
                         raise
                 elif action == "selftest":
                     from .selftest import run
-                    if bench["enabled"] or bench["build"] != "ready" or bench["recipe"] != recipe_hash():
+                    if problem := recipe_problem(bench):
+                        raise ValueError(problem)
+                    if bench["enabled"] or bench["build"] != "ready":
                         raise ValueError("selftest requires a disabled, current ready build")
                     bench["acceptance"] = dict(generation=bench["generation"], status="incomplete")
                     save(desk, bench, action)  # Invalidate any earlier pass before touching the VM.

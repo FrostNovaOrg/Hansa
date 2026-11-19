@@ -123,6 +123,42 @@ class BenchArchiveTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe archive path"):
             a._name("artifacts/" + bad)
 
+    def test_delivered_artifacts_keep_only_allowed_extensions(self):
+        cases = {
+            "shot.png": ".png", "SHOT.PNG": ".png", "page.html": ".html",
+            "photo.JPG": ".jpg", "photo.jpeg": ".jpeg", "photo.webp": ".webp",
+            "readme.txt": ".txt", "run.log": ".log", "data.json": ".json",
+            "rows.csv": ".csv", "manual.pdf": ".pdf",
+            "run.sh": "", "a.exe": "", "x.svg": "", "noext": "", ".png": "", "a.png.sh": "",
+            "nested/shot..PNG": ".png", "nested.png/noext": "", ".hidden.webp": ".webp",
+            "x" * 296 + ".PNG": ".png",  # A PAX name longer than a filesystem component.
+        }
+
+        def deliver(*names):
+            stream = io.BytesIO()
+            entries = [("result.json", b"{}"), ("stdout", b""), ("stderr", b"")]
+            entries.extend(("artifacts/" + name, name.encode()) for name in names)
+            with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                for path, data in entries:
+                    a._add(archive, path, io.BytesIO(data), len(data))
+            length = stream.tell()
+            stream.seek(0)
+            return a.deliver(stream, length, self.channel, 0)["artifacts"]
+
+        delivered = deliver(*cases)
+        self.assertEqual(delivered.keys(), cases.keys())
+        for name, suffix in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(Path(delivered[name]).suffix, suffix)
+                self.assertRegex(delivered[name].removesuffix(suffix), r"\Abench-[0-9a-f]{32}\Z")
+                self.assertEqual((self.worker / delivered[name]).read_bytes(), name.encode())
+
+        before = set(self.worker.iterdir())
+        for name in ("/absolute.png", "../escape.png", "nested/../escape.png", "line\nbreak.png"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "unsafe archive path"):
+                deliver(name)
+            self.assertEqual(set(self.worker.iterdir()), before)
+
     def test_unsupported_directory_skips_only_its_subtree(self):
         (self.out / "good").write_bytes(b"evidence")
         bad = os.fsdecode(b"dir-\xff")  # Faked as above: macOS refuses to create the name.

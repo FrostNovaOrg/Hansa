@@ -16,6 +16,7 @@ MAX_BYTES, MAX_ENTRIES, MAX_NAME = 256 * MIB, 50_000, 4096
 MAX_METADATA, HEADER_BYTES = 32 * MIB, 64 * 1024
 MAX_ARCHIVE = MAX_BYTES + MAX_METADATA
 FILE_BYTES, RUN_BYTES, OUTPUT_BYTES, ARTIFACT_ENTRIES = 16 * MIB, 64 * MIB, MIB, 1000
+ARTIFACT_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".txt", ".log", ".json", ".html", ".csv", ".pdf"})
 
 
 def safe_open(directory, name, flags=os.O_RDONLY):
@@ -207,6 +208,9 @@ def deliver(source, length, channel, used):
                     result["rejected"] = True
                     continue
                 target = "bench-" + uuid.uuid4().hex
+                extension = os.path.splitext(member.name)[1].lower()
+                if extension in ARTIFACT_EXTENSIONS:
+                    target += extension
                 with os.fdopen(safe_open(channel.directory, target, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "wb") as out:
                     created.append(target)
                     _copy(archive.extractfile(member), out, member.size)

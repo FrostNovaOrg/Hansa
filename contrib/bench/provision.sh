@@ -12,7 +12,7 @@ if [ ! -s submission.pub ]; then
     exit 1
 fi
 export DEBIAN_FRONTEND=noninteractive
-packages='bubblewrap nftables tmux chromium fonts-dejavu-core git python3 openssh-server e2fsprogs'
+packages='bubblewrap nftables tmux chromium fontconfig fonts-dejavu-core fonts-wqy-microhei git python3 openssh-server e2fsprogs'
 apt-get update
 apt-get install -y --no-install-recommends $packages
 python3 -I -c 'import sys; sys.exit(sys.version_info[:2] != (3, 13))'

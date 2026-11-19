@@ -85,6 +85,35 @@ class BenchSelftestTest(unittest.TestCase):
         settings = self.desk.settings(); settings['bench']['enabled'] = True; self.desk.save_settings(settings)
         with self.assertRaisesRegex(SystemExit, 'disabled'): self.command('selftest')
 
+    def test_cjk_font_is_required_on_both_boots(self):
+        def runner(machine):
+            scope, source = probes.fixtures()['cjk-font']
+            self.assertEqual(scope, 'bench')
+            original = machine._call.side_effect
+            listing = Mock(side_effect=[b'WenQuanYi Micro Hei\n', b''])
+
+            def call(command, deadline, **streams):
+                if source not in command:
+                    return original(command, deadline, **streams)
+                self.assertEqual(command[command.index('-u') + 1], 'bench')
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    exec_probe(source, subprocess=SimpleNamespace(check_output=listing, DEVNULL=-1))
+                return Mock(stdout=output.getvalue().encode())
+
+            machine._call.side_effect = call
+            report = selftest.run(machine)
+            self.assertEqual(listing.call_count, 2)
+            for invoked in listing.call_args_list:
+                self.assertEqual(invoked.args[0], ('fc-list', ':charset=56fd 570b 3042 d55c', 'family'))
+            return report
+
+        with patch.object(self, 'runner', side_effect=runner):
+            report = self.acceptance()
+        self.assertEqual(report['results']['1/cjk-font']['checks'], dict(glyphs='passed'))
+        self.assertEqual(report['results']['2/cjk-font']['checks'], dict(glyphs='failed'))
+        self.assertEqual(report['status'], 'failed')
+        self.assertFalse(selftest.complete(report))
+
     def test_selftest_uses_shipped_code(self):
         from hansa.bench.guest import _header
         def connect(source, target, deadline):
