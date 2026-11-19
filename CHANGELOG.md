@@ -349,8 +349,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   with its own model and effort, so one connection serves several models. `hansa explain provider` shows whose
   connection an entry uses. See [the desk guide](docs/desk.md).
 - On the page (**Settings, Providers**) a connection is filled in once and holds several models, each a row with
-  its own name, effort, Ping and Remove, added with **Add a model**. An existing provider can be joined to another's
-  connection with **Uses the connection of**, and a row can be given a connection of its own again with **Own connection**.
+  its own name, effort, Ping and Remove, added with **Add a model**. To move a provider set up separately, remove it
+  from its own card and add it as a model on the destination card.
 - Entries on one connection (the same login as for shared usage rests) rest together when it is out of credit,
   loses its login or has its key rejected; one alert, or one line to the coordinator, names them all. A top-up,
   a good ping or a new key for the connection brings them all back. An unknown model still rests only its own entry.

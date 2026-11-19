@@ -919,14 +919,12 @@ Object.assign(T, ZH ? {
   nameRule:"只能用小写字母、数字和 '-'，最多 32 个字符，以字母或数字开头，且不能与已有的服务商重名。", invalidModel:"模型名称不能为空或重复。",
   providerNameTaken:name => `已有名为“${name}”的服务商。`,
   providerNameOnCard:name => `“${name}”已是这张卡片下的模型。`,
-  providerNameCanJoin:(name, card, choice) => `“${name}”已有自己的服务商卡片。请在“${name}”的卡片上将“${choice}”选为“${card}”，然后保存。`,
+  providerNameMove:"要在这张卡片下使用它，请先在它自己的卡片上删除它，再在这里加为模型。",
   providerNameUsedHere:name => `名称“${name}”在此页面上已使用。`,
   providerUsedByCoordinator:name => `不能移除 ${name}：协调员正在使用它。请先为协调员选择另一家服务商。`,
   providerUsedByLanes:(name, lanes) => `不能移除 ${name}：工作线 ${lanes} 正在使用它。工作线由协调员更换服务商，请先让协调员将这些工作线移到另一家服务商。`,
   providerUsedByModels:(name, rows) => `不能移除 ${name}：${rows} 使用它的连接。请先删除它们，或给它们单独的连接。`,
-  models:"模型", addModel:"加一个模型", joinConnection:"使用哪家的连接", ownConnectionChoice:"自己的", ownConnection:"单独连接",
-  joinKeyNote:"选另一家后，这家成为那张卡片下的一个模型，保存时它自己的连接信息从设置中移除。之前为它保存的密钥仍留在工作台的 secrets 中，但不再使用；要删除它，请先点“清除密钥”再选择。",
-  splitKeyNote:"这家现在有了自己的连接（从原卡片复制），但密钥没有复制：请为它重新保存密钥。",
+  models:"模型", addModel:"加一个模型",
   defaultMinutes:n => `留空使用默认值 ${n} 分钟。`, defaultTokens:n => `留空使用默认值 ${n} token。`,
   compactIdleWarning:"警告：空闲压缩阈值大于或等于工作压缩阈值，空闲时不会触发压缩。",
   historyKeySet:"已设置（密钥不显示）", historyKeyCleared:"已清除（密钥不显示）",
@@ -1022,14 +1020,12 @@ Object.assign(T, ZH ? {
   nameRule:"Use lowercase letters, digits and '-': at most 32 characters, starting with a letter or digit, and not the name of a provider already here.", invalidModel:"Enter a unique, non-empty model name.",
   providerNameTaken:name => `There is already a provider named “${name}”.`,
   providerNameOnCard:name => `“${name}” is already a model of this card.`,
-  providerNameCanJoin:(name, card, choice) => `“${name}” is already a provider with its own card. On the “${name}” card, set “${choice}” to “${card}”, then save.`,
+  providerNameMove:"To use it on this card, remove it from its own card, then add it here as a model.",
   providerNameUsedHere:name => `The name “${name}” is already used on this page.`,
   providerUsedByCoordinator:name => `Cannot remove ${name}: the coordinator uses it. Choose another provider for the coordinator first.`,
   providerUsedByLanes:(name, lanes) => `Cannot remove ${name}: lanes ${lanes} use it. The coordinator moves lanes to another provider; ask the coordinator to do that first.`,
   providerUsedByModels:(name, rows) => `Cannot remove ${name}: ${rows} use its connection. Remove them first, or give them their own connection.`,
-  models:"Models", addModel:"Add a model", joinConnection:"Uses the connection of", ownConnectionChoice:"its own", ownConnection:"Own connection",
-  joinKeyNote:"Choosing another provider makes this one a model under it: on save its own connection fields leave the settings. A key saved for it before stays in the desk's secrets and is no longer used; Clear key before choosing removes it.",
-  splitKeyNote:"This provider now has a connection of its own, copied from its card; the key is not copied: save the key for it again.",
+  models:"Models", addModel:"Add a model",
   defaultMinutes:n => `Blank uses the default, ${n} minutes.`, defaultTokens:n => `Blank uses the default, ${n} tokens.`,
   compactIdleWarning:"Warning: the idle compaction threshold is at or above the working threshold, so compaction will not happen when idle.",
   historyKeySet:"set (values withheld)", historyKeyCleared:"cleared (values withheld)",
@@ -2299,12 +2295,19 @@ function settingsReplyProblems(reply) {
     workers_may_not_read:T.protectedPaths, releases_without_asking:T.autoRelease, release_direct:T.directPolicy,
     release_mailboxes:T.mailboxTitle, settings_from_outside:T.outsideTitle, release_forbidden:T.forbiddenWords, release_forbidden_except:T.exceptionsTitle,
     alert_language:T.alertLanguage, alert:T.alertCommandTitle, coordinator_alert:T.alertTiming,
-    kind:T.kind, model:T.model, effort:T.effort, base_url:T.endpoint, config_dir:T.loginDir, connection:T.joinConnection,
+    kind:T.kind, model:T.model, effort:T.effort, base_url:T.endpoint, config_dir:T.loginDir, connection:T.connection,
     codex_path:T.codexPath, codex_home:T.codexHome, ca_file:T.caFile, web_search:T.webSearch, disabled_features:T.codexFeatures,
     ...Object.fromEntries(Object.entries(MINUTES_LABELS).map(([k, v]) => [k, T[v]]))};
   const prices = {in:T.in, out:T.out, cache_read:T.cacheRead, cache_write:T.cacheWrite, cache_write_1h:T.cacheWrite1h};
   return (reply.problems || [T.problems]).map((problem, i) => {
-    const detail = reply.problem_details?.[i], v = detail?.values || {};
+    let detail = reply.problem_details?.[i];
+    // A settings load reports a hand-edited broken connection as text. Saves include its rule and values.
+    if (!detail) {
+      const match = /^provider ([a-z0-9-]+): connection names ([a-z0-9-]+), which (is not a provider entry$|uses )/.exec(problem);
+      if (match) detail = {code:"field_rule", values:{field:"connection", provider:match[1], connection:match[2],
+        reason:match[3] === "uses " ? "connection_chain" : "connection_missing"}};
+    }
+    const v = detail?.values || {};
     const messages = {
       field_rule:() => {
         // A card's entry removed while rows use its connection: the words of the page's own refusal of that Remove.
@@ -2352,7 +2355,8 @@ Object.assign(T, ZH ? {
     command:"必须是一行 shell 命令，最多 {max} 个字符。", minutes:"各项必须是整数分钟。", provider_required:"至少需要一家模型服务商。",
     name:"请使用小写字母、数字和 '-'。", object:"必须是一组设置。", key:"密钥单独保存，请使用本页的密钥栏。",
     unknown_fields:"未知字段：{fields}。", kind:"请选择订阅或兼容接口。", required:"必须填写。", effort:"必须是 {choices} 之一，或留空使用默认值。",
-    https:"必须以 https:// 开头。", path:"必须是以 / 开头的完整路径。", provider:"未找到这家服务商。"},
+    https:"必须以 https:// 开头。", path:"必须是以 / 开头的完整路径。", provider:"未找到这家服务商。",
+    connection_missing:"没有名为“{connection}”的服务商。", connection_chain:"“{connection}”使用其他服务商的连接。请指定有自己连接的服务商。"},
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}：未找到 ${provider}。`,
   // A Codex field's refusal (desk.py, codex_problems): its rule, the paths it names, and a folder spelled two ways.
   validationCodex:{path:() => "必须是以 / 开头的完整路径，不能含控制字符。",
@@ -2388,7 +2392,8 @@ Object.assign(T, ZH ? {
     command:"Must be one shell command line, up to {max} characters.", minutes:"Each value must be a whole number of minutes.", provider_required:"At least one provider is needed.",
     name:"Use lowercase letters, digits and '-'.", object:"Must be a settings object.", key:"Keys are saved separately; use the key box on this page.",
     unknown_fields:"Unknown fields: {fields}.", kind:"Choose Subscription or Compatible endpoint.", required:"Required.", effort:"Must be one of {choices}, or blank for the default.",
-    https:"Must start with https://.", path:"Must be a full path starting with /.", provider:"Unknown provider."},
+    https:"Must start with https://.", path:"Must be a full path starting with /.", provider:"Unknown provider.",
+    connection_missing:"No provider named “{connection}”.", connection_chain:"“{connection}” uses another provider's connection. Name a provider with its own connection."},
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}: unknown provider ${provider}.`,
   validationCodex:{path:() => "must be a full path starting with /, without control characters.",
     web_search:() => "must be disabled, cached or live.",
@@ -2602,11 +2607,11 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   if (!r.alert_language_saved) S.alert_language = ZH ? "zh" : "en";
   if (!keepKeys) { KEY_DRAFTS = {}; PUSH_DRAFTS = {}; PUSH_NEW = emptyPush(); }
   newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
-  PROVIDER_ASIDE = {}; MODEL_DRAFTS = {}; JOIN_ASIDE = {}; SPLIT_KEY = new Set(); REMOVE_PROBLEMS = {};
+  PROVIDER_ASIDE = {}; MODEL_DRAFTS = {}; REMOVE_PROBLEMS = {};
   settingsBaseline = settingText(S);
   forbiddenSeenEntries = new Set(S.release_forbidden || []);
   settingsEpoch++;
-  renderSettings(problems && problems.length ? problems : r.problems);
+  renderSettings(problems?.length ? problems : r.problems ? settingsReplyProblems(r) : []);
 }
 async function saveSettings() {
   if (settingsSaving || !S || SETTINGS_LOCKED) return;
@@ -2642,7 +2647,7 @@ async function saveSettings() {
       const draft = JSON.parse(JSON.stringify(S)), base = JSON.parse(settingsBaseline), seen = forbiddenSeenEntries;
       const keys = [...new Set([...Object.keys(base), ...Object.keys(draft)])].sort();
       const changed = keys.filter(k => settingText(draft[k]) !== settingText(base[k]));
-      const providerName = newProviderName, priceName = newPriceName, modelDrafts = MODEL_DRAFTS, joinAside = JOIN_ASIDE, splitKey = SPLIT_KEY;
+      const providerName = newProviderName, priceName = newPriceName, modelDrafts = MODEL_DRAFTS;
       await loadSettings(undefined, true);
       const elsewhere = [...new Set([...Object.keys(base), ...Object.keys(S)])].sort()
         .filter(k => settingText(S[k]) !== settingText(base[k]));
@@ -2650,7 +2655,7 @@ async function saveSettings() {
         if (Object.hasOwn(draft, k)) S[k] = draft[k]; else delete S[k];
       }
       forbiddenSeenEntries = new Set([...forbiddenSeenEntries, ...seen]);
-      newProviderName = providerName; newPriceName = priceName; MODEL_DRAFTS = modelDrafts; JOIN_ASIDE = joinAside; SPLIT_KEY = splitKey;
+      newProviderName = providerName; newPriceName = priceName; MODEL_DRAFTS = modelDrafts;
       const groupNames = keys => [...new Set(keys.map(k => SETTINGS_GROUPS.find(([name]) =>
         (GROUP_KEYS[name] || []).includes(k) || name === "lanes" && ["lanes", "concurrency", "disk_floor"].includes(k))?.[1]
         || T.general))].join(", ") || T.none;
@@ -3077,7 +3082,7 @@ function providerNameProblem(name, card = "", taken = []) {
   if (card) {
     const owner = connectionCard(name);
     if (owner === card) return T.providerNameOnCard(name);
-    if (owner === name && !connectionUsers(name).length) return T.providerNameCanJoin(name, card, T.joinConnection);
+    if (owner === name) return T.providerNameTaken(name) + " " + T.providerNameMove;
   }
   return T.providerNameTaken(name);
 }
@@ -3095,11 +3100,9 @@ function settingsNameProblem(kind) {
 /* ---------- one card per connection, a row per model on it ----------
    An entry with `connection` names the entry whose connection (kind, endpoint, login folder, Codex fields, key) it
    runs with, and holds only model, effort and note (desk.py provider_entry). The page shows each entry without one as a
-   card, and every entry naming it as a row in that card's Models; an entry whose connection names no such card is
-   shown as a card of its own, with its choice. */
-let MODEL_DRAFTS = {}, JOIN_ASIDE = {}, SPLIT_KEY = new Set(), REMOVE_PROBLEMS = {};
-const CONNECTION_OWN = ["model", "effort", "note"];
-const connectionFields = () => ["kind", "base_url", "config_dir", ...kindFields("codex")];
+   card, and every entry naming it as a row in that card's Models. An entry with an invalid connection reference is
+   shown on its own card. */
+let MODEL_DRAFTS = {}, REMOVE_PROBLEMS = {};
 function connectionCard(name) {
   const c = S.providers[name]?.connection;
   return typeof c === "string" && c !== name && S.providers[c] && typeof S.providers[c] === "object"
@@ -3108,27 +3111,6 @@ function connectionCard(name) {
 const connectionUsers = name => Object.keys(S.providers).filter(n => n !== name && S.providers[n]?.connection === name);
 const entryKind = name => S.providers[connectionCard(name)]?.kind;
 const modelDraftPending = () => Object.values(MODEL_DRAFTS).some(d => d.name || d.model || d.effort);
-/* Join a card to another: it keeps its name, model, effort and note; its connection fields wait aside until the next
-   load (giving it its own connection again before saving brings them back) and leave the settings on save. */
-function joinConnection(name, card) {
-  const p = S.providers[name];
-  if (!card) return giveOwnConnection(name);
-  const aside = {};
-  for (const key of Object.keys(p)) if (!CONNECTION_OWN.includes(key) && key !== "connection") aside[key] = p[key];
-  if (!("connection" in p)) JOIN_ASIDE[name] = aside;
-  S.providers[name] = {connection:card, ...Object.fromEntries(CONNECTION_OWN.filter(k => k in p).map(k => [k, p[k]]))};
-  delete KEY_DRAFTS[name]; delete PROVIDER_ASIDE[name]; delete MODEL_DRAFTS[name]; SPLIT_KEY.delete(name);
-}
-/* A row given a connection of its own: a card with a copy of its card's connection fields (or its own, set aside when
-   it was joined on this page); a key is not copied. */
-function giveOwnConnection(name) {
-  const p = S.providers[name], card = connectionCard(name);
-  const from = card !== name ? S.providers[card] : {kind:"compatible", base_url:""};
-  const own = JOIN_ASIDE[name] || Object.fromEntries(connectionFields().filter(k => k in from).map(k => [k, JSON.parse(JSON.stringify(from[k]))]));
-  S.providers[name] = {...own, ...Object.fromEntries(CONNECTION_OWN.filter(k => k in p).map(k => [k, p[k]]))};
-  delete JOIN_ASIDE[name];
-  if (S.providers[name].kind === "compatible") SPLIT_KEY.add(name);
-}
 /* The new rows typed under the cards, checked as Add provider checks its name; none is added unless all are good. */
 function pendingModelProblems(taken = []) {
   const problems = [];
@@ -3233,19 +3215,17 @@ function removeProvider(name) {
   REMOVE_PROBLEMS = problems.length ? {[name]:problems} : {};
   if (problems.length) { renderSettings(problems); return focusProblem(problems[0]); }
   delete S.providers[name]; delete KEY_DRAFTS[name]; delete PROVIDER_ASIDE[name]; delete MODEL_DRAFTS[name];
-  delete JOIN_ASIDE[name]; SPLIT_KEY.delete(name); renderSettings([]);
+  renderSettings([]);
 }
 /* A row of a card's Models: an entry's name, its model and effort, its own Ping, rests and Remove. */
-function modelRow(name, card) {
+function modelRow(name) {
   const p = S.providers[name];
   const remove = h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove);
   const removeError = h("p", {class:"field-error", id:"remove-error-" + name, hidden:true});
   fieldRecords.push({control:remove, error:removeError, noteId:"", group:"providers", matches:p => (REMOVE_PROBLEMS[name] || []).includes(p)});
   return h("div", {class:"model-row", "data-model-row":name},
     h("div", {class:"model-row-head"}, h("strong", {}, name),
-      h("div", {class:"card-actions"},
-        name !== card ? h("button", {"data-own-connection":"", onclick:() => { giveOwnConnection(name); renderSettings(); }}, T.ownConnection) : null,
-        checkButton(name, null), remove)),
+      h("div", {class:"card-actions"}, checkButton(name, null), remove)),
     removeError,
     CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
       h("button", {disabled:SETTINGS_LOCKED, onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
@@ -3271,8 +3251,7 @@ function addModelRow(card) {
     }}, T.addModel)),
     h("p", {class:"field-note", id:id + "-note"}, T.nameRule), error);
 }
-/* A card: the connection once (kind and its fields, the key, the Codex fields), the choice of joining another card when
-   no row names it, then its Models. */
+/* A card: the connection once (kind and its fields, the key, the Codex fields), then its Models. */
 function providerCard(name, p) {
   const saveKey = h("button", {disabled:SETTINGS_LOCKED || !(KEY_DRAFTS[name] || "").trim(),
     title:SETTINGS_LOCKED ? T.outsideReadOnly : null, onclick:() => saveProviderKey(name)}, T.saveKey);
@@ -3280,20 +3259,13 @@ function providerCard(name, p) {
     "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = SETTINGS_LOCKED || !e.target.value.trim(); refreshSettingsState(); }});
   const kindSel = pick(p, "kind", PROVIDER_KINDS, PROVIDER_KINDS.map(kindLabel)), was = p.kind;
   kindSel.addEventListener("change", e => { setProviderKind(name, p, was, e.target.value); renderSettings(); });
-  const joined = "connection" in p, users = connectionUsers(name);
-  const others = Object.keys(S.providers).filter(n => n !== name && S.providers[n] && typeof S.providers[n] === "object" && !("connection" in S.providers[n]));
-  const current = joined ? String(p.connection ?? "") : "";
-  const choices = ["", ...others, ...(current && !others.includes(current) ? [current] : [])];
-  const join = h("select", {"data-join-connection":"", onchange:e => { joinConnection(name, e.target.value); renderSettings(); }},
-    choices.map(c => h("option", {value:c, selected:c === current, disabled:!!c && !others.includes(c)}, c || T.ownConnectionChoice)));
-  join._settingMeta = {group:"providers", matches:problem => problem.startsWith(`provider ${name}: connection`)};
-  const rows = [name, ...users];
+  const hasConnection = "connection" in p;
+  const rows = [name, ...connectionUsers(name)];
   return h("div", {class:"lane", "data-provider-card":name},
-    h("div", {class:"card-head"}, h("strong", {}, name), joined ? null : h("span", {class:"tag"}, kindLabel(p.kind))),
+    h("div", {class:"card-head"}, h("strong", {}, name), hasConnection ? null : h("span", {class:"tag"}, kindLabel(p.kind))),
     OLD_CODEX_PROVIDERS.includes(name) && p.kind === "compatible"
       ? h("p", {class:"field-note", "data-old-codex":""}, T.oldCodex(name, T.codex)) : null,
-    SPLIT_KEY.has(name) && p.kind === "compatible" && !KEYS[name] ? h("p", {class:"warn", "data-split-key":""}, T.splitKeyNote) : null,
-    fields(...(joined ? [] : [field(T.kind, kindSel), ...(p.kind === "compatible"
+    hasConnection ? null : fields(field(T.kind, kindSel), ...(p.kind === "compatible"
         ? [field(T.endpoint, bind(p, "base_url")), field(T.key,
             h("div", {}, h("div", {class:"row"}, h("span", {class:"key-status " + (KEYS[name] ? "ok" : "warn")}, icon(KEYS[name] ? "check" : "security"), KEYS[name] ? T.keySet : T.keyMissing), passwordControl(keyBox)),
               h("div", {class:"row", style:"margin-top:8px"},
@@ -3302,11 +3274,9 @@ function providerCard(name, p) {
             h("div", {}, T.keySeparate, h("p", {}, T.keyUse), h("p", {class:"warn"}, T.keyTransport)), "", true,
             {control:keyBox, group:"providers", matches:() => settingsFailure === "key" && keyProblemProvider === name})]
         : p.kind === "codex" ? codexFields(name, p)
-        : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])]),
-      users.length || !(others.length || joined) ? null
-        : field(T.joinConnection, join, !joined && p.kind === "compatible" ? T.joinKeyNote : "", "", true)),
+        : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])),
     h("div", {class:"model-list", "data-models":name}, h("h3", {}, T.models),
-      ...rows.map(row => modelRow(row, name)), joined ? null : addModelRow(name)));
+      ...rows.map(modelRow), hasConnection ? null : addModelRow(name)));
 }
 function lockSettingsFields(panel) {
   if (!SETTINGS_LOCKED) return;
