@@ -996,7 +996,8 @@ def unheard_text(desk: Desk, items: list, t: float, zh: bool = False) -> str:
 
 
 TASK_STATE_ZH = {"done": "已完成", "failed": "失败了", "cancelled": "已取消", "merging": "在合并", "merged": "已合并",
-                 "queued": "在排队", "running": "在运行", "checking": "在检查"}
+                 "queued": "在排队", "running": "在运行", "checking": "在检查",
+                 "blocked": "被服务商的安全检查拦下了"}
 # What waits for the coordinator, by the subject a follower posts it under (notify._item's key), when not a task's
 WHAT_ZH = {"server": "hansa serve 已停止", "srt": "hansa serve 无法运行 srt", "disk": "磁盘空间有变化",
            "memory": "可用内存有变化", "credit": "服务商余额不足", "model": "服务商不认识模型", "start": "工作线无法开始任务",

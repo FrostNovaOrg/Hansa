@@ -217,7 +217,7 @@ def task_line(desk: Desk, m: dict) -> str:
             head += f" · last merge stopped: {merge_failure_reason(mr).splitlines()[0]}"
         if m.get("verify_after_error"):
             head += f" · verification could not be queued: {m['verify_after_error']}"
-    elif st in ("failed", "cancelled") and m.get("error") and m.get("error") != st:
+    elif st in ("failed", "cancelled", "blocked") and m.get("error") and m.get("error") != st:
         head += f" ({str(m['error'])[:200]})"
     elif st == "merging":
         from .views import merge_check_waits_for

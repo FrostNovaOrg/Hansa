@@ -264,6 +264,7 @@ def summaries(desk: Desk, tasks: list | None = None, *, all_: bool = False, evid
             "review": sum(m["state"] in ("done", "merging") for m in work),
             "merged": sum(m["state"] == "merged" for m in work),
             "failed": sum(m["state"] == "failed" for m in work),
+            **({"blocked": n} if (n := sum(m["state"] == "blocked" for m in work)) else {}),
             "todos": sum(a.get("goal") == g["id"] and not a.get("closed") for a in asks)}})
         if evidence:
             chains = [task_evidence(desk, m, context) for m in work]
@@ -282,7 +283,8 @@ def summary_text(g: dict) -> str:
     return (f"{g['id']} {one_line(g['title'])}: {c['active']} queued/running, {c['review']} waiting for review, "
             f"{c['merged']} merged, "
             + (f"{c['missing']} merged missing evidence, {c['released']} released, " if "missing" in c else "")
-            + f"{c['failed']} failed, {c['todos']} open to-dos"
+            + f"{c['failed']} failed, " + (f"{c['blocked']} blocked, " if c.get("blocked") else "")
+            + f"{c['todos']} open to-dos"
             + (f"; {g['state']}: {one_line(g['outcome'])}" if g["state"] != "open" else ""))
 
 

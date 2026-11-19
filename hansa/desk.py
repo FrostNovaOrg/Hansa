@@ -3689,10 +3689,11 @@ class Desk:
         ready_news(self)
 
     def add_ask(self, text: str, by: str = "", session: dict | None = None,
-                why: str = "", holds: bool = False, goal: str = "") -> int:
+                why: str = "", holds: bool = False, goal: str = "", task: str = "") -> int:
         """session: the Claude Code session that asked, which hears provider readiness news (hansa/notify.py).
         It records the providers ready then; any other name (one not set up yet too) was not, and a to-do
-        naming it may be done once it is (views.ask_note)."""
+        naming it may be done once it is (views.ask_note). task: the blocked task or verification hansa opened it
+        for (run.open_blocked_todo)."""
         from .views import ready_now
         if not text.strip():
             raise SystemExit("hansa: a to-do needs what the principal must do; an empty one was not recorded")
@@ -3705,7 +3706,7 @@ class Desk:
             n = max((a["id"] for a in asks), default=0) + 1
             asks.append({"id": n, "text": self.redact(text.strip()), "by": by, "created": now(), "closed": None,
                          "answer": "", "why": self.redact(why.strip()), "holds": holds, "ready_then": ready_then,
-                         **({"goal": goal} if goal else {}),
+                         **({"goal": goal} if goal else {}), **({"task": task} if task else {}),
                          **({"session": session} if session else {})})
             write_json(self.asks_path, asks)
         self.event("ask", id=n, by=by)

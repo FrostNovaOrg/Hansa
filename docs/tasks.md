@@ -1104,6 +1104,7 @@ say so.
 | `merged` | merged into the lane's base branch |
 | `cancelled` | stopped or closed on request |
 | `replaced` | a follow-up task took its place |
+| `blocked` | its provider's safety check stopped the run: it is over, nothing tries it again, its output is set aside where this session does not read, and a to-do is open for the principal |
 
 A process hansa cannot look at is not taken as ended: only a lookup that says there is no such process (`ESRCH`), or a start time that reads differently from the one hansa saved, counts as gone. `EPERM`, `EACCES`, `EIO` and other errors leave the run as it is. A task an earlier server left `starting` fails after five minutes if hansa still cannot read the process list, as before; its lane then takes no other task until a look that works finds no process of that run. `hansa status` says why on the lane's line, and a queued task waiting for that lane says the same.
 

@@ -78,6 +78,7 @@ def pending(m: dict, tasks: list) -> list:
             state = "elsewhere"
         why = ("closed without merging" if t.get("error") == "closed without merging" else
                {"failed": "failed without merging", "cancelled": "cancelled without merging",
+                "blocked": "is blocked (its provider's safety check stopped it; a to-do is open for the principal)",
                 "missing": "task or retry record is missing", "replaced": "replacement is missing",
                 "elsewhere": "merged into another repository or base branch"}.get(state, ""))
         out.append({"task": tid, "latest": latest, "state": state, "why": why, "held": bool(why)})
@@ -88,7 +89,8 @@ def waiting(m: dict, dependencies: list) -> str:
     parts = []
     for dep in dependencies:
         name = dep["latest"] + (f" (latest follow-up to {dep['task']})" if dep["latest"] != dep["task"] else "")
-        parts.append(f"HELD: {name} {dep['why']}; hansa cancel {m['id']}, or hansa retry {dep['latest']}"
+        parts.append(f"HELD: {name} {dep['why']}; hansa cancel {m['id']}"
+                     + ("" if dep["state"] == "blocked" else f", or hansa retry {dep['latest']}")
                      if dep["held"] else f"waiting for {name} to be merged into {m['after_target']['base']}")
     return "; ".join(parts)
 

@@ -16,7 +16,7 @@ from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shar
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError, old_codex_provider)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
-                  codex_login, credit_text, model_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+                  codex_login, credit_text, model_text, provider_problem, providers_waited_for, quota_probe_text, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
 
 STATES = {
@@ -32,6 +32,8 @@ STATES = {
     "merged": "merged into the lane's base branch",
     "cancelled": "stopped or closed on request",
     "replaced": "a follow-up task took its place",
+    "blocked": ("its provider's safety check stopped the run: it is over, nothing tries it again, its output is set "
+                "aside where this session does not read, and a to-do is open for the principal"),
 }
 
 
@@ -879,7 +881,7 @@ def timeline_data(lanes, tasks: list, events: list, releases: list, tries: dict,
         started, ended = m.get("started"), m.get("finished")
         if ended is not None or m.get("state") == "running":
             result = "running" if ended is None else (m.get("verdict") if kind == "verification" else "") or (
-                "failed" if m.get("state") in ("failed", "queued", "cancelled") else "done")
+                "failed" if m.get("state") in ("failed", "queued", "cancelled", "blocked") else "done")
             keep(kind, lane, started, ended, [tid], result, result in ("failed", "does not hold"))
         check = m.get("check") or {}
         check_start = m.get("check_started")
@@ -975,7 +977,7 @@ def timeline_data(lanes, tasks: list, events: list, releases: list, tries: dict,
         item = {**item, "ended": ts, "end": min(ts, at), "running": False,
                 "minutes": round((ts - item["started"]) / 60, 2), "result": result,
                 "could_not_run": cannot, "failed": event.get("ok") is False or
-                result in ("failed", "cancelled", "queued", "stopped", "does not hold")}
+                result in ("failed", "cancelled", "queued", "stopped", "does not hold", "blocked")}
         paired.append(item)
     paired.extend(recovered(item) for item in active.values())
     # Prefer event boundaries to records (whose finished/state may later describe cancellation or merging).
@@ -1198,6 +1200,9 @@ def status(desk: Desk) -> dict:
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
                    for m in failed][-5:],
         "failed_count": len(failed),
+        # blocked runs (run.block): held for the principal, with hansa's sentence only
+        "blocked": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", ""),
+                     "todo": (m.get("blocked") or {}).get("todo")} for m in tasks if m["state"] == "blocked"][-5:],
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
         # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
         "releases": release.page_rows(desk, s, tasks),
@@ -1395,6 +1400,9 @@ def status_text(st: dict) -> str:
                 + (f"; holds conflict markers in {', '.join(m['markers'])}: cannot be merged"
                    if m.get("markers") else "")
                 + "]" for m in st["review"]]
+    if st.get("blocked"):
+        out.append("blocked (latest; a to-do is open for the principal for each):")
+        out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["blocked"]]
     if st["failed"]:
         out.append("failed (latest):")
         out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["failed"]]
@@ -1755,12 +1763,6 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     if m.get("verify_after_error"):
         out.append(f"verification could not be queued: {m['verify_after_error']}")
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
-    inherited = m.get("inherited_refusals", {})
-    order = desk.settings()["lanes"].get(m.get("lane"), {}).get("providers", [])
-    skipped = sorted(set(order) & refused_by({"inherited_refusals": inherited}, order))
-    if skipped:
-        out.append("providers left out: " + ", ".join(f"{p} (refused {inherited[p]})" for p in skipped)
-                   + "; no follow-up try used")
     if m.get("error"):
         if page_messages is not None:
             page_messages[str(len(out))] = message("task_error", f"error: {m['error']}", reason=describe(m["error"]))
@@ -2014,8 +2016,6 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                       if str(m.get("error", "")).startswith("could not start:")
                       else f"hansa retry {tid} \"what to change\" (or --fresh to start over)"),
            "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
-    if m["state"] == "failed" and (m.get("attempts") or [{}])[-1].get("kind") == "refused":
-        nxt["failed"] += f' · hansa retry {tid} "..." --lane L to choose another lane on the same repository and base'
     if v and v["verdict"] in ("does not hold", "unsure") and m["state"] == "done":
         nxt["done"] = _verification_next(m, desk.meta(v["task"]))
     newest = (v.get("latest") or v) if v else None
@@ -2053,6 +2053,10 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
             nxt = {}
     if cancelling:
         nxt["running"] = f"wait for it to stop: {notify.wait_step(desk, tid, heard)}"
+    if m["state"] == "blocked":  # run.block: held for the principal
+        todo = (m.get("blocked") or {}).get("todo")
+        nxt = {"blocked": f"wait for the principal: to-do #{todo} (hansa ask) is theirs" if todo else
+               "wait for the principal: hansa opens a to-do for them"}
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
     if page_messages is not None:

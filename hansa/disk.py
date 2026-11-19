@@ -51,7 +51,7 @@ TRIM_EVERY = 86400  # seconds between hansa serve's trims
 # what a task's processes wrote that hansa keeps in its folder: the worker's errors, the setup's, check's and merge
 # check's output, the merge setup's
 TRIMMED = ("run.err", "setup.log", "check.log", "merge-check.log", "merge-setup.log", "merge-check.err")
-ENDED = ("merged", "cancelled", "failed", "replaced")
+ENDED = ("merged", "cancelled", "failed", "replaced", "blocked")
 
 
 def floor(s: dict) -> float:

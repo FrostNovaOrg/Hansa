@@ -271,9 +271,16 @@ RESET_DAY = re.compile(r"\b(" + "|".join(MONTHS) + r")[a-z]*\.?\s+(\d{1,2})(?:,\
                        r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)" + _ZONE, re.I)
 #   a clock time: Claude Code's "You've hit your session limit · resets 3pm (Europe/Berlin)", "resets at 15:00"
 RESET_CLOCK = re.compile(r"\bresets?\s+(?:at\s+)?(\d{1,2})(?!\d)(?::(\d{2}))?\s*([ap]\.?m\.?)?" + _ZONE, re.I)
-# The provider would not answer this request (its content filter or a refusal). That
-# says nothing about other tasks, so the provider does not rest; the task moves on.
-REFUSED_STOPS = {"content_filter", "refusal"}
+# The provider's safety check stopped the run: the principal decided that such a run is for a person to handle, not
+# a failure to route around (safety_stopped, block). Its stop_reason, from Claude Code on any provider or from the
+# Codex converter (contrib/codex/shim),
+SAFETY_STOPS = {"content_filter", "refusal"}
+# or, on an error, Claude Code's notice for such a stop at the start of its result (after an optional "API Error: "),
+# matched by its fixed words, not by the model's name
+SAFETY_NOTICE = re.compile(r"(?:API Error: )?(?:[^\n]{1,200}?'s safeguards flagged this (?:message|session)"
+                           r"|[^\n]{1,200}? can't help with this\. Start a new session to continue\."
+                           r"|Claude Code is unable to respond to this request, which appears to violate our Usage Policy"
+                           r"|Output blocked by content filtering policy)")
 BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
 RUN_TMP_VARS = ("TMPDIR", "CLAUDE_CODE_TMPDIR")  # hansa's for each run (make_worker_tmp, in_srt), not a lane's
 GIT_ID = {"GIT_AUTHOR_NAME": "hansa", "GIT_AUTHOR_EMAIL": "hansa@localhost",
@@ -1531,7 +1538,7 @@ def quota_probe_text(st: dict, s: dict) -> str:
 
 
 def providers_waited_for(desk: Desk, s: dict, tasks: list) -> dict:
-    """Queued tasks with no ready alternative, using their lanes, refusals and outage affinity."""
+    """Queued tasks with no ready alternative, using their lanes and outage affinity."""
     waiting = {}
     ready = {p for p in s["providers"] if not provider_problem(desk, s, p)}
     for m in tasks:
@@ -1540,7 +1547,7 @@ def providers_waited_for(desk: Desk, s: dict, tasks: list) -> dict:
         lanes = [m["lane"]] if m.get("lane") else s["lanes"]
         providers = {p for ln in lanes if ln in s["lanes"] and not work_lane_problem(s, ln,
                      verifying=m.get("kind") == "verify" and bool(m.get("lane")))
-                     for p in task_providers(s, ln, m) if p not in refused_by(m, task_providers(s, ln, m))}
+                     for p in task_providers(s, ln, m)}
         if not providers & ready:
             for p in providers:
                 waiting[p] = waiting.get(p, 0) + 1
@@ -1572,15 +1579,6 @@ def unreachable_text(st: dict) -> str:
     if check.get("at", 0) >= since:
         text += f"; last at {time.strftime('%H:%M', time.localtime(check['at']))}: {check['detail']}"
     return text
-
-
-def refused_by(m: dict, order: list | None = None) -> set:
-    """Skip this round's refusals and its ancestors'. If every lane provider refused earlier rounds, try
-    them again; this round's own refusals still stand. Inheritance prevents spending each follow-up on
-    the same content filter, and can go when providers no longer refuse individual requests."""
-    own = {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
-    inherited = set(m.get("inherited_refusals", {}))
-    return own if order is not None and inherited.issuperset(order) else own | inherited
 
 
 CODEX_ADAPTER = Path(__file__).resolve().parent.parent / "contrib" / "codex" / "bin" / "claude-or-codex"
@@ -3990,7 +3988,7 @@ def proc_cwd(pid) -> str:
     return next((x[1:] for x in r.stdout.splitlines() if x.startswith("n")), "")
 
 
-def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
+def sweep(desk: Desk, tid: str, *, run: dict | None = None, quiet: bool = False) -> list:
     """Stop what a task's processes left running once nothing of the task should run any more: a server or
     watcher that left the process group hansa stops, in a session of its own. Never hansa serve itself, nor
     the command doing this. First what hansa serve recorded below the task's runs while they ran (record_run):
@@ -4002,7 +4000,8 @@ def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
     also finds an unmarked process never observed below the run. Hansa's own processes and their descendants
     are excluded from this last look. `run` supplies that worktree and started time for a check; by default,
     the task's worker or verifier run. Never fall back to an earlier run's folder or time. The record is cleared.
-    What was stopped goes on the task (left_running) and in the event log."""
+    What was stopped goes on the task (left_running) and in the event log: with quiet (a blocked run's, block), only
+    their process ids, as a command line may hold the run's own text."""
     servers = {os.getpid()}
     try:
         servers.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
@@ -4063,11 +4062,11 @@ def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
         text = desk.redact(" ".join(args))
         return text if len(text) <= 120 else text[:58] + " ... " + text[-57:]
 
-    stopped = [{"pid": p, "command": command(args)}
+    stopped = [{"pid": p, "command": "" if quiet else command(args)}
                for p, args, s in in_groups + [x for x in found if not running(x[0], x[2])]]
     if stopped:
         desk.change(tid, lambda x: {"left_running": [*(x.get("left_running") or []), *stopped]})
-        desk.event("left_running_stopped", task=tid, processes=[f"{x['pid']} {x['command']}" for x in stopped])
+        desk.event("left_running_stopped", task=tid, processes=[f"{x['pid']} {x['command']}".strip() for x in stopped])
     return stopped
 
 
@@ -4090,6 +4089,9 @@ def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> di
         if not wgit(desk, wt, "status", "--porcelain"):
             return {}
         before = last_task_in(desk, wt, tid)
+        if (before or {}).get("state") == "blocked":  # what a blocked run left is never kept under a ref (block)
+            clean_worktree(desk, wt, "HEAD")
+            return {}
         ref = (before or {}).get("kept_ref") or (before or {}).get("scratch_ref")
         if ref and kept_under(desk, wt, ref):  # kept already, when hansa could not clear it then: cleared now
             clean_worktree(desk, wt, "HEAD")
@@ -4485,7 +4487,8 @@ def earlier_verifications(desk: Desk, meta: dict) -> list:
     except ValueError:
         return []
     out = [m for m in desk.tasks() if m.get("kind") == "verify" and m.get("parent") == meta["parent"]
-           and str(m.get("id") or "")[1:].isdigit() and int(m["id"][1:]) < own and m.get("session_id")]
+           and str(m.get("id") or "")[1:].isdigit() and int(m["id"][1:]) < own and m.get("session_id")
+           and m.get("state") != "blocked"]  # a blocked run's conversation is never gone on in (block)
     return sorted(out, key=lambda m: int(m["id"][1:]), reverse=True)
 
 
@@ -4515,6 +4518,8 @@ def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, mo
             return None
     else:
         earlier = [read_json(desk.tasks_dir / meta["parent"] / "meta.json", {}) or {}]
+    if earlier[0].get("state") == "blocked":  # never gone on in, nor forked (block)
+        return {"new": f"the earlier {what} is blocked: its provider's safety check stopped it"}
     if not verifying and earlier[0].get("kind") == "verify":
         return {"new": "the earlier task is a verification, whose conversation a worker never continues"}
     if not verifying and meta.get("fresh"):
@@ -4933,6 +4938,8 @@ def resume(desk: Desk, tid: str):
     lane, p = s["lanes"].get(lane_name), provider_entry(s, pname)
     raw = desk.state_dir / "runs" / tid
     run = read_json(raw / "run.json", {}) or {}
+    if safety_stopped(run):  # blocked (finish): never resumed
+        return None
     sid, tmp = own_session(desk, meta), meta.get("worker_tmp") or ""
     if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()) \
             or run.get("is_error") or run.get("subtype") != "success":
@@ -4982,6 +4989,8 @@ def wrap_up(desk: Desk, tid: str):
     meta = desk.meta(tid)
     raw = desk.state_dir / "runs" / tid
     run = read_json(raw / "run.json", {}) or {}  # the stopped run's answer, before the continuation's replaces it
+    if safety_stopped(run):  # blocked (finish): never continued
+        return None
     at_turns = not meta.get("timed_out") and run.get("subtype") == "error_max_turns"
     if not (meta.get("timed_out") or at_turns) or meta.get("wrap_up") or meta.get("cancel") \
             or meta.get("state") != "running" or meta.get("phase") in ("starting", "checking"):
@@ -5180,11 +5189,20 @@ def refusal_reasons(home: Path, sid: str) -> dict:
     return out
 
 
+def safety_stopped(run) -> bool:
+    """Whether the provider's safety check stopped this run, from its result (the one place that decides it; see
+    SAFETY_STOPS): asked before anything else reads a run's result, at every end (resume, wrap_up, finish)."""
+    if not isinstance(run, dict) or not run:
+        return False  # no result at all (killed, crashed): not this case
+    if run.get("stop_reason") in SAFETY_STOPS:
+        return True
+    said = run.get("result")
+    return run.get("is_error") is True and isinstance(said, str) and bool(SAFETY_NOTICE.match(said.strip()))
+
+
 def unusable_reason(run: dict, err: str, subscription: bool = False, *, codex: bool = False):
-    """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "model" | "refused" | "", words).
+    """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "model" | "", words).
     Codex's 401/403 and a subscription's expired OAuth token need a login rather than a new key."""
-    if run.get("stop_reason") in REFUSED_STOPS:
-        return "refused", f"refused the request ({run['stop_reason']})"
     status = run.get("api_error_status")
     text = f"{run.get('result') or ''} {err}" if (run.get("is_error") or not run) else ""
     if subscription and LOST_LOGIN.search(text):  # before the 401: no key brings a subscription back
@@ -5292,7 +5310,224 @@ def interrupted_restart(desk: Desk, wt: Path, meta: dict, fields: dict) -> dict:
             "source": "earlier task's commit" if meta.get("start_from") else "base", "why": "; ".join(reasons)}
 
 
+# A run the provider's safety check stopped (safety_stopped) ends blocked: for a person, never routed around. Nothing
+# is tried again, and neither its output nor the reason for the stop reaches the coordinator's session: what it wrote
+# goes to .hansa/blocked/<id>/ (BLOCKED_DIR), where only hansa reads, and hansa opens a to-do for the principal.
+BLOCKED_DIR = "blocked"
+BLOCKED_ERROR = ("stopped by its provider's safety check; hansa tried nothing else, set the run's output aside and "
+                 "opened a to-do for the principal")
+BLOCKED_REPORT = ("Stopped by the provider's safety check.\n"
+                  "hansa tried nothing else and set this run's output aside, where the coordinator's session does not "
+                  "read.\nA to-do is open for the principal, who decides what happens to this task.\n")
+BLOCKED_TODO = {"en": "{what}: its provider's safety check stopped it. hansa tried nothing else and set its output "
+                      "aside in .hansa/blocked/{id}/. Tell the coordinator what to do with the task.",
+                "zh": "{what}：服务商的安全检查停止了它。工作台没有再做别的尝试，把它的输出放在了 .hansa/blocked/{id}/。"
+                      "请告诉协调者如何处理这个任务。"}
+
+
+def blocked_folder(desk: Desk, tid: str) -> Path:
+    return desk.state_dir / BLOCKED_DIR / tid
+
+
+def _set_aside(desk: Desk, src: Path, dst, problems: list) -> None:
+    """Move src (a file or a folder) to dst. When it cannot be moved there (dst None: there is no folder for it), or
+    the copy a move to another disk makes would take the desk under its floor, it is removed instead; what happened
+    goes in problems, in one line each."""
+    if not os.path.lexists(src):
+        return
+    try:
+        if dst is None:
+            raise OSError(errno.ENOENT, "hansa has no folder to set it aside in")
+        dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.rename(src, dst)
+            return
+        except OSError as e:
+            if e.errno != errno.EXDEV:
+                raise
+        size = sum(f.stat().st_size for f in ([src] if src.is_file() else src.rglob("*")) if f.is_file()) \
+            if not src.is_symlink() else 0
+        if pictures.under_floor(desk, size):
+            raise OSError(errno.ENOSPC, "the desk's disk is under its floor of free space")
+        shutil.move(str(src), str(dst))
+    except OSError as e:
+        problems.append(f"{src.name} could not be set aside ({e.strerror or e}), so hansa removed it")
+        try:
+            if src.is_dir() and not src.is_symlink():
+                shutil.rmtree(src)
+            else:
+                src.unlink()
+        except OSError as e2:
+            problems.append(f"{src.name} could not be removed either ({e2.strerror or e2})")
+
+
+def _save_changes(desk: Desk, wt: Path, start: str, out: Path) -> None:
+    """Write what the worktree holds against commit `start` (the run's own commits and what it left, new files too)
+    to `out` as a patch git apply takes (--binary), with an index of its own and no ref, stash or commit made."""
+    with tempfile.TemporaryDirectory(prefix="hansa-index-") as t:
+        env = {"GIT_INDEX_FILE": os.path.join(t, "index")}
+        wgit(desk, wt, "read-tree", start, env=env)
+        new = [f for f in wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", env=env).split("\0") if f]
+        for i in range(0, len(new), 200):  # intent-to-add only: git stores none of their content
+            wgit(desk, wt, "add", "--intent-to-add", "--", *(f":(literal){f}" for f in new[i:i + 200]), env=env)
+        check_git_file(desk, wt)
+        e = {**without_session(os.environ), **GIT_ID, **env, "LC_ALL": "C"}
+        with open(out, "wb") as f:
+            os.fchmod(f.fileno(), 0o600)
+            r = subprocess.run(["git", "-c", "core.quotePath=false", *worktree_git_settings(), "diff", "--binary",
+                                "--no-ext-diff", "--no-textconv", start], cwd=str(wt), env=e, stdout=f,
+                               stderr=subprocess.PIPE, text=False)
+        if r.returncode:
+            raise RuntimeError(f"git diff failed: {r.stderr.decode('utf-8', 'replace').strip()[:300]}")
+
+
+def _clear_worktree(desk: Desk, wt: Path, branch: str, start: str) -> None:
+    """Put the worktree and its branch back to `start`, where the run began, with nothing left in it, and let git
+    forget the run's own commits (its branch's and HEAD's reflog entries no ref reaches any more)."""
+    check_head(desk, wt, branch)
+    wgit(desk, wt, "reset", "-q", "--hard", start)
+    wgit(desk, wt, "clean", "-fdq")
+    for ref in (f"refs/heads/{branch}", "HEAD"):
+        try:
+            wgit(desk, wt, "reflog", "expire", "--expire-unreachable=now", ref)
+        except GitFileChanged:
+            raise
+        except RuntimeError:
+            pass
+
+
+def block(desk: Desk, tid: str, returncode) -> dict:
+    """End a task's or a verification's run that its provider's safety check stopped (safety_stopped), as blocked:
+    its processes stopped; what it wrote, its changes (as a patch) and its conversation record set aside in
+    .hansa/blocked/<id>/; its worktree back to where the run began; no try, no other provider, no rest; hansa's
+    own words only on the record; a to-do for the principal (open_blocked_todo). Whatever cannot be set aside is
+    removed, and the run is blocked all the same."""
+    meta = desk.meta(tid)
+    folder = blocked_folder(desk, tid)
+    raw = desk.state_dir / "runs" / tid
+    problems = []
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(folder.parent, 0o700)
+    except OSError as e:
+        problems.append(f"the folder {folder} could not be made ({e.strerror or e}); what the run wrote was removed")
+        folder = None
+
+    def aside(src, name: str) -> None:
+        _set_aside(desk, Path(src), folder / name if folder is not None else None, problems)
+    # what it left running, then its own folders: the pictures before the temporary folder goes (remove_sandbox_tmp)
+    sweep(desk, tid, quiet=True)
+    if meta.get("worker_tmp"):
+        aside(pictures.folder(meta["worker_tmp"]), "pictures")
+    p = provider_entry(desk.settings(), meta.get("provider") or "")
+    home = config_home(desk, meta["provider"], p) if p else None
+    run = read_json(raw / "run.json", {}) or {}
+    for name in ("run.json", "run.err", CEILING_NOTES, "first-message.md"):
+        aside(raw / name, name)
+    for name in ("run.json", "run.err"):  # an earlier try's, published: this run went on from it
+        aside(desk.tasks_dir / tid / name, f"earlier-{name}")
+    (raw / "setup.log.done").unlink(missing_ok=True)
+    (raw / RESUME_ARGV).unlink(missing_ok=True)
+    remove_sandbox_tmp(desk, tid)
+    publish(desk, tid, "setup.log")  # the lane's setup's, from before the provider was asked
+    # its usage, for hansa cost, read before its record goes
+    sid = own_session(desk, meta)
+    try:
+        wu, resumed = meta.get("wrap_up") or {}, meta.get("resumed") or {}
+        before = forked_before(meta)
+        if wu or resumed:
+            part = wu or resumed
+            usage = add_usage(part.get("usage") or {}, continued_usage(
+                desk, tid, run, add_usage(before, part.get("usage") or {}), home, sid, part.get("rows", 0)))
+        else:
+            usage = run_usage(desk, tid, meta, run, home, sid)
+    except Exception:  # noqa: BLE001 - its usage is detail; the run is blocked all the same
+        usage = {}
+    # the conversation record of each session the run used, so that nothing can resume or fork it
+    if home is not None:
+        for s in dict.fromkeys(x for x in (meta.get("session_id"), meta.get("launch"), run.get("session_id"))
+                               if isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", x)):
+            for f in [*home.glob(f"projects/*/{s}.jsonl"), *home.glob(f"projects/*/{s}")]:
+                aside(f, f"conversation/{f.parent.name}/{f.name}")
+            aside(home / "progress" / f"{s}.json", f"conversation/progress-{s}.json")  # the Codex adapter's
+    # its changes: kept as a patch, the worktree back to where the run began
+    wt = Path(meta["worktree"]) if meta.get("worktree") else None
+    start = (meta.get("run_start") or {}).get("commit") or meta.get("start_from") or meta.get("base") or ""
+    if wt is not None and start:
+        try:
+            check_git_file(desk, wt, desk.settings()["lanes"].get(meta.get("lane"), {}).get("repo"))
+            if folder is not None:
+                try:
+                    _save_changes(desk, wt, start, folder / "changes.patch")
+                except (RuntimeError, OSError) as e:
+                    (folder / "changes.patch").unlink(missing_ok=True)
+                    problems.append(f"its changes could not be kept as a patch ({git_first_line(e)}), so hansa "
+                                    "removed them")
+            _clear_worktree(desk, wt, meta.get("branch") or f"task/{tid}", start)
+        except (RuntimeError, OSError) as e:
+            problems.append(f"its worktree could not be cleared ({git_first_line(e)}); the lane's next task removes "
+                            "what is left there")
+    note = "; ".join(problems)
+    fields = {"state": "blocked", "phase": "", "error": BLOCKED_ERROR, "finished": now(), "exit": returncode,
+              "pid": None, "pid_start": "", "usage": usage, "session_id": meta.get("session_id", ""),
+              "head": "", "commits": 0, "files": [], "stat": "",
+              "resumed": {k: v for k, v in (meta.get("resumed") or {}).items() if k != "left"} or None,
+              "blocked": {"reason": "safety", "action": "human_review", "provider": meta.get("provider", ""),
+                          "model": meta.get("model_asked", ""), "at": now(), "todo": None,
+                          **({"note": desk.redact(note)[:600]} if note else {})},
+              **({"verdict": ""} if meta.get("kind") == "verify" else {})}
+    try:
+        write_text(desk.tasks_dir / tid / "result.md", BLOCKED_REPORT)
+    except OSError:
+        pass
+    meta = desk.change(tid, lambda x: fields)
+    if meta.get("kind") == "verify" and meta.get("parent"):  # the task it verifies keeps its state, with no verdict
+        desk.change(meta["parent"], lambda x: {"verification_blocked": tid} if x.get("verify") == tid else None)
+    desk.event("task_finished", task=tid, state="blocked", provider=meta.get("provider"), error=BLOCKED_ERROR,
+               reason="safety", action="human_review")
+    if note:
+        desk.event("blocked_set_aside", task=tid, note=desk.redact(note)[:600])
+    open_blocked_todo(desk, tid)
+    return desk.meta(tid)
+
+
+def open_blocked_todo(desk: Desk, tid: str) -> None:
+    """Open the principal's to-do for a blocked task or verification, once (through Desk.add_ask, as hansa ask does):
+    in the alerts' language, naming it and where its output is, tied to its goal, holding. One that cannot be opened
+    now is opened at a later round of hansa serve (Dispatcher._tick)."""
+    m = desk.meta(tid)
+    b = m.get("blocked") or {}
+    if m.get("state") != "blocked" or b.get("todo"):
+        return
+    try:
+        was = next((a["id"] for a in desk.asks() if a.get("task") == tid), None)  # opened, but not recorded here
+        if was is None:
+            lang = "zh" if desk.settings().get("alert_language") == "zh" else "en"
+            title = " ".join(str(m.get("title") or "").split())[:120]
+            if m.get("kind") == "verify":
+                parent = desk.meta(m["parent"]) if m.get("parent") else {}
+                ptitle = " ".join(str(parent.get("title") or "").split())[:120]
+                what = (f"验证 {tid}（任务 {m.get('parent')}：{ptitle}）" if lang == "zh" else
+                        f"verification {tid} of task {m.get('parent')} ({ptitle})")
+            else:
+                what = f"任务 {tid}（{title}）" if lang == "zh" else f"task {tid} ({title})"
+            goal = m.get("goal") or ""
+            if goal:
+                from .goals import goal as find_goal
+                try:
+                    find_goal(desk, goal, open_only=True)
+                except SystemExit:
+                    goal = ""
+            was = desk.add_ask(BLOCKED_TODO[lang].format(what=what, id=tid), by="hansa", holds=True, goal=goal,
+                               task=tid)
+        desk.change(tid, lambda x: {"blocked": {**(x.get("blocked") or {}), "todo": was}})
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - opened at a later round
+        desk.event("blocked_todo_not_opened", task=tid, error=desk.redact(f"{type(e).__name__}: {e}")[:300])
+
+
 def finish(desk: Desk, tid: str, returncode) -> dict:
+    if safety_stopped(read_json(desk.state_dir / "runs" / tid / "run.json", {}) or {}):
+        return block(desk, tid, returncode)  # before anything else reads the result
     meta = desk.meta(tid)
     memory = oom_result(meta.get("oom_start"))
     d = desk.tasks_dir / tid
@@ -5319,7 +5554,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         and bool(str(run.get("result") or "").strip())
     # killed by the system once the lane's setup had finished, before the worker wrote its result; hansa's own stops
     # (a changed .git file, cancel, sandbox_failed, timed_out) keep their branches, which come first.
-    # Then the kill, before its stderr is read for the provider's quota, key, login or refusal (unusable_reason)
+    # Then the kill, before its stderr is read for the provider's quota, key or login (unusable_reason)
     killed = not run and set_up and returncode in KILLED_EXITS
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
     setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
@@ -5453,7 +5688,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields["setup_exit"] = int(setup.group(1))
     subscription = (provider_entry(desk.settings(), meta.get("provider")) or {}).get("kind") == "subscription"
     codex = (p or {}).get("kind") == "codex"
-    # what the continuation after the ceiling met (a limit, a dropped connection, a refusal) rests no provider and
+    # what the continuation after the ceiling met (a limit, a dropped connection) rests no provider and
     # queues nothing again: the task ends as one stopped at the ceiling
     kind, why = ("", "") if meta.get("cancel") or setup or changed or killed or wu else \
         unusable_reason(run, err, subscription, codex=codex)
@@ -5490,13 +5725,6 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     elif run.get("subtype") == "error_max_turns":
         turns = meta.get("max_turns") or desk.settings()["lanes"].get(meta.get("lane"), {}).get("max_turns", 300)
         state, error = "failed", f"stopped at the ceiling of {turns} turns: {CEILING}"
-    elif kind == "refused":
-        attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
-        order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])
-        left = [p for p in order if p not in refused_by({**meta, "attempts": attempts}, order)]
-        state = "queued" if left and tries_used(attempts) < TRIES else "failed"
-        error = f"{meta['provider']}: {why}; " + (
-            "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
     elif kind == "model":
         model = meta.get("model_asked") or (p or {}).get("model", "")
         # Only subscription providers use the task's --model; other kinds keep their own model.
@@ -7174,7 +7402,7 @@ class Dispatcher:
                 desk.event(kind, ts=at, task=m["id"], **fields)
 
         for m in self.tasks():
-            if m["state"] in ("done", "failed", "cancelled"):
+            if m["state"] in ("done", "failed", "cancelled", "blocked"):
                 check = m.get("check") or {}
                 if check:
                     missing(m, "task_checked", m.get("finished"),
@@ -7696,6 +7924,10 @@ class Dispatcher:
         with serve_step():
             if not self.ends_recovered:
                 self.recover_ends()
+        for m in self.tasks():  # a blocked run's to-do that could not be opened when it ended (open_blocked_todo)
+            with serve_step():
+                if m["state"] == "blocked" and not (m.get("blocked") or {}).get("todo"):
+                    open_blocked_todo(desk, m["id"])
         with serve_step():
             self.rests(s)
         with serve_step():
@@ -7828,8 +8060,7 @@ class Dispatcher:
                             or self.start_waits(ln, s, waits)):
                         continue
                     order = task_providers(s, ln, m)
-                    pname = next((p for p in order
-                                  if p not in refused_by(m, order) and not provider_problem(desk, s, p)), None)
+                    pname = next((p for p in order if not provider_problem(desk, s, p)), None)
                     if not pname:
                         continue
                     try:
@@ -8258,7 +8489,7 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
                 f"for {LOOK_LIMIT // 60} minutes)" if waiter else ""), lane=ln))
             continue
         order = task_providers(s, ln, m)
-        probs = {p: "refused this task" if p in refused_by(m, order) else lk["problems"][p] for p in order}
+        probs = {p: lk["problems"][p] for p in order}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
             running = sum(lane_occupied(x) for x in lk["tasks"])
@@ -8273,7 +8504,7 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
         providers = []
         for p, problem in probs.items():
             st = lk["provider_state"].get(p, {})
-            code = ({"refused this task": "refused", "not in settings": "missing_provider",
+            code = ({"not in settings": "missing_provider",
                      "no endpoint address": "no_endpoint", "no key": "no_key"}.get(problem)
                     or ("credit" if st.get("credit_since") else "model" if st.get("model_since")
                         else "rest" if st.get("cool_until", 0) > time.time()
