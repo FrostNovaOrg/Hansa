@@ -29,20 +29,39 @@ os.chmod(p, 0o700); shutil.chown(p, 'bench', 'bench'); os.sync()
 
 
 class LimaCalledProcessError(subprocess.CalledProcessError):
+    # step: the last "step: ..." marker line seen (None if none); tail: the redacted 64 KiB memory tail.
+    step, tail = None, ""
+
     def __str__(self):
         return super().__str__() + "\n" + self.stderr.decode("utf-8", errors="replace")
 
 
 class LimaTimeoutExpired(subprocess.TimeoutExpired):
+    step, tail = None, ""
+
     def __str__(self):
         return super().__str__() + "\n" + self.stderr.decode("utf-8", errors="replace")
+
+
+class _Tail(bytearray):
+    """The bounded tail, plus the last complete "step: ..." marker line, seen however long ago."""
+    step = None
 
 
 @contextmanager
 def _stderr_tail():
     """Drain continuously into bounded memory, never an unbounded disk spool."""
     reader, writer = os.pipe()
-    tail, done = bytearray(), threading.Event()
+    tail, done, line = _Tail(), threading.Event(), bytearray()
+    def markers(data):
+        *complete, rest = data.split(b"\n")
+        for piece in complete:
+            line.extend(piece)
+            if line.startswith(b"step: ") and len(line) <= 200:
+                tail.step = line[6:].decode("utf-8", errors="replace").strip()
+            line.clear()
+        line.extend(rest)
+        del line[256:]  # A longer line is no marker; only its start matters.
     def drain():
         grace = 65536
         while not done.is_set() or grace > 0:
@@ -52,6 +71,7 @@ def _stderr_tail():
             after_done = done.is_set()  # A read may let the writer finish.
             data = os.read(reader, 8192)
             if not data: break
+            markers(data)
             tail.extend(data)
             del tail[:-65536]
             if after_done: grace -= len(data)
@@ -91,7 +111,8 @@ class VM:
         self.env = dict(HOME=str(self.private), LIMA_HOME=str(self.private / "lima"),
                         PATH=os.environ.get("PATH", os.defpath), LC_ALL="C")
 
-    def _call(self, command, deadline, *, limit=900, **streams):
+    def _call(self, command, deadline, *, limit=900, merged=False, **streams):
+        """merged: Lima's stdout goes into the same memory tail as its stderr, in the order written."""
         remaining = deadline - self.clock()
         if not math.isfinite(remaining) or remaining <= 0:
             raise TimeoutError("bench deadline")
@@ -101,14 +122,18 @@ class VM:
             return self.run(command, **dict(options, **streams))
         try:
             with _stderr_tail() as (errors, tail):
-                return self.run(command, **dict(dict(options, stderr=errors), **streams))
+                merge = dict(stdout=errors) if merged else {}
+                return self.run(command, **dict(dict(options, stderr=errors, **merge), **streams))
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             data = bytes(tail)
             if self.redact is not None:
                 data = self.redact(data.decode("utf-8", errors="replace")).encode("utf-8")
             if isinstance(error, subprocess.TimeoutExpired):
-                raise LimaTimeoutExpired(command, error.timeout, error.output, data[-4096:]) from error
-            raise LimaCalledProcessError(error.returncode, command, error.output, data[-4096:]) from error
+                failure = LimaTimeoutExpired(command, error.timeout, error.output, data[-4096:])
+            else:
+                failure = LimaCalledProcessError(error.returncode, command, error.output, data[-4096:])
+            failure.step, failure.tail = tail.step, data.decode("utf-8", errors="replace")
+            raise failure from error
 
     def prepare(self, deadline):
         if not os.path.lexists(self.identity):

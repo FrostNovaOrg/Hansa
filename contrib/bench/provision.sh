@@ -7,22 +7,28 @@ umask 022
 [ "$#" -eq 0 ]
 [ "$(id -u)" -eq 0 ]
 cd -- "$(dirname -- "$0")"
+echo 'step: check the bundle'
 if [ ! -s submission.pub ]; then
     echo 'bench: submission.pub is missing or empty; provide a public key before provisioning' >&2
     exit 1
 fi
 export DEBIAN_FRONTEND=noninteractive
 packages='bubblewrap nftables tmux chromium fontconfig fonts-dejavu-core fonts-wqy-microhei git python3 openssh-server e2fsprogs'
+echo 'step: update package lists'
 apt-get update
+echo 'step: install packages (chromium, fonts and tools)'
 apt-get install -y --no-install-recommends $packages
+echo 'step: check Python and clean the package cache'
 python3 -I -c 'import sys; sys.exit(sys.version_info[:2] != (3, 13))'
 apt-get clean
 
+echo 'step: set up the bench account'
 id -u bench >/dev/null 2>&1 || useradd -m -s /bin/sh bench
 systemctl mask "user@$(id -u bench).service"
 # A rerun must not retain supplementary privileges; never alter Lima's admin.
 usermod -G '' -s /bin/sh bench
 passwd -l bench
+echo 'step: install the bench program'
 install -d -o root -g root -m 0755 /usr/local/lib/hansa-bench/bench /usr/local/libexec /etc/ssh/bench
 install -o root -g root -m 0644 guest.py archive.py /usr/local/lib/hansa-bench/bench/
 install -o root -g root -m 0644 /dev/null /usr/local/lib/hansa-bench/bench/__init__.py
@@ -32,6 +38,7 @@ exec /usr/bin/python3 -I -c 'import sys, runpy; sys.path.insert(0, "/usr/local/l
 GATEWAY
 chown root:root /usr/local/libexec/hansa-bench
 chmod 0755 /usr/local/libexec/hansa-bench
+echo 'step: make the slots disk'
 # One bounded filesystem for every writable bind; discard returns deleted blocks.
 slots=/var/lib/hansa-bench
 disk=/var/lib/hansa-bench.img
@@ -47,11 +54,13 @@ mountpoint -q "$slots" || mount "$slots"
 # The dirty-slot barrier permits only its lock file, including after provisioning.
 if [ -d "$slots/lost+found" ]; then rmdir "$slots/lost+found"; fi
 install -d -o bench -g bench -m 0700 /var/lib/hansa-bench
+echo 'step: record the build'
 install -d -o root -g root -m 0700 /var/lib/hansa-bench-build
 dpkg-query -W -f='${binary:Package}\t${Version}\n' $packages > /var/lib/hansa-bench-build/packages.tsv
 sha256sum lima.yaml provision.sh edge.nft sysctl.conf guest.py archive.py > /var/lib/hansa-bench-build/recipe.sha256
 install -o root -g root -m 0600 lima.yaml /var/lib/hansa-bench-build/lima.yaml
 
+echo 'step: apply the network and kernel settings'
 install -d -o root -g root -m 0755 /etc/cloud/cloud.cfg.d /etc/sysctl.d /etc/ssh/sshd_config.d
 # Lima changes cloud-init instance IDs at boot; keep the identity pinned by the host.
 cat > /etc/cloud/cloud.cfg.d/99-bench-keep-host-keys.cfg <<'CLOUD'
@@ -65,6 +74,7 @@ nft -c -f /etc/nftables.conf
 nft -f /etc/nftables.conf
 systemctl enable --now nftables.service
 
+echo 'step: install the submission key and reload ssh'
 # Install credentials only after the persistent edge is active; fail before reload.
 install -o root -g root -m 0644 submission.pub /etc/ssh/bench/authorized_keys
 cat > /etc/ssh/sshd_config.d/50-bench.conf <<'SSHD'
