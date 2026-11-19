@@ -711,8 +711,16 @@ again replaces it, recording who and when. Records persist in
 
 `hansa merge ID` merges a task's branch into its lane's base branch. A failed
 check blocks it unless the coordinator says `--despite-check` (recorded), and
-so does a verification that does not hold. That flag skips the merge check
-even when the base moved; it never overrides release files or a key.
+so does a verification that does not hold. So does a follow-up (`hansa retry`,
+with or without `--fresh` or `--update`) with no verification of its own that
+holds when the latest verified earlier round of its change did not hold: the
+refusal names that verification and the round it judged, and the ways on are
+`hansa verify ID` or `hansa merge ID --despite-check`; `hansa show ID` names
+`hansa verify ID` first. When that latest earlier verdict was `unsure`, or an
+earlier round held, the merge goes on with a note, as before. That is decided
+at `hansa merge`; a merge already waiting its turn is not judged again. That
+flag skips the merge check even when the base moved; it never overrides
+release files or a key.
 
 The last definite verdict (`holds`, `holds, with notes`, or `does not hold`)
 stands until a later verification gives another definite verdict. A cancelled

@@ -30,7 +30,7 @@ from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, bas
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, tried_lanes, try_file, try_log, try_srt_at_start, unverified_note, waiting_detail, words_in_merge, words_text, write_try,
+                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, tried_lanes, try_file, try_log, try_srt_at_start, unverified_note, earlier_not_held, waiting_detail, words_in_merge, words_text, write_try,
                   merge_recheck_steps, standing_verification, task_base_problem,
                   is_local, mac_loopback_listeners, worktree_git_settings)
 
@@ -937,7 +937,7 @@ def cmd_merge(a):
         if releasing or any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
                             for x in desk.tasks()):
             despite = bool((chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
-                           or (m.get("merge_check_result") or {}).get("ok") is False)
+                           or (m.get("merge_check_result") or {}).get("ok") is False or earlier_not_held(desk, m))
             m = desk.update(a.id, state="merging",
                             merge_check_result=m.get("merge_check_result") if a.despite_check else None, **sess, merge_check={
                 "phase": "queued", "queued": now(), "moves": 0, "plain": True,
@@ -987,7 +987,8 @@ def cmd_merge(a):
                         unverified=note or None, merge_message_note=said or None)
         close_verification(desk, m, f"closed: {a.id} was merged")
     despite = ((chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
-               or (a.despite_check and (m.get("merge_check_result") or {}).get("ok") is False))
+               or (a.despite_check and ((m.get("merge_check_result") or {}).get("ok") is False
+                                        or earlier_not_held(desk, m))))
     desk.event("task_merged", ts=m["merged"], task=a.id, into=base, **({"despite_check": True} if despite else {}),
                **({"merge_not_checked": True} if unchecked else {}))
     print(f"{a.id} merged into {base} at {repo}" + (f" (without checking it together with what {base} gained "
@@ -1132,6 +1133,15 @@ def _mergeable(desk: Desk, a):
         raise SystemExit(f"hansa: the verification {v['task']} found that {a.id} does not hold; nothing was merged. "
                          f"hansa show {v['task']} says what it ran. Send it back with hansa retry {a.id} \"...\", "
                          f"or merge anyway: hansa merge {a.id} --despite-check")
+    before = None if a.despite_check else earlier_not_held(desk, m)
+    if before:
+        at, pv = before
+        which = "the earlier task it retries" if at["id"] == m.get("parent") else "an earlier task of this change"
+        raise SystemExit(f"hansa: no verification of {a.id} holds, and {pv['id']}, the latest verification of an "
+                         f"earlier round of this change, found that {at['id']}, {which}, does not hold; nothing was "
+                         f"merged. Have "
+                         f"{a.id} verified: hansa verify {a.id}, and merge once that holds; or, with a reason to merge it "
+                         f"anyway: hansa merge {a.id} --despite-check")
     chk = m.get("check")
     if chk and not chk["ok"] and not a.despite_check and not a.recheck:
         if chk.get("could_not_run"):
