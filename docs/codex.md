@@ -25,6 +25,8 @@ hansa can run a worker with OpenAI's Codex command line instead of Claude Code, 
 4. For a second Codex model on the same program and home, use **Add a model** under that provider's card: a
    name, the model and an effort. The new entry runs with the card's Codex program, home and login; no second
    provider and no second login are needed. Put its name in a lane's providers as any other.
+   To move a provider set up separately, use **Remove** on its own card, then **Add a model** on the destination
+   card. If a lane uses that provider, the coordinator must take it off that lane first.
 
 hansa starts the adapter itself for such a provider and passes its settings in the run's environment: no
 `HANSA_CLAUDE`, no `codex.env`. It keeps the Codex home from every run but that provider's own Codex runs, so

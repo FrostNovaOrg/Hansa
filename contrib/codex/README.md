@@ -49,6 +49,8 @@ folders.
    be changed offer no paths.
    For another Codex model on the same program and home, use **Add a model** under the provider's card (a name,
    the model and an effort): it runs with that card's program, home and login.
+   To move a provider set up separately, use **Remove** on its own card, then **Add a model** on the destination
+   card. If a lane uses that provider, the coordinator must take it off that lane first.
 3. **Log in once, with Codex's own login on that home:** `CODEX_HOME=<Codex home> <Codex program> login`. The
    page and `hansa explain provider NAME` give the command with the provider's paths. Then `hansa ping NAME`.
 

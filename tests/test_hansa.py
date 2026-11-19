@@ -49661,7 +49661,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       } else throw new Error("unknown codex scenario: " + ask);
     } else if (ask.startsWith("settings-fix-models-")) {
       // One card per connection, a row per model on it (an entry whose connection names the card), as the principal
-      // sees and uses them: the rows' boxes, Add a model, the join choice, Own connection, Remove, Save.
+      // sees and uses them: each row's boxes, Add a model, Remove and Save.
       const zh = process.argv[4] === "zh";
       run('showSettingsGroup("providers")');
       const panel = () => run("settingsPanels.providers");
@@ -49675,27 +49675,32 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       const button = (text, root) => find(el => el.tag === "button" && el.textContent === text, root);
       const addRow = name => find(el => el.attrs["data-add-model"] === name, panel());
       const addBox = (name, attr) => find(el => attr in el.attrs, addRow(name));
-      const joinOf = name => find(el => el.tag === "select" && "data-join-connection" in el.attrs, card(name));
+      const oldChoice = zh ? "使用哪家的连接" : "Uses the connection of";
+      const noConnectionControls = root => {
+        for (const attr of ["data-join-connection", "data-own-connection", "data-split-key"])
+          check(!find(el => attr in el.attrs, root), "obsolete provider control or note: " + attr);
+        for (const words of zh ? [oldChoice, "选另一家后", "请为它重新保存密钥"]
+          : [oldChoice, "Choosing another provider", "save the key for it again"])
+          check(!has(words, root), "obsolete provider text: " + words);
+        check(!button(zh ? "单独连接" : "Own connection", root), "obsolete provider button");
+      };
       const sorted = x => Array.isArray(x) ? x.map(sorted) : x && typeof x === "object"
         ? Object.fromEntries(Object.keys(x).sort().map(k => [k, sorted(x[k])])) : x;
       const same = (a, b) => JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
       const before = JSON.parse(JSON.stringify(given["/api/settings"].settings.providers));
-      // no connection field, key box or join choice inside any row
+      // no connection fields or key box inside any row
       const bare = name => rows(name).every(r => !find(el => el.tag === "input" && el.type === "password", row(r))
         && !find(el => el.tag === "select" && el.kids.some(o => o.value === "subscription"), row(r))
-        && !find(el => "data-join-connection" in el.attrs, row(r))
         && !find(el => el.tag === "label" && [run("T.endpoint"), run("T.codexHome"), run("T.loginDir")].includes(el.textContent), row(r)));
       if (ask === "settings-fix-models-none") {
         check(same(cards(), Object.keys(before)), "not one card per entry: " + cards());
+        noConnectionControls(panel());
         for (const name of cards()) {
           check(same(rows(name), [name]), "card " + name + " rows: " + rows(name));
           check(labelled(row(name), "T.model").value === before[name].model, "the row lacks its model");
           labelled(row(name), "T.effort");
           check(button(run("T.check"), row(name)) && button(run("T.remove"), row(name)), "the row lacks Ping or Remove");
           check(button(run("T.addModel"), addRow(name)), "no Add a model under " + name);
-          const join = joinOf(name);
-          check(join && join.kids[0].value === "" && join.kids[0].textContent === run("T.ownConnectionChoice")
-            && same(join.kids.slice(1).map(o => o.value), Object.keys(before).filter(n => n !== name)), "join choice of " + name);
           check(bare(name), "a connection field in a row of " + name);
         }
         check(!run("settingsDirty()"), "showing the cards changed the draft");
@@ -49705,7 +49710,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for (const [name, its] of [["compatible", ["compatible", "fast"]], ["claude", ["claude", "claude-fast"]], ["cx", ["cx", "cx-mini"]]]) {
           check(same(rows(name), its), "rows of " + name + ": " + rows(name));
           check(bare(name), "a connection field in a row of " + name);
-          check(!joinOf(name), "a card its rows use offers to join another: " + name);
+          noConnectionControls(card(name));
         }
         check(!["fast", "claude-fast", "cx-mini"].some(n => cards().includes(n)), "a row shows as a card: " + cards());
         check(labelled(row("cx-mini"), "T.model").value === "gpt-mini"
@@ -49719,6 +49724,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(select.kids.find(o => o.value === "cx-mini")?.disabled && !select.kids.find(o => o.value === "fast")?.disabled,
           "a row on a Codex card is offered to the coordinator");
       } else if (ask === "settings-fix-models-edit") {
+        check(same(rows("compatible"), ["compatible", "fast"]) && !card("fast"), "the saved model is not in its card");
+        check(button(run("T.check"), row("fast")) && button(run("T.remove"), row("fast")), "the row lacks Ping or Remove");
+        noConnectionControls(row("fast"));
         change(labelled(row("fast"), "T.model"), "fast-model-2"); choose(labelled(row("fast"), "T.effort"), "high");
         await run("saveSettings()");
         const expected = JSON.parse(JSON.stringify(before)); expected.fast.model = "fast-model-2"; expected.fast.effort = "high";
@@ -49776,20 +49784,22 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         };
         const rule = zh ? "只能用小写字母" : "Use lowercase letters";
         const exists = zh ? "已有名为" : "There is already a provider named";
-        const join = run("T.joinConnection");
+        const move = zh ? ["服务商。要在", "自己的卡片上删除", "在这里加为模型"]
+          : ["”. To use it on this card", "remove it from its own card", "add it here as a model"];
         const cases = ask.endsWith("-form") ? [["", "Bad Name"], ["compatible", "Bad Name"]]
           : ask.endsWith("-provider") ? [["", "claude"]]
           : ask.endsWith("-own") ? [["compatible", "compatible"], ["compatible", "fast"]]
-          : ask.endsWith("-join") ? [["cx", "cx-other"]]
-          : [["compatible", "claude-fast"], ["compatible", "claude"]];
+          : ask.endsWith("-move") ? [["cx", "cx-other"]]
+          : ask.endsWith("-elsewhere") ? [["compatible", "claude-fast"]]
+          : [["compatible", "claude"]];
         if (ask.endsWith("-pending")) {
           for (const first of ["", "claude"]) {
             await attempt([[first, "twice"], ["compatible", "twice"]], true);
-            words(refusal("compatible", "twice"), ["twice", zh ? "此页面上已使用" : "already used on this page"], [rule, join, exists]);
+            words(refusal("compatible", "twice"), ["twice", zh ? "此页面上已使用" : "already used on this page"], [rule, oldChoice, exists]);
           }
           await attempt([["compatible", "Bad Name"], ["claude", "twice"], ["cx", "twice"]], true);
           check(refusal("compatible", "Bad Name", ["cx"]) === run("T.invalidName"), "the pending duplicate changed the form refusal");
-          words(ids["#new-model-cx-error"].textContent, ["twice", zh ? "此页面上已使用" : "already used on this page"], [rule, join]);
+          words(ids["#new-model-cx-error"].textContent, ["twice", zh ? "此页面上已使用" : "already used on this page"], [rule, oldChoice]);
         } else {
           for (const [card, value] of cases) for (const save of [false, true]) {
             await attempt([[card, value]], save);
@@ -49797,14 +49807,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             if (ask.endsWith("-form")) {
               check(message === run("T.invalidName") && message.includes(run("T.nameRule")), "the name form refusal changed");
             } else if (ask.endsWith("-own")) {
-              words(message, [value, zh ? "已是这张卡片下的模型" : "already a model of this card"], [rule, join, exists]);
-            } else if (ask.endsWith("-join")) {
-              const select = joinOf(value);
-              check(select?.kids.some(o => o.value === card && !o.disabled), "the source card has no join choice for " + card);
-              words(message, [value, zh ? "已有自己的服务商卡片" : "already a provider with its own card", join,
-                zh ? "选为“cx”" : "to “cx”", zh ? "保存" : "save"], [rule]);
+              words(message, [value, zh ? "已是这张卡片下的模型" : "already a model of this card"], [rule, oldChoice, exists]);
+            } else if (ask.endsWith("-move")) {
+              words(message, [exists, value, ...move], [rule, oldChoice]);
             } else {
-              words(message, [exists, value], [rule, join]);
+              words(message, [exists, value], [rule, oldChoice, ...move]);
             }
           }
         }
@@ -49821,34 +49828,35 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(JSON.stringify(posted.settings.providers["fast-two"]) === JSON.stringify({connection:"compatible", model:"k2-mini", effort:"low"})
           && JSON.stringify(posted.settings.providers["claude-three"]) === JSON.stringify({connection:"claude", model:"haiku", effort:""}),
           "Save lost a new row: " + JSON.stringify(posted.settings.providers));
-      } else if (ask === "settings-fix-models-join") {
-        check(!joinOf("compatible"), "a card its rows use offers to join another");
-        const note = card("other").textContent;
-        check(note.includes(run("T.joinKeyNote")), "no note on the key of a joined card");
-        for (const word of zh ? ["清除密钥", "secrets", "不再使用"] : ["Clear key", "secrets", "no longer used"]) check(note.includes(word), "join note lacks " + word);
-        choose(joinOf("other"), "compatible");
-        check(same(rows("compatible"), ["compatible", "fast", "other"]) && !cards().includes("other") && bare("compatible"), "the joined card is not a row there");
-        await run("saveSettings()");
-        check(JSON.stringify(posted.settings.providers.other) === JSON.stringify({connection:"compatible", model:before.other.model, effort:before.other.effort}),
-          "the joined entry kept its connection: " + JSON.stringify(posted.settings.providers.other));
-        await button(run("T.ownConnection"), row("fast")).click();
-        check(cards().includes("fast") && same(rows("fast"), ["fast"]) && !rows("compatible").includes("fast"), "the row is not a card of its own");
-        check(card("fast").textContent.includes(run("T.splitKeyNote")), "no word that the key must be saved again");
-        await button(run("T.ownConnection"), row("cx-mini")).click();
-        check(!card("cx-mini").textContent.includes(run("T.splitKeyNote")), "a Codex card is told to save a key");
-        await run("saveSettings()");
-        check(same(posted.settings.providers.fast, {kind:"compatible", base_url:before.compatible.base_url, model:before.fast.model, effort:before.fast.effort}),
-          "the copied connection: " + JSON.stringify(posted.settings.providers.fast));
-        const {model, effort, connection, ...codex} = before.cx;
-        check(same(posted.settings.providers["cx-mini"], {...codex, model:"gpt-mini", effort:"medium"}), "the copied Codex connection: "
-          + JSON.stringify(posted.settings.providers["cx-mini"]));
+      } else if (ask === "settings-fix-models-broken-connection") {
+        const checkRefusals = () => {
+          const summary = ids["#tab-settings"];
+          const label = zh ? "连接信息" : "Connection";
+          for (const [name, connection, reason] of [["orphan", "absent", zh ? "没有名为" : "No provider named"],
+            ["chained", "fast", zh ? "使用其他服务商的连接" : "uses another provider's connection"]]) {
+            const refusal = find(el => el.tag === "li" && el.textContent.startsWith(`${name} · ${label}`), summary);
+            check(refusal && refusal.textContent.includes(connection) && refusal.textContent.includes(reason),
+              "no localized refusal for " + name + ": " + run('settingsProblems.join(" · ")'));
+          }
+        };
+        checkRefusals();
+        run("renderSettings([])");
+        settingsPostReply = given.brokenConnection; await run("saveSettings()");
+        check(settingsPostCount === 1, "the settings were not sent for validation");
+        checkRefusals();
       } else if (ask === "settings-fix-models-remove") {
+        const checkRemoveRefusal = message => {
+          for (const part of ["compatible", "fast", ...(zh ? ["使用它的连接", "请先删除它们"] : ["use its connection", "Remove them first"])])
+            check(message.includes(part), "the removal refusal lacks " + part + ": " + message);
+          check(!message.includes(zh ? "给它们单独的连接" : "give them their own connection"),
+            "the removal refusal suggests giving models their own connection: " + message);
+        };
         await button(run("T.remove"), row("compatible")).click();
         check(run("!!S.providers.compatible"), "a card its rows use was removed");
-        const said = run('settingsProblems.join(" ")');
-        for (const word of zh ? ["compatible", "fast", "连接"] : ["compatible", "fast", "connection"]) check(said.includes(word), "the refusal lacks " + word + ": " + said);
+        checkRemoveRefusal(run('settingsProblems.join(" ")'));
         const error = ids["#remove-error-compatible"];
-        check(error && !error.hidden && error.textContent.includes("fast") && row("compatible").contains(error), "the refusal is not at the Remove pressed");
+        check(error && !error.hidden && row("compatible").contains(error), "the refusal is not at the Remove pressed");
+        checkRemoveRefusal(error.textContent);
         check(document.activeElement === button(run("T.remove"), row("compatible")), "the Remove refused is not focused");
         run('S.lanes.a.providers = ["claude-fast"]; renderSettings([])');
         await button(run("T.remove"), row("claude-fast")).click();
@@ -49859,13 +49867,13 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         await button(run("T.remove"), row("compatible")).click();
         check(run("!S.providers.compatible"), "the card was not removed once no row used it");
         settingsPostReply = given.connectionRemoved; await run("saveSettings()");
-        const server = run('settingsProblems.join(" ")');
-        check(server.includes("fast") && server.includes("compatible") && (!zh || !server.includes("cannot be removed")), "the server's refusal: " + server);
+        checkRemoveRefusal(run('settingsProblems.join(" ")'));
       } else if (ask === "settings-fix-models-outside") {
         check(run("SETTINGS_LOCKED") && same(rows("compatible"), ["compatible", "fast"]) && same(rows("claude"), ["claude", "claude-fast"]), "the cards and rows differ outside");
+        noConnectionControls(panel());
         check(labelled(row("fast"), "T.model").value === "fast-model" && labelled(row("fast"), "T.model").readOnly, "a row's model is not shown read-only");
-        check(labelled(row("fast"), "T.effort").disabled && joinOf("other").disabled, "a choice is open outside");
-        for (const text of ["T.addModel", "T.ownConnection", "T.remove", "T.check"])
+        check(labelled(row("fast"), "T.effort").disabled && labelled(card("other"), "T.kind").disabled, "a choice is open outside");
+        for (const text of ["T.addModel", "T.remove", "T.check"])
           check(descendants(panel(), "button").filter(b => b.textContent === run(text)).every(b => b.disabled), text + " is open outside");
         check(addBox("compatible", "data-new-model-name").readOnly, "Add a model's name is open outside");
       } else throw new Error("unknown models scenario: " + ask);
@@ -52591,6 +52599,7 @@ else if (ask === "task-steps")'''))
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_page_title_and_caption_name_the_desk_and_its_parent(self):
+        # Keep a status reply from before the hand edit, so this scenario exercises Settings independently of Status.
         status = views.status(self.desk)
         for language in ("en", "zh"):
             for folder in ("/home/work/desk", "/home/other/desk", "/home/work/a < b & c"):
@@ -52743,11 +52752,17 @@ else if (ask === "task-steps")'''))
             s["providers"]["compatible"] = {"kind": "compatible", "model": "example-model", "effort": "",
                                              "base_url": "https://example.org"}
             if scenario != "models-none":
-                s["providers"]["fast"] = {"connection": "compatible", "model": "fast-model", "effort": "low"}
+                s["providers"]["fast"] = {"connection": "compatible", "model": "fast-model", "effort": "low",
+                                          "note": "Keep this model's note"}
                 s["providers"]["claude-fast"] = {"connection": "claude", "model": "sonnet", "effort": "high"}
             self.assertEqual(self.desk.save_settings(s), [])
             if scenario == "models-rest":
                 self.desk.set_provider_state("fast", model_since=time.time(), model_unknown="fast-model")
+        status = views.status(self.desk)
+        if scenario == "models-broken-connection":
+            s["providers"]["orphan"] = {"connection": "absent", "model": "example"}
+            s["providers"]["chained"] = {"connection": "fast", "model": "example"}
+            write_json(self.desk.settings_path, s)
         public = public_settings(self.desk)
         public.pop("codex_suggestion", None)  # existing scenarios also exercise replies from an older server
         if scenario.startswith("models-") and scenario != "models-none":
@@ -52756,7 +52771,7 @@ else if (ask === "task-steps")'''))
                 "kind": "codex", "model": "gpt-example", "effort": "", "codex_path": "/opt/codex/bin/codex",
                 "codex_home": "/opt/codex-home", "ca_file": "", "web_search": "disabled", "disabled_features": ["apps"]}
             public["settings"]["providers"]["cx-mini"] = {"connection": "cx", "model": "gpt-mini", "effort": "medium"}
-            if scenario == "models-name-join":
+            if scenario == "models-name-move":
                 public["settings"]["providers"]["cx-other"] = {**public["settings"]["providers"]["cx"], "model": "gpt-other"}
         if scenario == "models-remove":
             saved = self.desk.settings()
@@ -52783,7 +52798,7 @@ else if (ask === "task-steps")'''))
                   "by": {"model": {}, "task": {
                       "t-zero": {"tokens": 20, "usd": 1, "runs": 2},
                       "t-no-runs": {"tokens": 10, "usd": 0, "runs": 0, "turns": 7}}}}
-        replies = {"/api/settings": public, "/api/status": views.status(self.desk), "/api/events": [],
+        replies = {"/api/settings": public, "/api/status": status, "/api/events": [],
                    "/api/cost": report}
         if scenario.startswith("codex-detect-"):
             from hansa.desk import codex_suggestion
@@ -52831,6 +52846,8 @@ else if (ask === "task-steps")'''))
             replies["codexRefusal"] = {"ok": False, "problems": problems, "problem_details": [p.detail for p in problems]}
         if scenario == "models-remove":
             replies["connectionRemoved"] = {"ok": False, "problems": problems, "problem_details": [p.detail for p in problems]}
+        if scenario == "models-broken-connection":
+            replies["brokenConnection"] = save_from_page(self.desk, {"settings": self.desk.settings(), "rev": public["rev"]})
         harness = self.tmp / "settings-fixes-page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
@@ -52846,7 +52863,7 @@ else if (ask === "task-steps")'''))
 
     # A provider's connection filled in once, with several models on it (Settings, Providers): one card per entry without
     # `connection`, a row per entry on it.
-    def test_with_no_connection_entries_each_card_shows_its_own_model_row_add_a_model_and_the_join_choice(self):
+    def test_with_no_connection_entries_each_card_shows_its_own_row_and_add_a_model_without_a_connection_choice(self):
         self.run_settings_fix_scenario("models-none")
 
     def test_rows_on_compatible_subscription_and_codex_cards_stay_intact_when_other_settings_save(self):
@@ -52873,17 +52890,20 @@ else if (ask === "task-steps")'''))
     def test_a_cards_own_or_model_name_says_it_is_already_a_model_of_that_card(self):
         self.run_settings_fix_scenario("models-name-own")
 
-    def test_a_standalone_provider_name_tells_how_to_join_it_at_its_card(self):
-        self.run_settings_fix_scenario("models-name-join")
+    def test_a_standalone_provider_name_tells_how_to_remove_it_and_add_it_as_a_model(self):
+        self.run_settings_fix_scenario("models-name-move")
 
-    def test_a_model_elsewhere_or_card_with_other_models_only_says_the_provider_is_already_here(self):
+    def test_a_model_on_another_card_gets_the_taken_name_refusal_without_move_advice(self):
         self.run_settings_fix_scenario("models-name-elsewhere")
+
+    def test_a_card_with_other_models_gets_the_taken_name_refusal_without_move_advice(self):
+        self.run_settings_fix_scenario("models-name-with-rows")
 
     def test_a_repeated_pending_name_says_it_is_already_used_on_the_page(self):
         self.run_settings_fix_scenario("models-name-pending")
 
-    def test_a_card_joins_another_and_a_row_gets_a_copy_of_the_connection_of_its_own(self):
-        self.run_settings_fix_scenario("models-join")
+    def test_missing_and_chained_connections_get_localized_refusals_on_load_and_save(self):
+        self.run_settings_fix_scenario("models-broken-connection")
 
     def test_removing_a_card_its_rows_use_is_refused_at_its_remove_naming_them_and_the_servers_refusal_is_translated(self):
         self.run_settings_fix_scenario("models-remove")

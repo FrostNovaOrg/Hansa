@@ -855,15 +855,11 @@ Remove. **Add a model** under the list asks a name, a model and an effort, and a
 `{"connection": <the card's entry>, "model", "effort"}`; Save adds one typed and
 not yet added. The name fields in **Add provider** and **Add a model** show the
 name rule and say when a provider already has the name. **Add a model** also
-says when the name is already a model on that card, or points to **Uses the
-connection of** on a standalone card that can be joined. A name repeated among
-pending rows is marked as already used on the page when saving. A card no row
-names offers **Uses the connection of**: choosing
-another card makes the entry a row there, and its connection fields leave the
-settings on save. A key saved for it before stays in the desk's `secrets/` and is
-no longer used; **Clear key** before choosing removes it. A row's **Own
-connection** makes it a card again with a copy of its card's connection fields;
-the key is not copied, and a card of a kind with a key says to save it again.
+says when the name is already a model on that card. A name repeated among
+pending rows is marked as already used on the page when saving. To move a
+provider set up separately, use **Remove** on its own card, then use **Add a
+model** on the destination card. If a lane uses the provider, the coordinator
+must take it off that lane first.
 Remove refuses a card's entry while rows name it, naming them, at the Remove
 pressed and in the list above; so do the coordinator and lane refusals. The
 Status tab keeps one row per entry. In `settings.json` the entries read:
