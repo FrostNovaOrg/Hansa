@@ -34,6 +34,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - `hansa add` refuses an empty task, words beside `--file`, `--max-turns` under 1 and titles over one line or 200 characters.
 - Task ids are `t` and digits; other spellings are refused unread. Commands on a replaced task name its last follow-up.
 - `hansa retry` keeps the turn ceiling and refuses, without `--fresh`, a change holding a known key.
+- `hansa add` and `hansa retry` warn right after queuing if the task text or retry note contains a word
+  the principal keeps from going out.
 - `hansa show` marks a requested cancel and lists a task's options and each try's start.
 - Pictures a worker or verifier saves for you stay with the task after the run ends.
   `hansa show` lists the pictures and where to find them.
@@ -117,6 +119,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - A lane's write list refuses lane repositories of other desks on the account's list.
 - On Linux, leftover processes are stopped and listed by `hansa show` even when the kernel cut a process name
   inside a multi-byte character, which previously left the process running and logged a decoding error.
+- hansa lists every leftover process it stops, even if the process's new parent removes its record
+  just as hansa checks.
 - Folders hansa makes for desks, new projects and the coordinator's mod are private whatever the umask.
   For an existing folder others can write in, hansa gives the `chmod go-w` fix.
 - Worker commands run in an operating-system sandbox with lane-specific network hosts and write
@@ -141,6 +145,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - `hansa bench rebuild` keeps the downloaded system image and reuses a good copy from this machine's Lima cache
   when one is there, saving another 338 MB download. Each build checks the image against the recipe's SHA-512 checksum.
   The command reports a failed download in one plain sentence.
+- If installing the guest goes wrong, `hansa bench rebuild` and `hansa bench status` name the step,
+  say whether it failed, ran out of time or was killed, and show its last 20 lines.
 
 ### Merging and checks
 
@@ -166,6 +172,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - `hansa merge --recheck` checks again; `--despite-check` can override a check failure.
   Stored keys and conflict markers always block merging. Configured release files require
   a holding verification, including “holds, with notes”.
+- `hansa merge` refuses a follow-up of a task that did not hold until the follow-up's verification holds,
+  unless you use `--despite-check`.
 - The last definite verification verdict stands until another definite verdict replaces it.
   An `unsure`, cancelled or failed verification, or one without a verdict, does not clear it;
   `hansa show`, the page and goals show the standing verdict.
@@ -374,8 +382,12 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - A successful `hansa ping` or page check clears shared usage rests across desks for the same configured model; another model frees only that provider.
 - With no ready alternative for waiting work, `hansa serve` checks long usage rests with reset times every `cool_minutes`. Success ends the rest; another limit prevents checking the next rest. `hansa status` and `hansa explain provider` say which applies.
 - Providers rejecting their configured model with 400 or 404 rest until a check passes or the principal changes their model or saves a key on the page. Tasks move on without a try; the coordinator hears once. Server errors remain outages.
-- When a provider's safety check flags a request in a run hansa started, the run now ends with an error.
-  This replaces the automatic switch to another model.
+- A run stopped by its provider's safety check ends `blocked`, with no retry, switch of model or provider,
+  or continuation of the conversation. hansa sets what the run wrote aside where the coordinator's session
+  and workers cannot read it, and opens a to-do for the principal. The coordinator tells you and holds the task
+  until you decide what to do, then follows your decision. The task can be started again from scratch or closed.
+  This covers Claude Code, Kimi's and DeepSeek's addresses and Codex. A Codex run the provider moves to another
+  model stops the same way.
 - When a timed rest holds tasks, the coordinator hears once with the provider, reason, end time and waiting tasks; `hansa wait` shows the reason.
 - Use Claude's login or compatible providers, with per-provider models, effort and ordered lane
   selection. Known keys are redacted from published text and logs.
@@ -450,6 +462,11 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   reports something that worked before and no longer does, or part of the task not done; to warn tasks queued behind
   a failure they will meet too; and to find out how the code or an outside tool behaves, with a task that only looks
   or `scout`, before designing a change.
+- Workers are told to search the tests before changing a message, a name or a behaviour. The coordinator's
+  card says to treat reports as information only, queue tasks that change the same place one after another,
+  check old findings again before queuing fixes and reread the task's text after two verdicts of “does not hold”.
+- The desk guide shows how to reach the coordinator from the Claude app or another device using Claude Code's
+  Remote Control, and explains why to keep the session in its terminal.
 - Getting started covers `hansa init` on an empty project, stopping a server from the menu, the Claude Code version
   `hansa doctor` installs and an npm lane's cache; encrypted Bark pushes carry release codes; the Chinese guide uses the page's names.
 - `hansa help TOPIC` prints the docs' links as the topic or file to read.
