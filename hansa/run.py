@@ -6410,6 +6410,36 @@ def text_only(path: str) -> bool:
     suffix = p.suffix.lower()
     return suffix in TEXT_SUFFIXES or (not suffix and p.name.upper() in TEXT_NAMES)
 
+def earlier_verdict(desk: Desk, m: dict) -> tuple:
+    """Walk back along the attempts the task m retries (parent, its parent, ...), nearest first, to the nearest one
+    with a verdict: (the attempts walked, that attempt, its standing verification), or (walked, None, None)."""
+    earlier, seen, at = [], {m["id"]}, m
+    while at.get("parent") and at["parent"] not in seen and at.get("kind") != "verify":
+        try:
+            at = desk.meta(at["parent"])
+        except SystemExit:
+            break
+        if at.get("kind") == "verify":
+            break
+        seen.add(at["id"])
+        earlier.append(at)
+        pv = standing_verification(desk, at)
+        if pv and pv.get("verdict"):
+            return earlier, at, pv
+    return earlier, None, None
+
+
+def earlier_not_held(desk: Desk, m: dict) -> tuple | None:
+    """For a follow-up with no verification of its own that holds: (the earlier attempt, its verification) when the
+    latest verified earlier attempt of this change did not hold, which keeps it from being merged
+    (hansa merge ... --despite-check aside); None otherwise."""
+    own = standing_verification(desk, m)
+    if own and own.get("verdict") in HOLDING_VERDICTS:
+        return None
+    _, at, pv = earlier_verdict(desk, m)
+    return (at, pv) if pv and pv["verdict"] == "does not hold" else None
+
+
 def unverified_note(desk: Desk, m: dict) -> str:
     """For a merge: that nothing verified a change beyond text and documentation, without the leading 'note: ';
     '' when its verification holds, or it changed only text. It looks back along the whole chain of attempts this
@@ -6429,25 +6459,15 @@ def unverified_note(desk: Desk, m: dict) -> str:
     what = f"{m['id']} changed {', '.join(code[:3])}" + (f" and {len(code) - 3} more" if len(code) > 3 else "")
     if own:
         return f"{what}, and its verification {own['id']} {found(own)}"
-    earlier, seen, at = [], {m["id"]}, m  # the attempts it retries, nearest first
-    while at.get("parent") and at["parent"] not in seen and at.get("kind") != "verify":
-        try:
-            at = desk.meta(at["parent"])
-        except SystemExit:
-            break
-        if at.get("kind") == "verify":
-            break
-        seen.add(at["id"])
-        earlier.append(at)
-        pv = verdict(at)
-        if pv:
-            which = "the earlier task it retries" if len(earlier) == 1 else "an earlier task of this change"
-            if pv["verdict"] not in HOLDING_VERDICTS:
-                return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, "
-                        f"and {found(pv)}")
-            return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, not "
-                    f"this one: what came after that verification (a conflict settled, code changed) is not the code "
-                    f"it checked")
+    earlier, at, pv = earlier_verdict(desk, m)
+    if pv:
+        which = "the earlier task it retries" if len(earlier) == 1 else "an earlier task of this change"
+        if pv["verdict"] not in HOLDING_VERDICTS:
+            return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, "
+                    f"and {found(pv)}")
+        return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, not "
+                f"this one: what came after that verification (a conflict settled, code changed) is not the code "
+                f"it checked")
     if not earlier:
         return f"nothing verified this change: {what}, and no verification of it holds"
     if len(earlier) == 1:

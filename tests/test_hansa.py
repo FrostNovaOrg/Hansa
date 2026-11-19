@@ -39768,6 +39768,101 @@ def save():'''))
         self.assertEqual(unverified_note(self.desk, self.desk.meta(t2)),
                          f"{t2} changed a.py, and its verification {v2} could not tell whether it holds")
 
+    def test_a_follow_up_of_a_round_that_did_not_hold_is_not_merged_until_a_verification_holds(self):
+        d = Dispatcher(self.desk)
+
+        def done(name):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"] = {"FAKE_HELLO": name, "FAKE_VERDICT": "holds"}
+            self.assertEqual(self.desk.save_settings(s), [])
+            return self.settle(d, self.desk.new_task(f"Add {name}"))["id"]
+
+        def judged(tid, verdict):  # a finished verification of tid with this verdict
+            v = self.desk.new_task("Run it", kind="verify", parent=tid)
+            self.desk.update(v, state="done", verdict=verdict)
+            self.desk.update(tid, verify=v)
+            return v
+
+        def retried(tid, *flags):
+            self.hansa("retry", tid, *flags, "more")
+            new = self.desk.meta(tid)["replaced_by"]
+            self.settle(d, new)
+            return new
+
+        def refused(tid):
+            before = (self.desk.meta(tid), len(self.events("task_merged")))
+            with self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "merge", tid])
+            self.assertEqual((self.desk.meta(tid), len(self.events("task_merged"))), before)  # nothing changed
+            return str(e.exception.code)
+
+        t1 = done("a.py")  # did not hold; its follow-up has no verification of its own: refused
+        v1 = judged(t1, "does not hold")
+        t2 = retried(t1)
+        said = refused(t2)
+        self.assertIn(f"no verification of {t2} holds", said)
+        self.assertIn(f"{v1}, the latest verification of an earlier round of this change, found that {t1}, the "
+                      f"earlier task it retries, does not hold; nothing was merged", said)
+        self.assertIn(f"hansa verify {t2}", said)
+        self.assertIn(f"hansa merge {t2} --despite-check", said)
+        shown = views.show_text(self.desk, t2)
+        self.assertIn(f"next: hansa verify {t2} ({v1} found that {t1}", shown)
+        self.assertIn(f"hansa merge {t2} --despite-check", shown)
+        judged(t2, "unsure")  # its own verification could not tell: still refused
+        refused(t2)
+        v2 = judged(t2, "holds")  # its own verification holds: merged, as for any task
+        out = self.hansa("merge", t2)
+        self.assertIn(f"{t2} merged into main", out)
+        self.assertNotIn("note:", out)
+        self.assertTrue(v2)
+
+        t3 = done("b.py")  # two rounds back: the nearest verdict along the chain is the one that counts
+        v3 = judged(t3, "does not hold")
+        t4 = retried(t3)
+        t5 = retried(t4)
+        self.assertIn(f"{v3}, the latest verification of an earlier round of this change, found that {t3}, an "
+                      f"earlier task of this change, does not hold", refused(t5))
+        out = self.hansa("merge", t5, "--despite-check")  # past it, as past the task's own "does not hold"
+        self.assertIn(f"{t5} merged into main", out)
+        self.assertIn(f"note: {t5} changed b.py, and no verification of {t5} held; {v3} verified {t3}", out)
+        self.assertTrue(self.events("task_merged")[-1].get("despite_check"))
+
+        t6 = done("c.py")  # the earlier round was unsure: the note, and merged
+        v6 = judged(t6, "unsure")
+        t7 = retried(t6)
+        out = self.hansa("merge", t7)
+        self.assertIn(f"{t7} merged into main", out)
+        self.assertIn(f"{v6} verified {t6}, the earlier task it retries, and could not tell whether it holds", out)
+
+        t8 = done("d.py")  # did not hold, then a later round held: what came after that one gets the note
+        judged(t8, "does not hold")
+        t9 = retried(t8)
+        v9 = judged(t9, "holds")
+        t10 = retried(t9)
+        self.assertNotIn("an earlier round of this change, does not hold", views.show_text(self.desk, t10))
+        out = self.hansa("merge", t10)
+        self.assertIn(f"{t10} merged into main", out)
+        self.assertIn(f"{v9} verified {t9}, the earlier task it retries, not this one", out)
+
+        for flag in ("--fresh", "--update"):  # a follow-up started over or brought up to date: the same rule
+            t = done(f"e{flag[2:]}.py")
+            v = judged(t, "does not hold")
+            follow = retried(t, flag)
+            self.assertIn(f"{v}, the latest verification of an earlier round of this change, found that {t}",
+                          refused(follow))
+
+        t11 = done("f.py")  # its own verification is running: held for that, as now
+        judged(t11, "does not hold")
+        t12 = retried(t11)
+        running = self.desk.new_task("Run it", kind="verify", parent=t12)
+        self.desk.update(running, state="running")
+        self.desk.update(t12, verify=running)
+        self.assertIn(f"{running} is still verifying {t12}; nothing was merged", refused(t12))
+        self.desk.update(running, state="done", verdict="does not hold")
+        self.desk.update(t12, state="merging", merge_check={"phase": "queued", "queued": time.time(), "moves": 0,
+                                                            "plain": True})
+        self.assertEqual(self.settle_merge(d, t12)["state"], "merged")  # one already waiting: decided at hansa merge
+
     def test_a_merge_through_a_merge_check_says_when_nothing_verified_it(self):
         d, t1, t2 = self.two_lanes(check="true", names=("a.py", "b.py"))
         s = self.desk.settings()

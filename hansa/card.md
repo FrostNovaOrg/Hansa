@@ -177,7 +177,8 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   on old code; requested coverage tests may pass on both, judged on whether they test what their
   names say. Its verdict ("holds", "holds, with notes", "does not hold", "unsure") shows in
   `hansa show <id>`; hansa will not merge
-  while it runs, nor after "does not hold" unless you say `--despite-check`.
+  while it runs, nor after "does not hold" (or a follow-up of a round that did not hold, until a
+  verification of it holds) unless you say `--despite-check`.
   "Holds, with notes" counts as "holds", but read each note in its report first: one saying that
   something worked before the change and no longer does, or that part of what the task asked is not
   done, is a defect: send the task back naming it; the other notes go to `hansa gaps`, to be marked.
