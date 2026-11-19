@@ -36530,8 +36530,9 @@ def save():'''))
     # | 2      | the same, its first round gone | round 2 or later; none left; 0 | no: only one is known            |
     # The first ten: test_a_follow_up_says_its_round_and_when_to_rethink_it; the last two:
     # test_the_rounds_of_a_chain_made_before_ended_as_count_what_is_known.
-    SENTENCE = ("This task has not held {} times. Before sending it back again, rethink it: make it smaller, ask for "
-                "less, or start again from the base.")
+    SENTENCE = ("This task has not held {} times. Before sending it back again, first reread what the task asked "
+                "(it may ask for too much or get a fact wrong), then rethink it: make it smaller, ask for less, "
+                "or start again from the base.")
 
     def chain(self, verdicts) -> tuple:
         """A chain of rounds of ORIGINAL, one per verdict, each ended done and verified with it (None: not verified,
