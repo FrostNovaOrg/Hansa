@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, plugin, release, up
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, pictures, plugin, release, up
 from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, connected_providers, connection_users, provider_entry, key_name, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError, old_codex_provider)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
@@ -1890,6 +1890,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         if held:
             out.append(f"BRANCH CHANGED: {held}. hansa verifies, merges and continues only from that commit, and "
                        f"refuses to while the branch does not hold it")
+    out += pictures.lines(desk, m)
     if m.get("leaked"):
         out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so hansa will not merge it")
     if m.get("markers"):

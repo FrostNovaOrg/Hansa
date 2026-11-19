@@ -82,6 +82,7 @@ srt --settings <tmp>/srt.json -- /bin/sh -c '<CODEX_CA_CERTIFICATE>; <source the
     -C <worktree> -m <model> -c model_reasoning_effort="<effort>" \
     -c developer_instructions="<hansa's --append-system-prompt, as a TOML string>" \
     -c shell_environment_policy.set.TMPPREFIX="<tmp>/zsh" \
+    -c shell_environment_policy.set.HANSA_PICTURES_DIR="<as hansa gives it>" ... \
     -c analytics.enabled=false -c approval_policy="never" -c approvals_reviewer="user" \
     -c check_for_update_on_startup=false -c web_search="disabled" --disable apps ... --disable hooks \
     --disable memories --disable external_agent_memory_import \
@@ -95,6 +96,11 @@ The task goes in on stdin, as hansa gives it. Why each part:
 - **zsh's `TMPPREFIX` is in the run's temporary folder.** zsh makes a here-document's file under `TMPPREFIX`
   (`/tmp/zsh` by default), not `TMPDIR`, and srt refuses that, so `cat > f <<'EOF'` would fail. Claude Code does the
   same for its own commands. `TMPDIR` stays as hansa gives it.
+- **The run's folders hansa names to the worker's commands** (`HANSA_PICTURES_DIR`, and with the bench
+  `HANSA_BENCH_DIR` and `HANSA_BENCH_EPOCH`) are set the same way, when hansa gives them. Codex's default
+  `shell_environment_policy` passes them on already (it drops only names holding `KEY`, `SECRET` or `TOKEN`, and
+  `--ignore-user-config` keeps a policy in the Codex home from narrowing it); `set` keeps them there should that
+  default change.
 - **`CODEX_CA_CERTIFICATE`**: on macOS, Codex's default, the system's own certificate check, does not complete
   inside srt. On every system the adapter gives `/etc/ssl/cert.pem` when that file exists and
   `HANSA_CODEX_CA_FILE` is not set, and none otherwise; whether Codex's TLS check completes inside srt on Linux

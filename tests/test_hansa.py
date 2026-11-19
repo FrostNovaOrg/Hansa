@@ -7488,6 +7488,243 @@ def save():'''))
             with self.subTest(source=source):
                 self.attachment_refused([source], "workers may not read")
 
+    # -- pictures a run leaves for the principal (hansa/pictures.py) ---------------------------------------------
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+    JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 24
+    WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"\x00" * 16
+
+    def picture_run(self, tid="t0001"):
+        """A run's temporary folder as start makes it, and its pictures folder, for a task queued as tid."""
+        from hansa import run
+        if not (self.desk.tasks_dir / tid).exists():
+            self.hansa("add", "Show the page")
+        tmp = run.make_worker_tmp(self.desk, tid)
+        self.addCleanup(shutil.rmtree, tmp, True)
+        return tmp, Path(tmp) / f"claude-{os.getuid()}" / "pictures"
+
+    def end_picture_run(self, tid="t0001"):
+        from hansa import run
+        run.remove_sandbox_tmp(self.desk, tid)
+        return self.desk.meta(tid)
+
+    def kept_pictures(self, tid="t0001"):
+        d = self.desk.tasks_dir / tid / "pictures"
+        return {p.name: p.read_bytes() for p in d.iterdir()} if d.is_dir() else {}
+
+    def left_out(self, m):
+        return {x["why"]: x["count"] for x in m.get("pictures_left_out") or []}
+
+    def test_pictures_folder_is_made_for_every_run_and_named_to_its_commands(self):
+        from hansa import run
+        tmp, folder = self.picture_run()
+        self.assertTrue(folder.is_dir())
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+        self.assertEqual(str(folder.parent), run.commands_tmp(tmp), "where the worker's commands may write")
+        s = self.desk.settings()
+        env = run.worker_env(self.desk, "t0001", "a", s["lanes"]["a"], "claude", s["providers"]["claude"], tmp)
+        self.assertEqual(env["HANSA_PICTURES_DIR"], str(folder))
+
+    def test_pictures_are_kept_with_the_task_under_safe_names(self):
+        tmp, folder = self.picture_run()
+        files = {"Shot one!.PNG": self.PNG, "page.jpeg": self.JPEG, "c.webp": self.WEBP,
+                 "x y.png": self.PNG + b"1", "x?y.png": self.PNG + b"2", "été.png": self.PNG + b"3",
+                 "L" * 120 + ".png": self.PNG + b"4"}
+        for name, data in files.items():
+            (folder / name).write_bytes(data)
+        m = self.end_picture_run()
+        self.assertFalse(os.path.exists(tmp), "the run's folder is removed after")
+        kept = self.kept_pictures()
+        self.assertEqual(set(kept), {"Shot-one-.png", "page.jpeg", "c.webp", "x-y.png", "x-y-2.png", "-t-.png",
+                                     "L" * 76 + ".png"})
+        self.assertEqual(kept["page.jpeg"], self.JPEG)
+        self.assertEqual({kept["x-y.png"], kept["x-y-2.png"]}, {self.PNG + b"1", self.PNG + b"2"})
+        rec = {p["name"]: p for p in m["pictures"]}
+        self.assertEqual(rec["c.webp"], {"name": "c.webp", "bytes": len(self.WEBP), "kind": "webp", "run": 1})
+        self.assertFalse(m.get("pictures_left_out"))
+        self.assertEqual(stat.S_IMODE((self.desk.tasks_dir / "t0001" / "pictures").stat().st_mode), 0o700)
+
+    def test_pictures_with_the_wrong_extension_keep_the_one_their_bytes_say(self):
+        _, folder = self.picture_run()
+        (folder / "a.jpg").write_bytes(self.PNG)
+        (folder / "b.png").write_bytes(self.JPEG)
+        (folder / "c.JPG").write_bytes(self.WEBP)
+        self.end_picture_run()
+        self.assertEqual(set(self.kept_pictures()), {"a.png", "b.jpg", "c.webp"})
+
+    def test_pictures_that_are_not_pictures_are_left_out(self):
+        _, folder = self.picture_run()
+        files = {"d.svg": b"<svg xmlns='http://www.w3.org/2000/svg'/>", "e.png": b"<svg/>",
+                 "f.html": b"<html></html>", "g.jpg": b"%PDF-1.7\n", "h.sh": b"#!/bin/sh\nrm -rf ~\n",
+                 "i.webp": b"RIFF\x00\x00\x00\x00WAVE", "j.txt": self.PNG}
+        for name, data in files.items():
+            (folder / name).write_bytes(data)
+        m = self.end_picture_run()
+        self.assertEqual(self.kept_pictures(), {})
+        self.assertEqual(self.left_out(m), {"not a picture": 7})
+        self.assertIn("pictures left out: not a picture: 7 files (run 1)", self.hansa("show", "t0001"))
+
+    def test_pictures_larger_than_2_mb_are_left_out(self):
+        _, folder = self.picture_run()
+        (folder / "big.png").write_bytes(self.PNG + b"\x00" * (2 * 1024 * 1024 - len(self.PNG) + 1))
+        (folder / "edge.png").write_bytes(self.PNG + b"\x00" * (2 * 1024 * 1024 - len(self.PNG)))
+        m = self.end_picture_run()
+        self.assertEqual(set(self.kept_pictures()), {"edge.png"})
+        self.assertEqual(self.left_out(m), {"too large": 1})
+
+    def test_pictures_past_the_eighth_by_name_are_left_out(self):
+        _, folder = self.picture_run()
+        for i in reversed(range(10)):
+            (folder / f"p{i:02}.png").write_bytes(self.PNG + bytes([i]))
+        m = self.end_picture_run()
+        self.assertEqual(sorted(self.kept_pictures()), [f"p{i:02}.png" for i in range(8)])
+        self.assertEqual(self.left_out(m), {"more than 8": 2})
+
+    def test_pictures_links_fifos_and_folders_are_never_read(self):
+        from hansa import pictures
+        _, folder = self.picture_run()
+        outside = self.tmp / "outside.png"
+        outside.write_bytes(self.PNG + b"outside")
+        (folder / "sym.png").symlink_to(outside)
+        os.link(outside, folder / "hard.png")
+        os.mkfifo(folder / "fifo.png")
+        (folder / "sub").mkdir()
+        (folder / "sub" / "in.png").write_bytes(self.PNG)
+        (folder / "own.png").write_bytes(self.PNG + b"own")
+        os.link(folder / "own.png", folder / "own-too.png")  # both names in the folder: no file elsewhere
+        opened = []
+        real_read = pictures._read
+        with unittest.mock.patch.object(pictures, "_read", lambda d, n, st: opened.append(n) or real_read(d, n, st)):
+            m = self.end_picture_run()
+        self.assertEqual(sorted(opened), ["own-too.png", "own.png"], "no link, FIFO or folder is opened")
+        self.assertEqual(set(self.kept_pictures()), {"own.png", "own-too.png"})
+        self.assertEqual(self.left_out(m), {"not a plain file": 4})
+        self.assertEqual(outside.read_bytes(), self.PNG + b"outside")
+
+    def test_pictures_folder_replaced_by_a_link_or_a_file_or_missing_keeps_and_says_nothing(self):
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "a.png").write_bytes(self.PNG)
+        for how in ("link", "file", "missing", "empty"):
+            with self.subTest(how=how):
+                _, folder = self.picture_run()
+                if how != "empty":
+                    folder.rmdir()
+                if how == "link":
+                    folder.symlink_to(elsewhere)
+                elif how == "file":
+                    folder.write_bytes(self.PNG)
+                m = self.end_picture_run()
+                self.assertEqual(self.kept_pictures(), {})
+                self.assertFalse(m.get("pictures") or m.get("pictures_left_out") or m.get("pictures_failed"))
+                self.assertNotIn("pictures", self.hansa("show", "t0001"))
+        self.assertTrue((elsewhere / "a.png").exists())
+
+    def test_pictures_that_change_or_vanish_while_read_are_left_out_and_the_run_ends(self):
+        from hansa import pictures
+        _, folder = self.picture_run()
+        for name in ("a-grows.png", "b-gone.png", "c-stays.png"):
+            (folder / name).write_bytes(self.PNG)
+        real_read, real_os_read = pictures._read, os.read
+
+        def growing(fd, n):  # the worker's process left running writes on while hansa reads
+            data = real_os_read(fd, n)
+            with open(folder / "a-grows.png", "ab") as f:
+                f.write(b"more")
+            return data
+
+        def look(d, name, st):
+            if name == "b-gone.png":
+                (folder / name).unlink()
+                return real_read(d, name, st)
+            if name == "a-grows.png":
+                with unittest.mock.patch.object(pictures.os, "read", growing):
+                    return real_read(d, name, st)
+            return real_read(d, name, st)
+        with unittest.mock.patch.object(pictures, "_read", look):
+            m = self.end_picture_run()
+        self.assertEqual(set(self.kept_pictures()), {"c-stays.png"})
+        self.assertEqual(self.left_out(m), {"changed while hansa read it": 2})
+        self.assertEqual(m.get("worker_tmp"), "", "the run's end went on")
+
+    def test_pictures_holding_a_key_are_left_out(self):
+        key = "sk-picture-key-0123456789"
+        self.desk.write_key("claude", key)
+        _, folder = self.picture_run()
+        (folder / "key.png").write_bytes(self.PNG + b"tEXt" + key.encode())
+        (folder / "fine.png").write_bytes(self.PNG)
+        m = self.end_picture_run()
+        self.assertEqual(set(self.kept_pictures()), {"fine.png"})
+        self.assertEqual(self.left_out(m), {"holds a key": 1})
+        self.assertNotIn(key, json.dumps(m))
+
+    def test_pictures_are_not_kept_under_the_desks_floor_or_when_the_copy_fails(self):
+        from hansa import pictures
+        for how in ("floor", "copy"):
+            with self.subTest(how=how):
+                _, folder = self.picture_run()
+                (folder / f"{how}.png").write_bytes(self.PNG)
+                (folder / "z.png").write_bytes(self.PNG)
+                if how == "floor":
+                    self.free = 10 ** 9  # under the default floor of 10 GB
+                    m = self.end_picture_run()
+                    self.free = 500 * 10 ** 9
+                else:
+                    real_open = os.open
+
+                    def failing(path, flags, *a, **k):
+                        if str(path).endswith(".part") and "z.png" in str(path):
+                            raise OSError(errno.ENOSPC, "No space left on device")
+                        return real_open(path, flags, *a, **k)
+                    with unittest.mock.patch.object(pictures.os, "open", failing):
+                        m = self.end_picture_run()
+                self.assertEqual(self.kept_pictures(), {}, "nothing of this run, not even the first")
+                self.assertFalse(m.get("pictures"))
+                self.assertEqual(m.get("worker_tmp"), "")
+        out = self.hansa("show", "t0001")
+        self.assertIn("pictures not kept: the desk's disk is under its floor of free space (hansa disk-floor); "
+                      "2 pictures of run 1 lost", out)
+        self.assertIn("pictures not kept: the copy failed (No space left on device); 2 pictures of run 2 lost", out)
+
+    def test_pictures_never_hold_up_a_runs_end(self):
+        from hansa import pictures
+        _, folder = self.picture_run()
+        (folder / "a.png").write_bytes(self.PNG)
+        with unittest.mock.patch.object(pictures, "gather", side_effect=RuntimeError("boom")):
+            m = self.end_picture_run()
+        self.assertEqual(m.get("worker_tmp"), "")
+
+    def test_hansa_show_lists_the_pictures_the_verifications_and_only_counts_the_earlier_tasks(self):
+        tmp, folder = self.picture_run()
+        (folder / "before.png").write_bytes(self.PNG)
+        (folder / "notes.txt").write_bytes(b"text")
+        self.end_picture_run()
+        _, folder = self.picture_run()  # a second run of the same task
+        (folder / "after.png").write_bytes(self.PNG)
+        self.end_picture_run()
+        vid = self.desk.new_task("Verify t0001", kind="verify", parent="t0001")
+        self.desk.update("t0001", verify=vid)
+        _, folder = self.picture_run(vid)
+        (folder / "seen.webp").write_bytes(self.WEBP)
+        self.end_picture_run(vid)
+        out = self.hansa("show", "t0001")
+        where = self.desk.tasks_dir / "t0001" / "pictures"
+        self.assertIn(f"pictures: 2 pictures in {where}", out)
+        self.assertIn(f"  before.png ({len(self.PNG)} bytes, png, run 1)", out)
+        self.assertIn(f"  after.png ({len(self.PNG)} bytes, png, run 2)", out)
+        self.assertIn("pictures left out: not a picture: 1 file (run 1)", out)
+        self.assertIn(f"verification {vid}'s pictures: 1 picture in {self.desk.tasks_dir / vid / 'pictures'}", out)
+        self.assertIn(f"  seen.webp ({len(self.WEBP)} bytes, webp, run 1)", out)
+        self.assertIn(f"pictures: 1 picture in {self.desk.tasks_dir / vid / 'pictures'}", self.hansa("show", vid))
+        follow = self.desk.new_task("Again", parent="t0001")
+        shown = self.hansa("show", follow)
+        self.assertIn("pictures: earlier: t0001 has 2", shown)
+        self.assertNotIn("before.png", shown)
+        _, folder = self.picture_run(follow)
+        (folder / "before.png").write_bytes(self.JPEG)
+        m = self.end_picture_run(follow)
+        self.assertEqual([p["name"] for p in m["pictures"]], ["before.jpg"], "its own list")
+        self.assertEqual(len(self.desk.meta("t0001")["pictures"]), 2)
+
     def test_attachments_refuse_builtin_notes_logins_and_provider_folders(self):
         from hansa import run
         home = self.tmp / "home"
