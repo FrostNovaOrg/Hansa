@@ -278,6 +278,16 @@ open, with the token in the `Authorization` header as for its other calls, and s
 (an object URL); the token is never put in an address. The page has no content security policy of
 its own, so none was widened.
 
+A waiting release's card adds one line, "Pictures:", when the release sends tasks that kept pictures, their
+own or their standing verification's: each task's id, its title cut to 60 characters and the count (the
+verification's counted with it), the count opening the task's details as a goal's count does; past ten
+tasks, "and N more". A task is sent when its record's `merge_commit` is among the commits the release
+recorded; a commit from no task matches none (the card lists those as direct commits already), and of a
+release over 200 commits only the recorded 200 are matched. The line is built from records alone (no
+picture file, no git), so a picture gone since keeps its recorded count and opening it shows what the
+task's details show. `/api/status` gives each release row `picture_tasks` (`{id, title, pictures}`, at
+most ten) and `picture_tasks_count`, from outside too; `hansa release --show` is unchanged.
+
 The read-only `/api/goals` route requires the usual bearer token. It returns an
 array combining each `goal list --all --json` record (including `counts`) with
 its `goal show G --json` record, including cost. It shares one full events-file

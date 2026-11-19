@@ -2363,9 +2363,37 @@ def tick_text(s: dict, name: str, target: str) -> str:
             if lapsed else "; needs the principal's yes on the page"))
 
 
+PICTURE_TASKS = 10  # tasks with pictures a release card names; the rest are counted
+PICTURE_TITLE = 60  # characters of a task's title on that line
+
+
+def picture_tasks(r: dict, tasks: list, records: dict) -> tuple:
+    """For a release card: (the first PICTURE_TASKS, how many in all) of the tasks this release sends whose run, or
+    standing verification's, kept pictures, as {id, title, pictures}; oldest task first. A task is sent when its
+    recorded merge commit is among the release's recorded commits (the page's goal count adds the verification's
+    the same way, goals.task_evidence). Only records are read: no picture file, no git. A commit that came from no
+    task matches no task; a release that keeps only its first MOST_COMMITS commits names the tasks among those."""
+    from .run import standing_verification
+    shas = {c.get("sha") for c in r.get("commits") or [] if isinstance(c, dict)}
+    found = []
+    for m in tasks:
+        if m.get("kind") == "verify" or not m.get("merge_commit") or m["merge_commit"] not in shas:
+            continue
+        v = standing_verification(None, m, records)
+        n = len(m.get("pictures") or []) + len((v or {}).get("pictures") or [])
+        if n:
+            title = " ".join(str(m.get("title") or "").split())
+            found.append({"id": m["id"], "pictures": n, "title": title if len(title) <= PICTURE_TITLE
+                          else title[:PICTURE_TITLE - 1].rstrip() + "…"})
+    found.sort(key=lambda x: int(x["id"][1:]) if x["id"][1:].isdigit() else 0)
+    return found[:PICTURE_TASKS], len(found)
+
+
 def page_rows(desk: Desk, s: dict, tasks=None) -> list:
     """For the page and hansa status: the open releases and the latest ended ones of the past week."""
     rs = releases(desk)
+    tasks = desk.tasks() if tasks is None else tasks
+    records = {m["id"]: m for m in tasks}
     week = time.time() - 7 * 86400
     shown = [r for r in rs if r.get("state") in OPEN or watch_open(r)] + [r for r in rs if r.get("state") not in OPEN
                                                            and not watch_open(r)
@@ -2394,6 +2422,7 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         row["checked"] = r.get("checked", r.get("count"))
         row["what"], row["what_zh"] = state_text(desk, r, s), state_text(desk, r, s, zh=True)
         row["tail"] = (r.get("tail") or [])[-TAIL:]
+        row["picture_tasks"], row["picture_tasks_count"] = picture_tasks(r, tasks, records)
         if r.get("state") == "waiting":
             row["moved"], row["moved_zh"] = stale_both(desk, s, r)
         out.append(row)
