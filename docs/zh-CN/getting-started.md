@@ -130,7 +130,6 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=y
 
 在服务器上安装 tmux，这样 SSH 断开后，`hansa up` 启动的协调员也能继续运行。
 重新连接时，用它打印的 attach 命令，包括其中的 `-L` 或 `-S`。`hansa status` 会说明会话情况；如果会话已停止，`hansa up` 会把它重新启动，接着原来的对话继续。
-在 Claude 桌面应用里运行的协调员会话除外：请在应用里重新打开它。
 
 网页端口最初是 8765，可以用 `hansa status`、`hansa explain server`，或查看服务器上的 `.hansa/web-port` 来确认实际端口。
 如果实际端口是 **8766**，在你自己的电脑上运行：

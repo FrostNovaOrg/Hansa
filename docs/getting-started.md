@@ -177,7 +177,6 @@ choose. `q` quits, leaving work running; `x`, then `y`, stops the desk's server.
 Install tmux on the server; `hansa up` keeps the coordinator open after disconnects.
 Reconnect using its printed attach command (including `-L` or `-S`). `hansa status`
 describes the session; `hansa up` brings back a stopped one, continuing its conversation.
-A coordinator's session in the Claude desktop app is the exception: open it again in the app.
 
 Find the page's port (initially 8765) through `hansa status`,
 `hansa explain server`, or `.hansa/web-port`.
