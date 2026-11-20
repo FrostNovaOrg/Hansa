@@ -780,6 +780,12 @@ if os.environ.get("FAKE_WRITE"):
     open(os.environ.get("FAKE_WRITE_FILE", "notes.txt"), "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_WRITE_HEX"):
     open(os.environ.get("FAKE_WRITE_FILE", "blob.bin"), "wb").write(bytes.fromhex(os.environ["FAKE_WRITE_HEX"]))
+if os.environ.get("FAKE_HOOKS"):  # FOLDER:MARKER: git hooks as tracked files, each adding its name to MARKER
+    folder, marker = os.environ["FAKE_HOOKS"].split(":", 1)
+    os.makedirs(folder, exist_ok=True)
+    for name in os.environ.get("FAKE_HOOK_NAMES", "post-merge").split():
+        open(os.path.join(folder, name), "w").write(f"#!/bin/sh\necho tracked-{name} >> {marker}\n")
+        os.chmod(os.path.join(folder, name), 0o755)
 if os.environ.get("FAKE_GITLINK"):
     os.makedirs(os.environ["FAKE_GITLINK"], exist_ok=True)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
@@ -894,6 +900,14 @@ def tmp_writable() -> bool:
 
 TURN_SESSION_ID = "77777777-7777-4777-8777-777777777777"  # the session's id in the hooks' input, as Claude Code gives it
 SECRETS = ("SECRET-TEXT", "org-123", "/x/transcript-77.jsonl", TURN_SESSION_ID, "/y/cwd-77")
+HELPER_DENY_LINE = ("disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, "
+                    "TaskUpdate, GetTask, Yield")
+HELPER_BASH_HOOK = '''hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "HANSA_HELPER_BASH"'''
 
 
 def turn_hook_input(event: str, error=None) -> str:
@@ -4159,7 +4173,9 @@ class UpTest(unittest.TestCase):
 def helper_as_shipped(given: str) -> str:
     """A helper's definition in the desk as hansa ships it: its read-only hook's command (helper_bash.py, as the hansa
     that wrote it runs it) back to the placeholder hansa fills in."""
-    return re.sub(r'command: "[^"\n]*helper_bash\.py"', 'command: "HANSA_HELPER_BASH"', given)
+    script = shlex.quote(str(Path(cli.__file__).with_name("helper_bash.py")))
+    ending = json.dumps(f" -I {script} || exit 2")[1:]  # only the launching Python's path varies
+    return re.sub(r'command: "[^"\n]+' + re.escape(ending), 'command: "HANSA_HELPER_BASH"', given)
 
 
 class CoordinatorUpTest(unittest.TestCase):
@@ -5901,8 +5917,10 @@ class CoordinatorUpTest(unittest.TestCase):
             self.assertEqual(r.returncode, code, r.stderr)
         for name in ("scout.md", "reviewer.md"):
             given = cli.helper_text((Path(cli.__file__).with_name("agents") / name).read_text(), "")
-            self.assertIn("PreToolUse", given)
-            self.assertIn(f'command: {json.dumps(shlex.join([sys.executable, "-I", str(script)]))}', given)
+            command = shlex.join([sys.executable, "-I", str(script)]) + " || exit 2"
+            hook = HELPER_BASH_HOOK.replace('"HANSA_HELPER_BASH"', json.dumps(command))
+            self.assertEqual(given.partition("\n---\n")[0].partition("\ntools: ")[2],
+                             f"Read, Bash\n{HELPER_DENY_LINE}\n{hook}")
 
     def test_a_rule_claude_code_would_split_stops_the_launch_as_it_stops_hansa_coordinator(self):
         odd = Desk(self.tmp / "odd) desk")
@@ -10903,6 +10921,7 @@ def save():'''))
                            (["push"], "git push is not one"), (["checkout", f"task/{tid}"], "git checkout is not one"),
                            (["branch", "-D", f"task/{tid}"], "git branch -D is refused"),
                            (["branch", "new"], "would make a branch"), (["tag", "v1"], "would make a tag"),
+                           (["branch", "--", "new"], "would make a branch"), (["tag", "--", "v1"], "would make a tag"),
                            (["tag", "-d", "v1"], "git tag -d is refused"),
                            (["diff", "--output=x"], "--output=x is refused"), (["diff", "--outp=x"], "refused"),
                            (["log", "--output", "x"], "refused"), (["grep", "-O", "demo"], "-O is refused"),
@@ -10958,6 +10977,268 @@ def save():'''))
             self.assertEqual(self.hansa_git("a", *args)[0], 0, args)
         self.assertEqual([w for w, p in made.items() if p.exists()], [])
         self.assertIn("+changed", self.hansa_git("a", "diff")[1])  # git's own diff, not the configured program's
+
+    def test_hansa_git_grep_refuses_to_search_untracked_and_ignored_files(self):
+        secret = "fixture-untracked-secret"
+        (self.repo / ".env").write_text(secret + "\n")
+        (self.repo / "ignored.env").write_text(secret + "\n")
+        (self.repo / ".git" / "info" / "exclude").write_text("ignored.env\n")
+        for option in ("--untracked", "--u", "--untr", "--exclude-standard", "--exc",
+                       "--no-exclude-standard", "--no-exc"):
+            with self.subTest(option=option):
+                code, out, err = self.hansa_git("a", "grep", option, "-e", "fixture-untracked")
+                self.assertNotIn(secret, out + err)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
+        code, out, err = self.hansa_git("a", "grep", "-e", "--", "--untracked", "-e", "fixture-untracked")
+        self.assertNotIn(secret, out + err)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("--untracked is refused", err)
+        self.assertEqual(self.hansa_git("a", "grep", "-edemo"), (0, "README.md:demo\n", ""))
+        self.assertEqual(self.hansa_git("a", "grep", "-e", "fixture-untracked"), (1, "", ""))
+
+    def test_hansa_git_keeps_untracked_names_but_refuses_ls_files_content_inputs(self):
+        (self.repo / ".env").write_bytes(b"fixture-name-only\r\n")
+        (self.repo / "ignored.env").write_text("fixture-name-only\n")
+        (self.repo / ".git" / "info" / "exclude").write_text("ignored.env\n")
+        code, out, err = self.hansa_git("a", "status", "--short", "--ignored")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("?? .env", out)
+        self.assertIn("!! ignored.env", out)
+        self.assertNotIn("fixture-name-only", out)
+        self.assertEqual(self.hansa_git("a", "ls-files", "-o", "--exclude-standard"), (0, ".env\n", ""))
+        code, out, err = self.hansa_git("a", "ls-files", "--eol")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("README.md", out)
+        self.assertNotIn(".env", out)
+        for args in (("-o", "--eol"), ("--o", "--eo"), ("--eol", "-k"),
+                     ("-oX", str(self.tmp / "patterns")), ("--exclude-f=patterns",),
+                     ("--exclude-per-dir", "patterns"), ("--rec",)):
+            with self.subTest(args=args):
+                code, out, err = self.hansa_git("a", "ls-files", *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("is refused", err)
+                self.assertIn("Nothing was run", err)
+
+    def test_hansa_git_refuses_grep_pattern_files_and_submodule_options(self):
+        patterns = self.tmp / "patterns"
+        patterns.write_text("demo\n")
+        calls = [
+            ("grep", "-f", str(patterns)),
+            ("grep", f"-if{patterns}"),
+            ("grep", "--recurse-submodules", "demo"),
+            ("grep", "--recurse", "demo"),
+        ]
+        calls += [(cmd, opt) for cmd in ("diff", "show", "log")
+                  for opt in ("--submodule", "--submodule=diff", "--submodule=log", "--submodule=short")]
+        calls += [(cmd, opt) for cmd in ("diff", "show", "log", "status")
+                  for opt in ("--ignore-submodules=none", "--ignore-submodules=untracked")]
+        calls.append(("status", "--no-ignore-submodules"))
+        for cmd, option, *args in calls:
+            with self.subTest(cmd=cmd, option=option):
+                code, out, err = self.hansa_git("a", cmd, option, *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
+        # Attached values and pathspecs are data, even if they look like a refused option.
+        self.assertEqual(self.hansa_git("a", "grep", "-ef"), (1, "", ""))
+        (self.repo / "--untracked").write_text("demo\n")
+        self.git_out("add", "--", "--untracked")
+        self.assertEqual(self.hansa_git("a", "grep", "demo", "--", "--untracked"), (0, "--untracked:demo\n", ""))
+
+    def test_hansa_git_diff_requires_the_lane_checkout_and_refuses_traversal_after_dash_dash(self):
+        code, out, err = self.hansa_git("a", "diff", "--", "README.md", "-dir/../README.md")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("-dir/../README.md is refused", err)
+
+        (self.repo / ".git").rename(self.tmp / "removed-git")
+        (self.repo / "other.txt").write_text("fixture file outside Git history\n")
+        # Stop Git discovery here even when TMPDIR is inside a checkout. hansa strips inherited GIT_* variables.
+        real = shutil.which("git")
+        git = self.tmp / "bin" / "git"
+        git.write_text(f"#!/bin/sh\nexport GIT_CEILING_DIRECTORIES={shlex.quote(str(self.tmp.resolve()))}\n"
+                       f'exec {shlex.quote(real)} "$@"\n')
+        git.chmod(0o755)
+        code, out, err = self.hansa_git("a", "diff", "README.md", "other.txt")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("no Git checkout", err)
+        self.assertIn("Nothing was run", err)
+
+    def test_hansa_git_diffs_two_commits_in_a_bare_lane_repository(self):
+        self.commit_in_repo("README.md", "demo\nsecond line\n")
+        bare = self.tmp / "bare.git"
+        self.git_out("clone", "--bare", "--quiet", str(self.repo), str(bare))
+        self.hansa("lane", "add", "b", "--repo", str(bare))
+
+        with self.subTest("commit diff"):
+            code, out, err = self.hansa_git("b", "diff", "HEAD~1", "HEAD", "--stat")
+            self.assertEqual((code, err), (0, ""))
+            self.assertRegex(out, r"README\.md\s+\|\s+1\s+\+")
+
+        for cmd, option, *args in (("diff", "--no-index", "HEAD", "config"),
+                                   ("diff", "../repo/README.md", "config"),
+                                   ("grep", "--untracked", "demo")):
+            with self.subTest(cmd=cmd, option=option):
+                code, out, err = self.hansa_git("b", cmd, option, *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
+
+    def test_hansa_git_reads_a_lane_in_a_checkout_subfolder(self):
+        pkg = self.repo / "pkg"
+        pkg.mkdir()
+        (pkg / "readme").write_text("package first\n")
+        (self.repo / "other").write_text("sibling first\n")
+        self.git_out("add", "pkg/readme", "other")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add package")
+        self.hansa("lane", "add", "s", "--repo", str(pkg))
+        (pkg / "readme").write_text("package edited\n")
+        (self.repo / "other").write_text("sibling edited\n")
+        secret = "fixture-subfolder-untracked-secret"
+        (pkg / ".env").write_text(secret + "\n")
+
+        for args, expected in ((("diff",), self.git_out("diff", cwd=pkg) + "\n"),
+                               (("diff", "--", "readme"), self.git_out("diff", "--", "readme", cwd=pkg) + "\n"),
+                               (("show", "HEAD:pkg/readme"), "package first\n"),
+                               (("log", "-1", "--format=%s"), "Add package\n"),
+                               (("grep", "package edited"), "readme:package edited\n")):
+            with self.subTest(args=args):
+                self.assertEqual(self.hansa_git("s", *args), (0, expected, ""))
+
+        code, out, err = self.hansa_git("s", "diff", "--", "../other")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("../other is refused", err)
+        self.assertIn("Nothing was run", err)
+        self.assertEqual(self.hansa_git("s", "grep", "fixture-subfolder"), (1, "", ""))
+        for cmd, option, *args in (("diff", "--no-i", "readme", ".env"), ("diff", "--submodule=diff"),
+                                   ("show", "--submodule"), ("log", "--subm=log"),
+                                   ("grep", "--u", "fixture-subfolder"), ("grep", "--exc", "fixture-subfolder"),
+                                   ("grep", "--no-exc", "fixture-subfolder"), ("grep", "-f", "readme"),
+                                   ("grep", "--recurse-submodules", "package")):
+            with self.subTest(cmd=cmd, option=option):
+                code, out, err = self.hansa_git("s", cmd, option, *args)
+                self.assertNotIn(secret, out + err)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
+
+    def test_hansa_git_disables_a_configured_blame_revision_file_and_cat_file_textconv_abbreviation(self):
+        revisions = self.tmp / "revisions"
+        revisions.write_text("not-a-revision\n")
+        self.git_out("config", "blame.ignoreRevsFile", str(revisions))
+        code, out, err = self.hansa_git("a", "blame", "README.md")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("demo", out)
+        code, out, err = self.hansa_git("a", "cat-file", "--t", "HEAD:README.md")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("--t is refused", err)
+
+    def test_hansa_git_refuses_to_enumerate_alternate_refs_and_all_objects(self):
+        calls = (("cat-file", "--batch", "--batch-all-objects"), ("cat-file", "--batch", "--batch-a"),
+                 ("log", "--alternate-refs", "HEAD"), ("rev-list", "--alternate-refs", "HEAD"))
+        for args in calls:
+            with self.subTest(args=args):
+                code, out, err = self.hansa_git("a", *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("is refused", err)
+                self.assertIn("Nothing was run", err)
+        self.assertEqual(self.hansa_git("a", "cat-file", "-p", "HEAD:README.md"), (0, "demo\n", ""))
+
+    def test_hansa_git_and_diff_use_short_submodule_diffs_even_when_git_config_says_diff(self):
+        module = self.repo / "module"
+        module.mkdir()
+        self.git_out("init", "-q", "-b", "main", cwd=module)
+        (module / "file").write_text("demo in module\n")
+        self.git_out("add", "file", cwd=module)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "module base", cwd=module)
+        before = self.git_out("rev-parse", "HEAD", cwd=module)
+        (self.repo / ".gitmodules").write_text('[submodule "module"]\n\tpath = module\n\turl = ./module\n')
+        self.git_out("add", ".gitmodules")
+        self.git_out("update-index", "--add", "--cacheinfo", f"160000,{before},module")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add module")
+        base = self.git_out("rev-parse", "HEAD")
+        (module / "file").write_text("demo in module changed\n")
+        self.git_out("add", "file", cwd=module)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "module update", cwd=module)
+        after = self.git_out("rev-parse", "HEAD", cwd=module)
+        self.git_out("update-index", "--cacheinfo", f"160000,{after},module")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "update module")
+        head = self.git_out("rev-parse", "HEAD")
+
+        def assert_short(out):
+            self.assertIn(f"-Subproject commit {before}", out)
+            self.assertIn(f"+Subproject commit {after}", out)
+            self.assertNotIn("demo in module", out)
+
+        self.git_out("config", "diff.submodule", "diff")
+        self.git_out("config", "submodule.recurse", "true")
+        self.git_out("config", "submodule.module.active", "true")
+        with self.subTest(args=("grep", "demo")):
+            self.assertEqual(self.hansa_git("a", "grep", "demo"), (0, "README.md:demo\n", ""))
+        for args in (("diff", base, head), ("show", head), ("log", "-p", "-1", head)):
+            with self.subTest(args=args):
+                code, out, err = self.hansa_git("a", *args)
+                self.assertEqual((code, err), (0, ""))
+                assert_short(out)
+        (module / "file").write_text("dirty module worktree\n")
+        self.git_out("config", "status.submoduleSummary", "true")
+        with self.subTest(args=("status", "--short")):
+            self.assertEqual(self.hansa_git("a", "status", "--short"), (0, "", ""))
+        self.git_out("config", "--unset", "diff.submodule")
+
+        # Review a recorded task whose worktree went away. This reads the remaining checkout with its submodule.
+        tid = self.desk.new_task("Update the example submodule")
+        self.git_out("branch", f"task/{tid}", head)
+        self.desk.update(tid, base=base, head=head, worktree=str(self.tmp / "removed-worktree"))
+        global_config = self.tmp / "gitconfig"
+        self.git_out("config", "--file", str(global_config), "diff.submodule", "diff")
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(global_config)}):
+            assert_short(self.hansa("diff", tid))
+
+    def test_hansa_diff_and_git_show_the_builtin_patch_without_diff_or_textconv_drivers(self):
+        tid = self.done_with()
+        ran, driver = self.tmp / "driver-ran", self.tmp / "driver.sh"
+        driver.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(ran))}\nprintf 'converted text\\n'\n")
+        driver.chmod(0o755)
+        (self.repo / ".git" / "info" / "attributes").write_text("*.txt diff=fixture\n")
+        for key in ("diff.external", "diff.fixture.textconv"):
+            with self.subTest(key=key):
+                ran.unlink(missing_ok=True)
+                self.git_out("config", key, str(driver))
+                code, out, err = self.hansa_git("a", "show", f"task/{tid}")
+                self.assertEqual((code, err), (0, ""))
+                self.assertFalse(ran.exists())
+                for patch in (out, self.hansa("diff", tid)):
+                    self.assertIn(f"+hello from {tid}", patch)
+                    self.assertNotIn("converted text", patch)
+                self.assertFalse(ran.exists())
+            self.git_out("config", "--unset", key)
+
+    def test_page_token_and_release_key_are_replaced_in_output_and_events(self):
+        from hansa import release
+        token, code_key = self.desk.web_token(), release._code_key(self.desk).decode()
+        self.commit_in_repo("fixture.txt", f"page {token}\nrelease {code_key}\n")
+        code, out, err = self.hansa_git("a", "show", "HEAD:fixture.txt")
+        self.assertEqual((code, err), (0, ""))
+        self.desk.event("fixture", detail=f"page {token}, release {code_key}")
+        [event] = self.events("fixture")
+        for shown in (out, event["detail"]):
+            self.assertNotIn(token, shown)
+            self.assertNotIn(code_key, shown)
+            self.assertIn("page [key of ", shown)
+            self.assertIn("release [key of ", shown)
+        exit_code, out, err = self.hansa_git("a", "blame", f"--contents={token}-{code_key}", "README.md")
+        self.assertEqual((exit_code, out), (1, ""))
+        self.assertNotIn(token, err)
+        self.assertNotIn(code_key, err)
+        self.assertIn("--contents=[key of the page]-[key of release codes] is refused", err)
+
+    def test_redact_replaces_the_longer_of_two_keys_with_the_same_prefix_first(self):
+        shorter = "fixture-shared-prefix"
+        self.desk.write_key("mimo", shorter)
+        self.desk.write_key("zai", shorter + "-tail")
+        self.assertEqual(self.desk.redact(f"{shorter}-tail and {shorter}"), "[key of zai] and [key of mimo]")
 
     def test_hansa_git_runs_no_gpg_for_a_signed_commit(self):
         made = self.tmp / "gpg-ran"
@@ -12619,8 +12900,9 @@ def save():'''))
             # Change tail.txt next time so both ranges contain its forbidden added line.
             self.commit_in_repo("tail.txt", "safe\n", message="Reset text")
         self.assertEqual(len(commands_by_scan[0]), len(commands_by_scan[1]))
-        for commands in commands_by_scan:
-            self.assertEqual([c for c in commands if "cat-file" in c], [["git", "cat-file", "--batch"]])
+        for commands in commands_by_scan:  # with the settings of hansa's own git in the lane's checkout
+            self.assertEqual([c for c in commands if "cat-file" in c],
+                             [["git", *hansa.run.checkout_git_settings(), "cat-file", "--batch"]])
 
     def test_word_scan_gitlink_updates_are_scanned_and_do_not_hide_text_files(self):
         from hansa import release
@@ -15128,17 +15410,19 @@ def save():'''))
         self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
                          ["Bash(pnpm test:*)", "Bash(gitleaks detect:*)"])
 
-    def test_a_merge_hook_that_uses_hansa_does_not_hang_the_merge(self):
+    def test_a_merge_runs_no_hook_and_hansa_run_by_git_in_a_merge_stops_at_once(self):
         tid = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
         hansa = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
         hook = self.repo / ".git" / "hooks" / "post-merge"
-        hook.write_text(f'#!/bin/sh\n"{hansa}" --desk "{self.desk.root}" add "queued by a hook" >/dev/null\n')
+        hook.write_text(f'#!/bin/sh\ntouch {self.tmp / "hook-ran"}\n'
+                        f'"{hansa}" --desk "{self.desk.root}" add "queued by a hook" >/dev/null\n')
         hook.chmod(0o755)
         r = subprocess.run([hansa, "--desk", str(self.desk.root), "merge", tid], capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
-        self.assertEqual(len(self.desk.tasks()), 1)  # the hook's hansa add was refused at once, not left waiting
+        self.assertFalse((self.tmp / "hook-ran").exists())  # hansa's git runs none of the repository's hooks
+        self.assertEqual(len(self.desk.tasks()), 1)
         r = subprocess.run([hansa, "--desk", str(self.desk.root), "add", "x"], capture_output=True, text=True, timeout=15,
                            env={**os.environ, "HANSA_MERGING": "1"})
         self.assertNotEqual(r.returncode, 0)
@@ -18981,14 +19265,20 @@ def save():'''))
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"], alert={
             "command": f"env > {alerted}"})), {"ok": True, "problems": []})
         self.hansa("release", "a")
-        hook = self.repo / ".git" / "hooks" / "post-checkout"
-        hook.write_text(f"#!/bin/sh\nenv > {self.tmp / 'git-env.txt'}\n")
-        hook.chmod(0o755)
+        gits, plain = [], subprocess.run
+
+        def spy(argv, *a, **kw):  # the environment hansa gives its git (which runs no hook to show it)
+            if argv[:1] == ["git"]:
+                gits.append(kw.get("env") or {})
+            return plain(argv, *a, **kw)
         with unittest.mock.patch.dict(os.environ, self.SESSION_ENV):  # set after hansa was imported, as a test can
             self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
             alert.test(self.desk)
-            run.git("checkout", "-q", "-b", "other", cwd=self.repo)
-        for f in (seen, alerted, self.tmp / "git-env.txt"):
+            with unittest.mock.patch.object(run.subprocess, "run", spy):
+                run.git("checkout", "-q", "-b", "other", cwd=self.repo)
+        self.assertEqual(len(gits), 1)
+        self.assertEqual(set(gits[0]) & set(self.SESSION_ENV), set())
+        for f in (seen, alerted):
             names = {x.split("=", 1)[0] for x in f.read_text().splitlines() if "=" in x}
             self.assertEqual(names & set(self.SESSION_ENV), set(), f.name)
         self.assertIn("HANSA_RELEASE", seen.read_text())
@@ -27906,6 +28196,8 @@ def save():'''))
         words = r.stdout.splitlines()
         self.assertEqual(words.count("--disallowedTools"), 1)
         denied = words[words.index("--disallowedTools") + 1:words.index("--model")]
+        self.assertNotIn("--tools", words)
+        self.assertFalse({"SendMessage", "ListAgents"}.intersection(denied))
         repo = str(self.repo.resolve()).lstrip("/")
         for rule in (f"Edit(//{repo}/**)", "Agent(general-purpose)"):
             self.assertIn(rule, denied)
@@ -28049,14 +28341,16 @@ def save():'''))
         self.assertIn("force=unset", out)
         # only Claude Code's own helpers are denied, by name; no rule names the Agent tool alone or a model
         argv = out.splitlines()[0].split()
-        denied = [x for x in argv if x.startswith("Agent")]
-        self.assertTrue(denied)
-        self.assertTrue(all(x.startswith("Agent(") and x.endswith(")") and "model" not in x for x in denied), denied)
+        rules = argv[argv.index("--disallowedTools") + 1:argv.index("--model")]
+        self.assertCountEqual([r for r in rules if r.partition("(")[0] in ("Agent", "Task")],
+                              ["Agent(general-purpose)", "Agent(Explore)", "Agent(Plan)", "Agent(claude)",
+                               "Agent(statusline-setup)", "Agent(claude-code-guide)"])
         settings = json.loads((self.desk.root / ".claude" / "settings.json").read_text())
         self.assertNotIn("availableModels", settings)
-        self.assertFalse([r for r in settings["permissions"].get("deny", []) if r == "Agent" or r.startswith("Agent(")])
-        for f in (self.desk.root / ".claude" / "agents").glob("*.md"):
-            self.assertNotIn("disallowedTools", f.read_text())
+        self.assertFalse([r for r in settings["permissions"].get("deny", []) if r.partition("(")[0] in ("Agent", "Task")])
+        for role in ("scout", "reviewer", "operator"):
+            header = (self.desk.root / ".claude" / "agents" / f"{role}.md").read_text().split("\n---\n", 1)[0]
+            self.assertEqual([s for s in header.splitlines() if s.startswith("disallowedTools:")], [HELPER_DENY_LINE])
 
     def page_save(self, change):
         """Load the settings as the page does, change them, save (what POST /api/settings does); what the page
@@ -28514,6 +28808,71 @@ def save():'''))
         self.soon(lambda: all(x.get("ended") for x in notify.records(self.desk)))
         self.assertIs(json.loads((self.desk.state_dir / "coordinator-start.json").read_text())["turn_hooks"], True)
         check_turn_hooks(self, words, self.desk, rec[0]["session"]["pid"])
+
+    def test_coordinator_blocks_teammate_launches_of_its_helpers_without_the_mod(self):
+        argv, _, _ = self.start_with_mod(version="2.0.0")
+        self.assertNotIn("--plugin-dir", argv)
+        hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]
+        [guard] = hooks["PreToolUse"]
+        self.assertEqual(guard["matcher"], "^Agent$|^Task$")
+        [action] = guard["hooks"]
+        self.assertEqual(action["type"], "command")
+        for role, extra, block in [
+            ("scout", {"name": "reader"}, True), ("operator", {"team_name": "group"}, True),
+            ("reviewer", {"name": "review"}, True), ("Re_viewer", {"name": "review"}, True),
+            ("scout", {}, False), ("reviewer", {"run_in_background": True}, False), ("operator", {}, False),
+            ("scout", {"model": "sonnet"}, False), ("reviewer", {"model": "opus", "run_in_background": True}, False),
+            ("operator", {"model": "haiku"}, False), ("another-agent", {"name": "other"}, False),
+        ]:
+            with self.subTest(role=role, extra=extra):
+                event = {"tool_input": {"subagent_type": role, "prompt": "private repository text", **extra}}
+                r = subprocess.run(action["command"], shell=True, input=json.dumps(event), capture_output=True, text=True)
+                self.assertEqual(r.returncode, 2 if block else 0, r.stderr)
+                if block:
+                    self.assertIn("subagent", r.stderr)
+                else:
+                    self.assertEqual(r.stdout, "")  # no updatedInput that replaces the call's model
+                self.assertNotIn("private repository text", r.stderr + r.stdout)
+        for malformed in ("{", '{"tool_input":null}'):
+            r = subprocess.run(action["command"], shell=True, input=malformed, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+
+    def test_helper_launch_is_blocked_if_the_hooks_python_is_missing(self):
+        with unittest.mock.patch.object(sys, "executable", str(self.tmp / "missing python")):
+            argv, _, _ = self.start_with_mod(version="2.0.0")
+        [guard] = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        [action] = guard["hooks"]
+        event = {"tool_input": {"subagent_type": "scout", "name": "reader"}}
+        r = subprocess.run(action["command"], shell=True, input=json.dumps(event), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_coordinator_installs_the_helper_launch_guard_and_both_read_only_shell_hooks_together(self):
+        python = self.tmp / "hook python"
+        python.symlink_to(sys.executable)
+        with unittest.mock.patch.object(sys, "executable", str(python)):
+            argv, _, _ = self.start_with_mod("-p", "one turn")
+        [guard] = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        self.assertEqual(guard["matcher"], "^Agent$|^Task$")
+        [launch] = guard["hooks"]
+        # A permitted and a refused call for each command from this same coordinator start.
+        cases = [(launch["command"], "Agent", {"subagent_type": "scout"}, {"subagent_type": "scout", "name": "reader"})]
+        for role in ("scout", "reviewer"):
+            header = (self.desk.root / ".claude" / "agents" / f"{role}.md").read_text().partition("\n---\n")[0]
+            [line] = [s for s in header.splitlines() if s.startswith("          command: ")]
+            cases.append((json.loads(line.split(": ", 1)[1]), "Bash", {"command": "hansa status"},
+                          {"command": "hansa merge t1"}))
+
+        def check(command, tool, args, expected):
+            event = json.dumps({"tool_name": tool, "tool_input": args})
+            result = subprocess.run(command, shell=True, input=event, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, expected, (tool, args, result.stderr))
+
+        for command, tool, permitted, refused in cases:
+            check(command, tool, permitted, 0)
+            check(command, tool, refused, 2)
+        python.unlink()  # the coordinator already built its settings and installed the definitions
+        for command, tool, permitted, _ in cases:
+            check(command, tool, permitted, 2)
 
     def test_coordinator_removes_a_dead_sessions_turn_record_for_its_own_pid(self):
         d = self.desk.state_dir / "coordinator-turns"
@@ -30713,6 +31072,41 @@ def save():'''))
     def denied_by(argv):
         return argv[argv.index("--disallowedTools") + 1:argv.index("--allowedTools")]
 
+    def assert_worker_tools(self, argv, *web):
+        # Read the complete variadic option from the launch, including any extra values after the first.
+        self.assertEqual(argv.count("--tools"), 1)
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertNotIn("--mcp-config", argv)
+        self.assertFalse({"--agent-teams", "--team-name", "--agent-name", "--agent-id"}.intersection(argv))
+        names = []
+        for value in argv[argv.index("--tools") + 1:]:
+            if value.startswith("-"):
+                break
+            names.extend(value.replace(",", " ").split())
+        self.assertCountEqual(names, ["Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite",
+                                      "Monitor", "TaskOutput", "BashOutput", "BashOutputTool", "AgentOutput",
+                                      "AgentOutputTool", "TaskStop", "KillShell", "KillBash", *web])
+        hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        self.assertEqual([h["matcher"] for h in hooks], ["^Monitor$"])
+        self.assertCountEqual([r for r in self.denied_by(argv) if "(" not in r], """
+            Agent Task ListAgents ListPeers SendMessage SendFile FetchInboxMessage SubagentHandback ObserverReport
+            Workflow RunWorkflow TeamCreate TeamDelete TaskCreate TaskGet TaskList TaskUpdate GetTask Yield
+            AskUserQuestion ScheduleWakeup CronCreate CronDelete CronList RemoteTrigger PushNotification
+            ReadNotifications Poll SendUserMessage Brief SendUserFile WrapUp Projects SendToProject SendToProjectContext
+            ClaudeDesign DesignSync Artifact ArtifactCheck ArtifactData ArtifactComments AppifactRepl PublishPlugin
+            SendFeedback ReportFindings OfferChromeSetup ShareOnboardingGuide ShowOnboardingRolePicker
+            ConnectGitHub SubscribePR SuggestBackgroundPR AutofixPr memory_list memory_read memory_write
+            WebBrowser Frame FrameRead enable__mcp__claude-in-chrome enable__mcp__remote-devices__Claude_Browser
+            enable__mcp__remote-devices__computer request_computer
+            self_hosted_runner_get_pool self_hosted_runner_list_runners self_hosted_runner_list_sessions
+            self_hosted_runner_list_secrets self_hosted_runner_spawn_local self_hosted_runner_read_health
+            self_hosted_runner_read_metrics self_hosted_runner_tail_log self_hosted_runner_requeue_session
+            ListMcpResourcesTool ListMcpResources ReadMcpResourceTool ReadMcpResource ReadMcpResourceDirTool
+            ReadMcpResourceDir WaitForMcpServers RefreshMcpTools McpTaskResumePolling ListConnectors SuggestConnectors
+            SearchMcpRegistry ReadWidgetContext SearchPlugins SearchSkills ListPlugins ListSkills SuggestSkills
+            SuggestPluginInstall propose_skills Skill ToolSearch LSP REPL Eval Code SetGoal ProposeGoal PauseGoal GetGoal
+            """.split())
+
     def test_workers_run_in_the_sandbox_and_leave_git_history_to_hansa(self):
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
@@ -31192,20 +31586,28 @@ def save():'''))
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
-        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"]
+        unavailable = ["SendMessage", "ListAgents", "Agent", "Skill", "ToolSearch", "FutureTool",
+                       "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch", "Monitor",
+                                    *unavailable]
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
-        worker = self.allowed_by(json.loads(seen.read_text().splitlines()[-1]))
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assert_worker_tools(argv, "WebFetch", "WebSearch")
+        worker = self.allowed_by(argv)
         s["lanes"]["a"]["allow"].append("WebFetch")  # saved before it was refused: left out of the run
         self.desk.settings_path.write_text(json.dumps(s))
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "verify", tid])
         self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
         argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assert_worker_tools(argv, "WebFetch", "WebSearch")
         self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
         verifier = self.allowed_by(argv)
         for allowed in (worker, verifier):
+            self.assertFalse(set(unavailable).intersection(allowed))
+            self.assertNotIn("Monitor", allowed)  # available for commands, never a blanket connection grant
             for r in ("Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"):
                 self.assertIn(r, allowed)
         self.assertNotIn("WebFetch", verifier)
@@ -31309,7 +31711,7 @@ def save():'''))
 
     def test_rules_are_checked_as_claude_code_splits_them(self):
         from hansa import run
-        from hansa.desk import one_rule, split_rules
+        from hansa.desk import one_rule, rules_problem, split_rules
         # Claude Code's splitter: commas and spaces outside parentheses, and every ) ends them, not a depth
         self.assertEqual(split_rules("Bash(echo $(true) WebFetch ok)"), ["Bash(echo $(true)", "WebFetch", "ok)"])
         self.assertEqual(split_rules("Bash(a(b),WebFetch,c)"), ["Bash(a(b)", "WebFetch", "c)"])
@@ -31319,6 +31721,10 @@ def save():'''))
             self.assertFalse(one_rule(r), r)
         for r in whole:
             self.assertTrue(one_rule(r), r)
+        device = "enable__mcp__claude-in-chrome"
+        self.assertEqual(rules_problem([device]), "")
+        for bad in (device + ",Bash", device + " --model", "--tools"):
+            self.assertTrue(rules_problem([bad]), bad)
         s = self.desk.settings()
         for bad in split:
             s["lanes"]["a"]["allow"] = [bad]
@@ -35530,6 +35936,71 @@ def save():'''))
         tid, wt, base = self.started_run()  # put back to the commit's
         self.assertEqual(sh_out("git", "rev-parse", ":sub", cwd=wt), first)
 
+    def test_hansa_git_worktree_skips_a_repository_inside_it_and_commit_review_shows_gitlinks(self):
+        tid, wt, _ = self.started_run()
+        filter_ran, diff_ran = self.tmp / "filter-ran", self.tmp / "diff-ran"
+        self.plant_repository(wt, "index", "filter", filter_ran, at="module")
+        module = wt / "module"
+        before = self.git_out("rev-parse", "HEAD", cwd=module)
+        (wt / ".gitmodules").write_text('[submodule "module"]\n\tpath = module\n\turl = ./module\n')
+        self.git_out("add", ".gitmodules", cwd=wt)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add module", cwd=wt)
+        base = self.git_out("rev-parse", "HEAD", cwd=wt)
+
+        driver = self.tmp / "diff-driver"
+        driver.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(diff_ran))}\n")
+        driver.chmod(0o755)
+        (module / ".gitattributes").write_text("*.txt filter=mark diff=mark\n")
+        self.git_out("config", "diff.mark.command", str(driver), cwd=module)
+        self.git_out("add", ".gitattributes", "f.txt", cwd=module)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "update module", cwd=module)
+        after = self.git_out("rev-parse", "HEAD", cwd=module)
+        self.git_out("update-index", "--cacheinfo", f"160000,{after},module", cwd=wt)
+        (wt / "README.md").write_text("committed review change\n")
+        self.git_out("add", "README.md", cwd=wt)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "update gitlink", cwd=wt)
+        head = self.git_out("rev-parse", "HEAD", cwd=wt)
+        self.desk.update(tid, base=base, head=head)
+
+        # Move the checkout's HEAD and dirty its files so both a gitlink change and a dirty check are possible.
+        self.git_out("update-ref", "--no-deref", "HEAD", before, cwd=module)
+        (module / "f.txt").write_text("six\n")  # same size so Git checks the clean filter
+        (wt / "README.md").write_text("local review change\n")
+        self.git_out("config", "diff.submodule", "diff")
+        self.git_out("config", "status.submoduleSummary", "true")
+
+        # Plain Git inside the nested repository can run both configured programs.
+        filter_ran.unlink(missing_ok=True)
+        self.git_out("status", "--short", cwd=module)
+        self.assertTrue(filter_ran.exists())
+        self.git_out("diff", "HEAD", cwd=module)
+        self.assertTrue(diff_ran.exists())
+        filter_ran.unlink()
+        diff_ran.unlink()
+
+        for cmd, args, expected in (("status", ("--short",), " M README.md"), ("diff", (), "+local review change")):
+            with self.subTest(cmd=cmd):
+                code, out, err = self.hansa_git("a", "--worktree", cmd, *args)
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn(expected, out)
+                self.assertNotIn("module", out)
+                self.assertFalse(filter_ran.exists())
+                self.assertFalse(diff_ran.exists())
+                code, out, err = self.hansa_git("a", "--worktree", cmd, "--ignore-submodules=dirty")
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("would read a submodule", err)
+
+        out = self.hansa("diff", tid)
+        self.assertIn("+committed review change", out)
+        self.assertNotIn("Subproject commit", out)
+        code, out, err = self.hansa_git("a", "diff", base, head)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"-Subproject commit {before}", out)
+        self.assertIn(f"+Subproject commit {after}", out)
+        self.assertNotIn("f.txt", out)
+        self.assertFalse(filter_ran.exists())
+        self.assertFalse(diff_ran.exists())
+
     def test_a_repository_inside_an_ignored_folder_is_left_alone(self):
         # git with hansa's options does not look into an ignored folder: a build's or node_modules' repositories stay
         from hansa import run
@@ -35548,6 +36019,284 @@ def save():'''))
         self.assertTrue((wt / "build" / "filter" / ".git").is_dir())
         self.assertTrue((wt / "build" / "fsmonitor" / ".git").is_dir())
         self.assertFalse(marker.exists())
+
+    # What plant_project_files leaves that the start commit (commit_project_files) does not hold, in the order
+    # hansa removes it; and the one file it holds, changed there
+    PLANTED_REMOVED = [".agents", ".claude/hooks", ".claude/pipe", ".claude/settings.local.json", ".codex", ".mcp.json",
+                       "deep/.claude"]
+
+    def commit_project_files(self) -> dict:
+        """The repository's commit holds .claude/settings.json and .claude/commands/c.md, and ignores the other project
+        paths (as an account's global ignore may), a deeper folder and a build folder. Returns what a run must find
+        at the project paths: {path: its text, or "folder"}."""
+        (self.repo / ".claude" / "commands").mkdir(parents=True)
+        (self.repo / ".claude" / "settings.json").write_text('{"permissions": {}}\n')
+        (self.repo / ".claude" / "commands" / "c.md").write_text("cmd\n")
+        (self.repo / ".gitignore").write_text(
+            ".claude/settings.local.json\n.claude/hooks\n.codex/\n.agents/\n.mcp.json\ndeep/\nbuild/\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "project settings", cwd=self.repo)
+        return {".claude": "folder", ".claude/settings.json": '{"permissions": {}}\n', ".claude/commands": "folder",
+                ".claude/commands/c.md": "cmd\n"}
+
+    def plant_script(self) -> Path:
+        """A script that leaves, in the folder it runs in, what an earlier run, check or setup may leave there and git
+        neither sets aside nor cleans: ignored project settings (at the top and deeper), a link to a folder outside
+        with a file in it, a named pipe, a held file changed under skip-worktree, and a build cache."""
+        outside = self.tmp / "outside"
+        outside.mkdir(exist_ok=True)
+        (outside / "keep.sh").write_text("kept\n")
+        script = self.tmp / "plant.py"
+        script.write_text(f"""import os, subprocess
+subprocess.run(["git", "update-index", "--skip-worktree", ".claude/settings.json"], check=True)
+open(".claude/settings.json", "w").write('{{"hooks": "changed"}}\\n')
+open(".claude/settings.local.json", "w").write('{{"hooks": {{}}}}\\n')
+os.symlink({str(outside)!r}, ".claude/hooks")
+os.mkfifo(".claude/pipe")
+for rel in (".codex/config.toml", ".agents/skills/x/SKILL.md", ".mcp.json", "deep/.claude/settings.json",
+            "build/cache.bin"):
+    os.makedirs(os.path.dirname(rel) or ".", exist_ok=True)
+    open(rel, "w").write("left\\n")
+""")
+        return script
+
+    def project_observer(self, real, record) -> Path:
+        """A stand-in for the provider's program: notes the project paths in lane a's worktree as it starts (one JSON
+        line per start in `record`: {path: its text, "folder", "link" or "other"}), then runs `real`."""
+        path = self.tmp / "tools" / f"observe-{Path(real).name}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"""#!{sys.executable}
+import json, os, stat, sys
+wt, seen = {str(self.desk.worktrees_dir / "a")!r}, {{}}
+for top, dirs, files in os.walk(wt):
+    for n in dirs + files:
+        p = os.path.join(top, n)
+        rel = os.path.relpath(p, wt)
+        if any(c in (".claude", ".codex", ".agents", ".mcp.json") for c in rel.split(os.sep)):
+            mode = os.lstat(p).st_mode
+            seen[rel] = ("link" if stat.S_ISLNK(mode) else "folder" if stat.S_ISDIR(mode)
+                         else open(p).read() if stat.S_ISREG(mode) else "other")
+with open({str(record)!r}, "a") as f:
+    f.write(json.dumps(seen) + "\\n")
+os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
+""")
+        path.chmod(0o755)
+        return path
+
+    def assert_project_files_cleared(self, m, record, expected):
+        """The run saw only its start commit's project settings, hansa show says what was removed and put back, and
+        what is outside those names is left: the build cache, and the folder the link led to."""
+        self.assertEqual(m["state"], "done", m)
+        seen = [json.loads(x) for x in record.read_text().splitlines()]
+        self.assertTrue(seen)
+        for s in seen:
+            self.assertEqual(s, expected)
+        wt = Path(m["worktree"])
+        self.assertEqual((wt / "build" / "cache.bin").read_text(), "left\n")
+        self.assertEqual((self.tmp / "outside" / "keep.sh").read_text(), "kept\n")
+        self.assertEqual(m["project_files"], {"removed": self.PLANTED_REMOVED, "restored": [".claude/settings.json"]})
+        self.assertFalse([f for f in m.get("files") or [] if ".claude" in f or ".codex" in f], m)
+        [line] = [x for x in self.hansa("show", m["id"]).splitlines() if x.startswith("project settings")]
+        self.assertIn("removed 7 (.agents, .claude/hooks, .claude/pipe, .claude/settings.local.json, .codex and 2 more)",
+                      line)
+        self.assertIn("put back to the commit's 1 (.claude/settings.json)", line)
+
+    def test_project_settings_the_start_commit_does_not_hold_are_cleared_before_a_claude_code_run(self):
+        # what git keeps in a worktree (ignored files, a skip-worktree change, a named pipe) is not loaded by the next
+        # run: worker, verifier and follow-up alike
+        expected = self.commit_project_files()
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        for kind in ("worker", "verifier", "follow-up"):
+            with self.subTest(kind=kind):
+                record.unlink(missing_ok=True)
+                sh(sys.executable, str(self.plant_script()), cwd=wt)
+                if kind == "worker":
+                    tid = self.desk.new_task("Add hello.txt again")
+                    run_id = tid
+                elif kind == "verifier":
+                    self.hansa("verify", tid)
+                    run_id = self.desk.meta(tid)["verify"]
+                else:
+                    run_id = self.hansa("retry", tid, "Continue").split()[0]
+                self.assert_project_files_cleared(self.settle(d, run_id), record, expected)
+                self.assertTrue(any(e["event"] == "project_files_cleared" and e["task"] == run_id
+                                    for e in map(json.loads, self.desk.events_path.read_text().splitlines())))
+
+    def test_project_settings_the_start_commit_does_not_hold_are_cleared_before_a_codex_run(self):
+        from contrib.codex.tests.codexkit import FAKES
+        expected = self.commit_project_files()
+        record = self.tmp / "seen.jsonl"
+        s = self.codex_runtime_settings()
+        s["providers"]["codex"]["codex_path"] = str(self.project_observer(FAKES / "codex", record))
+        self.assertEqual(self.desk.save_settings(s), [])
+        with self.codex_runtime():
+            self.assertEqual(self.codex_attempt()["state"], "done")
+            record.unlink()
+            sh(sys.executable, str(self.plant_script()), cwd=self.desk.worktrees_dir / "a")
+            m = self.codex_attempt()
+        self.assert_project_files_cleared(m, record, expected)
+
+    def test_project_settings_the_lanes_setup_leaves_are_cleared_before_the_run_starts(self):
+        # the setup runs just before the worker, in the same process: hansa clears after it, outside the sandbox
+        from contrib.codex.tests.codexkit import FAKES
+        expected = self.commit_project_files()
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                s = self.codex_runtime_settings() if provider == "codex" else self.desk.settings()
+                if provider == "codex":
+                    s["providers"]["codex"]["codex_path"] = str(self.project_observer(FAKES / "codex", record))
+                s["lanes"]["a"]["setup"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(self.plant_script()))}"
+                self.assertEqual(self.desk.save_settings(s), [])
+                record.unlink(missing_ok=True)
+                if provider == "codex":
+                    with self.codex_runtime():
+                        m = self.codex_attempt()
+                else:
+                    m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+                self.assert_project_files_cleared(m, record, expected)  # what the setup left, removed after it
+                self.assertTrue((self.desk.tasks_dir / m["id"] / "setup.log").exists())
+
+    def test_a_submodule_under_a_project_folder_is_held_by_the_clearing_before_a_run_and_after_the_setup(self):
+        # skills kept as a submodule: its checkout stays, unlisted; what is left beside it is still removed
+        sub = self.tmp / "skills"
+        sub.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=sub)
+        (sub / "SKILL.md").write_text("skill\n")
+        sh("git", "add", "-A", cwd=sub)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "s", cwd=sub)
+        sh("git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), ".agents/skills", cwd=self.repo)
+        (self.repo / ".gitignore").write_text(".agents/left.md\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "skills", cwd=self.repo)
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        update = "git -c protocol.file.allow=always submodule update --init -q && echo left > .agents/left.md"
+        for when in ("before", "after the setup"):
+            with self.subTest(when=when):
+                record.unlink(missing_ok=True)
+                s = self.desk.settings()
+                s["lanes"]["a"]["setup"] = update if when != "before" else ""
+                self.assertEqual(self.desk.save_settings(s), [])
+                if when == "before":
+                    sh("/bin/sh", "-c", update, cwd=wt)
+                else:  # the setup checks it out
+                    sh("git", "submodule", "deinit", "-f", "-q", ".agents/skills", cwd=wt)
+                    self.assertFalse((wt / ".agents" / "skills" / "SKILL.md").exists())
+                m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+                self.assertEqual(m["state"], "done", m)
+                [seen] = [json.loads(x) for x in record.read_text().splitlines()]
+                self.assertEqual(seen[".agents/skills/SKILL.md"], "skill\n")
+                self.assertNotIn(".agents/left.md", seen)
+                self.assertEqual((wt / ".agents" / "skills" / "SKILL.md").read_text(), "skill\n")
+                self.assertEqual(m["project_files"], {"removed": [".agents/left.md"], "restored": []})
+                [line] = [x for x in self.hansa("show", m["id"]).splitlines() if x.startswith("project settings")]
+                self.assertIn("removed 1 (.agents/left.md)", line)
+                self.assertNotIn("skills", line)
+
+    def test_a_path_cleared_before_a_run_and_again_after_the_setup_is_listed_once(self):
+        self.commit_project_files()
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        plant = "mkdir -p .codex && echo left > .codex/config.toml && echo '{}' > .claude/settings.local.json"
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = plant
+        self.assertEqual(self.desk.save_settings(s), [])
+        sh("/bin/sh", "-c", plant, cwd=wt)  # there before the run starts, and the setup leaves them again
+        m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["project_files"], {"removed": [".claude/settings.local.json", ".codex"], "restored": []})
+        [line] = [x for x in self.hansa("show", m["id"]).splitlines() if x.startswith("project settings")]
+        self.assertIn("removed 2 (.claude/settings.local.json, .codex)", line)
+
+    def test_the_clearing_before_a_run_runs_no_hook_and_no_program_the_repositorys_config_names(self):
+        # where hansa's own git settings (run.git_settings) meet the clearing: the start commit's files are read
+        # (ls-tree, and cat-file --batch on the raw path) and put back, and no hook or fsmonitor runs
+        from hansa import run
+        self.commit_project_files()
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        marker = self.tmp / "ran.txt"
+        hooks = self.repo / ".git" / "hooks"
+        for name in ("post-checkout", "post-index-change", "reference-transaction", "pre-auto-gc"):
+            (hooks / name).write_text(f"#!/bin/sh\necho {name} >> {marker}\n")
+            (hooks / name).chmod(0o755)
+        sh("git", "config", "core.fsmonitor", f"echo fsmonitor >> {marker}; false", cwd=self.repo)
+        self.addCleanup(lambda: sh("git", "config", "--unset", "core.fsmonitor", cwd=self.repo))
+        (wt / ".claude" / "settings.json").write_text('{"hooks": "changed"}\n')  # held, changed: put back
+        (wt / ".claude" / "settings.local.json").write_text("{}\n")  # not held: removed
+        tid = self.desk.new_task("Add hello.txt again")
+        self.desk.update(tid, run_start={"commit": self.git_out("rev-parse", "main")})
+        real, ran = run.subprocess.run, []
+
+        def seen(argv, *a, **kw):
+            if argv[:1] == ["git"]:
+                ran.append(list(argv))
+            return real(argv, *a, **kw)
+        with unittest.mock.patch.object(run.subprocess, "run", seen):
+            done = run.clear_project_files(self.desk, wt, tid, "main")
+        self.assertEqual(done, {"removed": [".claude/settings.local.json"], "restored": [".claude/settings.json"]})
+        self.assertEqual((wt / ".claude" / "settings.json").read_text(), '{"permissions": {}}\n')
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        self.assertIn("cat-file", [a for c in ran for a in c])  # the raw path ran
+        for argv in ran:  # each of its git calls carries hansa's own settings
+            self.assertEqual(argv[:3 + len(run.git_settings(wt))],
+                             ["git", "-c", "core.quotePath=false", *run.git_settings(wt)], argv)
+        # and the whole run, its clearing included, runs none of them either
+        (wt / ".claude" / "settings.local.json").write_text("{}\n")
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        # plain git there does run them: the test's hook and fsmonitor are ones git would run
+        sh("git", "checkout", "-q", "-b", "plain-git", cwd=wt)
+        subprocess.run(["git", "status"], cwd=wt, capture_output=True)
+        self.assertIn("post-checkout", marker.read_text())
+        self.assertIn("fsmonitor", marker.read_text())
+
+    def test_project_settings_hansa_cannot_remove_stop_the_run_before_it_starts(self):
+        if os.geteuid() == 0:
+            self.skipTest("root removes a file whatever its folder's mode")
+        self.commit_project_files()
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        lock = "mkdir -p .codex/locked && echo x > .codex/locked/config.toml && chmod 500 .codex/locked"
+        self.addCleanup(lambda: (wt / ".codex" / "locked").exists() and (wt / ".codex" / "locked").chmod(0o700))
+        for when in ("before", "after the setup"):
+            with self.subTest(when=when):
+                s = self.desk.settings()
+                s["lanes"]["a"]["setup"] = lock if when != "before" else ""
+                self.assertEqual(self.desk.save_settings(s), [])
+                if when == "before":
+                    sh("/bin/sh", "-c", lock, cwd=wt)
+                m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+                self.assertEqual(m["state"], "failed", m)
+                self.assertTrue(m["error"].startswith("could not start: hansa could not remove .codex from the worktree, "
+                                                      "project settings its start commit does not hold"), m["error"])
+                self.assertEqual(len(re.findall(r"\. |; ", m["error"])), 0, m["error"])  # one sentence
+                self.assertFalse(record.exists())  # the provider's program never started
+                self.assertEqual(m.get("files") or [], [])
+                (wt / ".codex" / "locked").chmod(0o700)
+                shutil.rmtree(wt / ".codex")
+
+    def test_the_project_names_hansa_clears_are_those_the_codex_adapter_protects(self):
+        from contrib.codex.tests.codexkit import shim
+        from hansa import project_files, run
+        self.assertEqual({n.split("/")[0] for n in shim.NESTED_CONFIG}, set(run.PROJECT_SETTINGS_NAMES))
+        self.assertEqual(set(project_files.NAMES), {*run.PROJECT_SETTINGS_NAMES, ".mcp.json"})
 
     def test_a_branch_ref_that_leads_to_another_ref_does_not_lead_hansas_commit_onto_it(self):
         # commit hansa's end-of-session commit onto the base, while HEAD still names the session's branch
@@ -38109,8 +38858,6 @@ def save():'''))
                          "Added hello.txt. Checked it exists.\n")
 
     def test_workers_are_not_given_tools_that_need_someone_there(self):
-        tools = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
-                 "AskUserQuestion", "Monitor"]
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
@@ -38122,10 +38869,78 @@ def save():'''))
             main(["--desk", str(self.desk.root), "verify", tid])
         self.settle(d, self.desk.meta(tid)["verify"])
         task, verify = [json.loads(x) for x in seen.read_text().splitlines()]
-        for argv in (task, verify):
-            for t in tools:
-                self.assertIn(t, self.denied_by(argv))
-            self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
+        for kind, argv in (("worker", task), ("verifier", verify)):
+            with self.subTest(kind=kind):
+                self.assert_worker_tools(argv)
+                self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
+
+        [guard] = json.loads(task[task.index("--settings") + 1])["hooks"]["PreToolUse"]
+        [action] = guard["hooks"]
+        self.assertEqual(action["type"], "command")
+        for args, status in [({"command": "tail -f build.log", "description": "build output"}, 0),
+                             ({"ws": {"url": "wss://example.invalid"}, "description": "events"}, 2),
+                             ({"command": "true", "mcp": "example"}, 2), (None, 2)]:
+            with self.subTest(args=args):
+                r = subprocess.run(action["command"], shell=True, input=json.dumps({"tool_input": args}),
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, status, r.stderr)
+                self.assertEqual(r.stdout, "")  # a permitted command still goes through normal Bash permission checks
+
+    def test_workers_do_not_inherit_the_callers_team_or_shared_checklist(self):
+        from hansa import run
+        shared = {"CLAUDE_CODE_TASK_LIST_ID": "shared-list", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+                  "CLAUDE_INTERNAL_ASSISTANT_TEAM_NAME": "team", "CLAUDE_INTERNAL_SESSION_TASK_LIST_ID": "team-list"}
+        settings = self.desk.settings()
+        lane = {**settings["lanes"]["a"], "env": {**shared, "FROM_LANE": "yes"}}
+        tid = self.desk.new_task("Check the worker environment")
+        with unittest.mock.patch.dict(os.environ, shared):
+            env = run.worker_env(self.desk, tid, "a", lane, "claude", settings["providers"]["claude"], str(self.tmp))
+        self.assertEqual(shared.keys() & env.keys(), set())
+        lane_file = Path(env["CLAUDE_ENV_FILE"]).read_text()
+        self.assertIn("export FROM_LANE=yes", lane_file)
+        for name in shared:
+            self.assertNotIn(f"export {name}=", lane_file)
+
+    def test_resumes_and_wrap_ups_limit_tools_from_pre_upgrade_commands(self):
+        from hansa import run
+        write = run.write_text
+
+        def save_old_command(path, contents, *args, **kwargs):
+            if path.name == run.RESUME_ARGV:
+                argv = json.loads(contents)
+                # Both saved formats predate command monitors. Preserve their file/git fences and web grants.
+                at = argv.index("--tools")
+                if kind == "resume":
+                    del argv[at:at + 2]
+                else:
+                    argv[at + 1] = "Bash,Read,Glob,Grep,Edit,Write,NotebookEdit,TodoWrite,WebFetch"
+                deny, allow = argv.index("--disallowedTools"), argv.index("--allowedTools")
+                old_denies = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
+                              "RemoteTrigger", "PushNotification", "AskUserQuestion", "Monitor"]
+                if kind == "wrap-up":
+                    old_denies += ["GetTask", "Yield", "ListAgents", "SendMessage", "SendFile"]
+                argv[deny + 1:allow] = [r for r in argv[deny + 1:allow] if "(" in r] + old_denies
+                settings = argv.index("--settings") + 1
+                box = json.loads(argv[settings])
+                box.pop("hooks", None)
+                argv[settings] = json.dumps(box)
+                contents = json.dumps([*argv, web_rule, "WebFetch", "ListAgents"])
+            return write(path, contents, *args, **kwargs)
+
+        for kind, web_rule in (("resume", "WebSearch"), ("wrap-up", "WebFetch(domain:docs.python.org)")):
+            with self.subTest(kind=kind), unittest.mock.patch.object(run, "write_text", save_old_command):
+                if kind == "resume":
+                    seen = self.tmp / "resumed.jsonl"
+                    self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen)})
+                    calls = self.calls_of(seen.name)
+                else:
+                    _, calls = self.turns_run()
+                [call] = calls
+                self.assert_worker_tools(call["argv"], web_rule.partition("(")[0])
+                self.assertIn("Bash(git push:*)", self.denied_by(call["argv"]))
+                grants = self.allowed_by(call["argv"])
+                self.assertIn(web_rule, grants)
+                self.assertFalse({"WebFetch", "ListAgents"}.intersection(grants))
 
     def test_background_work_still_running_when_the_worker_ended_is_said(self):
         line = ("the worker ended while its background work was still running ({}); its report may be "
@@ -38154,6 +38969,7 @@ def save():'''))
         calls = [json.loads(x) for x in seen.read_text().splitlines()]
         self.assertEqual(len(calls), 1)
         argv, prompt = calls[0]["argv"], " ".join(calls[0]["prompt"].split())
+        self.assert_worker_tools(argv)
         self.assertEqual(argv[argv.index("--resume") + 1], m["session_id"])
         self.assertNotIn("--session-id", argv)
         self.assertIn("Run a long build or test suite in the foreground",  # its own run's Bash limits as well
@@ -38304,6 +39120,7 @@ def save():'''))
         # continued once, in its own session (RESUME_FACTS 1), a few turns (RESUME_FACTS 4), told why and what for
         [call] = calls
         argv, prompt = call["argv"], " ".join(call["prompt"].split())
+        self.assert_worker_tools(argv)
         self.assertEqual(argv[argv.index("--resume") + 1], m["session_id"])
         self.assertNotIn("--session-id", argv)
         self.assertEqual(argv[argv.index("--max-turns") + 1], str(run.WRAP_UP_TURNS))
@@ -38618,6 +39435,7 @@ def save():'''))
         self.assertEqual(m["state"], "done", m)
         # the command line (FORK_FACTS 1, 3): forked from the parent's session, with an id of its own
         [argv] = [a for a in self.calls_of() if "--fork-session" in a]
+        self.assert_worker_tools(argv)
         self.assertEqual(argv[argv.index("--resume") + 1], parent["session_id"])
         sid = argv[argv.index("--session-id") + 1]
         self.assertNotEqual(sid, parent["session_id"])
@@ -43333,10 +44151,15 @@ def save():'''))
 
     def test_helpers_name_only_tools_claude_code_has(self):
         code = Path(__file__).resolve().parent.parent / "hansa" / "agents"
-        mine = {"operator.md": "tools: Read, Bash, Edit, Write"}  # the one helper that changes the machine
-        for f in code.glob("*.md"):
-            tools = next(x for x in f.read_text().splitlines() if x.startswith("tools:"))
-            self.assertEqual(tools, mine.get(f.name, "tools: Read, Bash"), f.name)
+        read_only = ["tools: Read, Bash", HELPER_DENY_LINE, *HELPER_BASH_HOOK.splitlines()]
+        expected = {"scout.md": read_only, "reviewer.md": read_only,
+                    "operator.md": ["tools: Read, Bash, Edit, Write", HELPER_DENY_LINE]}
+        self.assertCountEqual([f.name for f in code.glob("*.md")], expected)
+        for name, fields in expected.items():
+            head = (code / name).read_text().partition("\n---\n")[0].splitlines()
+            with self.subTest(helper=name):
+                self.assertEqual([x for x in head if x != "---" and not x.startswith(
+                    ("name:", "description:", "effort:", "maxTurns:"))], fields)
 
     def test_the_page_only_shows_tasks_by_their_id(self):
         skip_unless_ports(self)
@@ -50183,6 +51006,87 @@ def save():'''))
         self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
         d.tick()
         self.assertIn("main moved since it was asked", release.get(self.desk, rid)["void"])
+
+    # -- the repository's git hooks never run in hansa's own git, in the lane's own checkout too ------------------
+    HOOK_NAMES = ("pre-merge-commit", "prepare-commit-msg", "commit-msg", "pre-commit", "post-commit", "post-merge",
+                  "post-checkout", "reference-transaction", "post-rewrite", "pre-auto-gc", "post-index-change")
+
+    def task_adding_hooks(self, where, **lane):
+        """A finished task on lane a whose branch adds every hook in HOOK_NAMES as a tracked, executable file in
+        .githooks, each adding its name to a marker file, and the repository set to run them: core.hooksPath set to
+        .githooks ("tracked"), or a hook of its own in .git/hooks for each that runs the tracked one ("own")."""
+        marker = self.tmp / "hooks-ran.txt"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {**(s["lanes"]["a"].get("env") or {}), "FAKE_HOOKS": f".githooks:{marker}",
+                                  "FAKE_HOOK_NAMES": " ".join(self.HOOK_NAMES)}
+        s["lanes"]["a"].update(lane)
+        self.assertEqual(self.desk.save_settings(s), [])
+        if where == "tracked":
+            self.git_out("config", "core.hooksPath", ".githooks")
+        else:
+            for name in self.HOOK_NAMES:
+                hook = self.repo / ".git" / "hooks" / name
+                hook.write_text(f"#!/bin/sh\ntest -x .githooks/{name} && .githooks/{name}\necho own-{name} >> {marker}\n")
+                hook.chmod(0o755)
+        d, tid = Dispatcher(self.desk), self.desk.new_task("Add hello.txt and hooks")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertIn(".githooks/post-merge", self.git_out("ls-tree", "-r", "--name-only", self.desk.meta(tid)["head"]))
+        return d, tid, marker
+
+    def assert_hooks_were_real(self, marker):
+        """Plain git in the lane's checkout does run them: the test's hooks are ones git would run."""
+        self.git_out("checkout", "-q", "-b", "plain-git")
+        self.assertIn("post-checkout", marker.read_text())
+
+    def merge_runs_no_hook(self, where):
+        d, tid, marker = self.task_adding_hooks(where)
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertTrue(os.access(self.repo / ".githooks" / "post-merge", os.X_OK))  # in the checkout, runnable
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        self.assert_hooks_were_real(marker)
+
+    def test_hansas_merge_runs_no_hook_the_branch_adds_with_core_hookspath(self):
+        self.merge_runs_no_hook("tracked")
+
+    def test_hansas_merge_runs_no_hook_of_the_repositorys_hooks_folder(self):
+        self.merge_runs_no_hook("own")
+
+    def landing_runs_no_hook(self, where):
+        d, tid, marker = self.task_adding_hooks(where, merge_check="test -f hello.txt")
+        self.assertIn("is not merged yet", self.hansa("merge", tid))
+        m = self.settle_merge(d, tid)
+        self.assertEqual(m["state"], "merged", m.get("merge_check_result"))
+        self.assertEqual(self.git_out("rev-parse", "main"), m["merge_check_result"]["commit"])  # landed: moved there
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        self.assert_hooks_were_real(marker)
+
+    def test_the_landing_of_a_checked_merge_runs_no_hook_with_core_hookspath(self):
+        self.landing_runs_no_hook("tracked")
+
+    def test_the_landing_of_a_checked_merge_runs_no_hook_of_the_repositorys_hooks_folder(self):
+        self.landing_runs_no_hook("own")
+
+    def fixed_release_runs_no_hook(self, where):
+        from hansa import release
+        seen = self.tmp / "released.txt"
+        d, tid, marker = self.task_adding_hooks(where)
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        marker.unlink(missing_ok=True)  # the merge has its own tests: here, the release's checkout alone
+        self.fixed_target("install", f"ls .githooks > {seen}")
+        self.hansa("release", "a", "install")
+        r = self.settle_release(d, 1)
+        self.assertEqual(r["state"], "done", r)
+        self.assertIn("post-checkout", seen.read_text())  # it ran in a checkout that holds them
+        self.assertEqual(self.checkouts(), [])
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        self.assertIsNotNone(release.get(self.desk, 1))
+        self.assert_hooks_were_real(marker)
+
+    def test_a_fixed_releases_checkout_runs_no_hook_with_core_hookspath(self):
+        self.fixed_release_runs_no_hook("tracked")
+
+    def test_a_fixed_releases_checkout_runs_no_hook_of_the_repositorys_hooks_folder(self):
+        self.fixed_release_runs_no_hook("own")
 
     # -- fixed targets, and the forbidden-word scan without the desk lock -------------------------------------------
     def fixed_target(self, name, command, tick=True):
@@ -61989,7 +62893,7 @@ else:
         self.assertEqual(r["code"]["hash"], release._code_hash(self.desk, 1, code))
         key = release.code_key_file(self.desk)
         self.assertEqual((key.parent, key.stat().st_mode & 0o777), (self.desk.secrets_dir, 0o600))
-        self.assertEqual(self.desk.keys(), {})
+        self.assertEqual(self.desk.keys(), {"release codes": key.read_text().strip()})
         row = release.page_rows(self.desk, self.desk.settings())[0]
         self.assertTrue(row["code_sent"])
         self.assertIn("went out in the principal's alert", row["code"])

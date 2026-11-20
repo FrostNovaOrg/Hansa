@@ -4,6 +4,7 @@ description: Reads one finished task's change at high effort, for high-stakes ch
 effort: high
 maxTurns: 200
 tools: Read, Bash
+disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, TaskUpdate, GetTask, Yield
 hooks:
   PreToolUse:
     - matcher: "Bash"

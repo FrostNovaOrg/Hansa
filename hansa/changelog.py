@@ -5,6 +5,7 @@ import re
 import subprocess
 
 from .desk import Desk, lane_targets
+from .run import git_settings
 from .release import _git_bytes, last_out, repo_key, hansa_merges, history_cutoff
 
 
@@ -56,7 +57,7 @@ def lines(desk: Desk, lane: str, target: str | None = None):
     counted = f"from release #{previous['id']}; range {rng}" if previous else (
         f"no done release yet; " + ("since the first hansa landing, up to " if cutoff else "every commit up to ")
         + f"{base}'s tip ({tip[:7]})")
-    if since and subprocess.run(["git", "merge-base", "--is-ancestor", since, tip], cwd=repo,
+    if since and subprocess.run(["git", *git_settings(repo), "merge-base", "--is-ancestor", since, tip], cwd=repo,
                                 capture_output=True, stdin=subprocess.DEVNULL).returncode:
         counted += f"; release commit {since} is not in {base}'s history"
     yield f"Changelog for lane {lane}, target {target}: {counted}"

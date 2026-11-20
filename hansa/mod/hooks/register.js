@@ -357,6 +357,16 @@ async function lineStart($, st) {
 export function register(on) {
   const st = fresh()
 
+  // Claude Code gives a teammate SendMessage and shared task tools even if its custom agent
+  // definition excludes them. Keep the desk's helpers on the subagent path while that holds.
+  on('agent.spawn', async ($, e, next) => {
+    if (e.isTeammate && ['scout', 'reviewer', 'operator'].includes(e.subagentType) &&
+        await $.env.get('HANSA_MOD_LINE_ONLY') !== '1') {
+      return { deny: `Start ${e.subagentType} as a subagent. A teammate receives the team's messaging tools.` }
+    }
+    return next(e)
+  })
+
   on('session.start', async ($, e, next) => {
     await born($, st)
     const result = await next(e)

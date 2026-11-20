@@ -25,7 +25,8 @@ from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entr
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, refuse_inner_desk, compact_settings, work_lane_problem, write_text, mkdir_private)
-from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF, GIT_REVIEW_NO_PROGRAMS, NO_SUBMODULES,
+                  HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -833,18 +834,35 @@ GIT_LIST_FLAGS = {  # what branch and tag take when they only list; the rest cre
                "--omit-empty", "--no-abbrev", "--abbrev"},
     "tag": {"-l", "--list", "-n", "--color", "--no-color", "--column", "--no-column", "-i", "--ignore-case",
             "--omit-empty"}}
-GIT_NO_PROGRAMS = {"diff": ("--no-ext-diff", "--no-textconv"), "show": ("--no-ext-diff", "--no-textconv"),
-                   "log": ("--no-ext-diff", "--no-textconv"), "blame": ("--no-textconv",),
-                   "grep": ("--no-textconv",)}
-# options that read outside the repository or run gpg, by the shortest start git takes for them, and where
-GIT_REFUSED_PREFIX = (("--no-index", "--no-i", ("diff", "grep"), "it reads files outside the lane's repository"),
-                      ("--contents", "--con", ("blame",), "it reads a file outside the lane's repository"),
-                      ("--ignore-revs-file", "--ignore-revs", ("blame",), "it reads a file outside the lane's repository"),
+GIT_PATCH_READS = ("diff", "show", "log")
+GIT_NO_PROGRAMS = {**dict.fromkeys(GIT_PATCH_READS, GIT_REVIEW_NO_PROGRAMS),
+                   "blame": ("--no-textconv",), "grep": ("--no-textconv",)}
+GIT_SUBMODULE_STATUS = (*GIT_PATCH_READS, "status")
+GIT_WORKTREE_STATUS = ("status", "diff")
+GIT_OUTSIDE = "it reads files outside the lane's repository"
+GIT_FILE_INPUT = "it reads a file outside the lane's repository"
+GIT_SUBMODULE_INPUT = "it would read a submodule's repository"
+# Options that read extra files or run gpg, using the shortest starts Git can take.
+GIT_REFUSED_PREFIX = (("--no-index", "--no-i", ("diff", "grep"), GIT_OUTSIDE),
+                      ("--untracked", "--u", ("grep",), GIT_OUTSIDE),
+                      ("--exclude-standard", "--exc", ("grep",), GIT_OUTSIDE),
+                      ("--no-exclude-standard", "--no-exc", ("grep",), GIT_OUTSIDE),
+                      ("--recurse-submodules", "--rec", ("grep", "ls-files"), GIT_SUBMODULE_INPUT),
+                      ("--submodule", "--subm", GIT_PATCH_READS, GIT_SUBMODULE_INPUT),
+                      ("--contents", "--con", ("blame",), GIT_FILE_INPUT),
+                      ("--ignore-revs-file", "--ignore-revs", ("blame",), GIT_FILE_INPUT),
+                      ("--exclude-from", "--exclude-f", ("ls-files",), GIT_FILE_INPUT),
+                      ("--exclude-per-directory", "--exclude-p", ("ls-files",), GIT_FILE_INPUT),
+                      ("--alternate-refs", "--alternate", GIT_READS, "it would read refs outside the lane's repository"),
+                      ("--batch-all-objects", "--batch-a", ("cat-file",),
+                       "it would read objects outside the lane's history and index"),
                       ("--show-signature", "--show-s", ("log", "show"), "it would run gpg"))
+# An attached value consumes the remaining letters, so only examine flags before it.
+GIT_FILE_FLAGS = {"grep": ("f", "[eABCm]"), "blame": ("S", "[LCM]"), "ls-files": ("X", "x")}
 GIT_LIST_VALUES = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
 
 
-def git_refused(args: list) -> str:
+def git_refused(args: list, worktree: bool = False) -> str:
     """Why hansa git will not run `git ARGS`; '' when it will."""
     if not args:
         return "name a git command, such as hansa git LANE log --oneline -5"
@@ -856,29 +874,54 @@ def git_refused(args: list) -> str:
     if cmd not in GIT_READS:
         return (f"git {cmd} is not one hansa git runs; it runs only commands that read: {', '.join(GIT_READS)} "
                 f"(branch and tag only to list). {changes}")
-    opts = args[1:args.index("--")] if "--" in args else args[1:]
+    sep = args.index("--", 1) if "--" in args else len(args)
+    # A preceding option can consume `--` as its value. Check beyond it when it may be data.
+    opts = args[1:sep] if sep == 1 or not args[sep - 1].startswith("-") or "=" in args[sep - 1] else args[1:]
+    eol = other = ""
     for x in opts:
-        name = x.partition("=")[0]
-        if name.startswith("--") and len(name) > 3 and any(r.startswith(name) for r in GIT_REFUSED_LONG):
+        name, _, value = x.partition("=")
+        if name.startswith("--") and (len(name) > 3 or (cmd == "cat-file" and name == "--t")) and any(
+                r.startswith(name) for r in GIT_REFUSED_LONG):
             return f"{x} is refused: it would write a file or run a program"
-        if not name.startswith("--") and name.startswith("-") and (
+        short = name.startswith("-") and not name.startswith("--")
+        if short and (
                 name.startswith("-O") or (cmd == "grep" and "O" in name)
-                or (name.startswith("-o") and cmd in ("diff", "log", "show"))):
+                or (name.startswith("-o") and cmd in GIT_PATCH_READS)):
             return f"{x} is refused: it would write a file or run a program"
-        # blame -S FILE, alone or after other flags (-wS FILE); -L, -C and -M take the rest of the word as their value
-        if cmd == "blame" and not name.startswith("--") and name.startswith("-") and "S" in re.split("[LCM]", x[1:])[0]:
-            return f"{x} is refused: it reads a file outside the lane's repository"
+        if short and cmd in GIT_FILE_FLAGS:
+            flag, takes_value = GIT_FILE_FLAGS[cmd]
+            short_flags = re.split(takes_value, name[1:], maxsplit=1)[0]
+            if flag in short_flags:
+                return f"{x} is refused: {GIT_FILE_INPUT}"
+        if cmd == "ls-files":
+            if name.startswith("--eo") and "--eol".startswith(name):
+                eol = x
+            if (short and any(flag in short_flags for flag in "ok") or
+                    name.startswith(("--o", "--k")) and any(full.startswith(name) for full in ("--others", "--killed"))):
+                other = x
+        # In worktree status and diff, even 'dirty' would let Git read a submodule's HEAD.
+        if cmd in GIT_SUBMODULE_STATUS and (
+                name.startswith("--ignore-") and "--ignore-submodules".startswith(name) and
+                (value in ("none", "untracked") or value == "dirty" and worktree and cmd in GIT_WORKTREE_STATUS)
+                or name.startswith("--no-ignore-") and "--no-ignore-submodules".startswith(name)):
+            return f"{x} is refused: {GIT_SUBMODULE_INPUT}"
         for full, shortest, cmds, why in GIT_REFUSED_PREFIX:
             if cmd in cmds and name.startswith(shortest) and full.startswith(name):
                 return f"{x} is refused: {why}"
+    if eol and other:
+        return f"{eol} with {other} is refused: {GIT_OUTSIDE}"
     if cmd == "diff":  # a path outside the repository makes git diff compare any two files, as --no-index does
-        for x in args[1:]:
-            if not x.startswith("-") and (x.startswith(("/", "~")) or ".." in x.split("/")):
+        for i, x in enumerate(args[1:], 1):
+            if (i > sep or not x.startswith("-")) and (x.startswith(("/", "~")) or ".." in x.split("/")):
                 return f"{x} is refused: git diff would read files outside the lane's repository"
     if cmd in ("branch", "tag"):
+        opts = args[1:]
         listing, words, i = False, [], 0
         while i < len(opts):
             x = opts[i]
+            if x == "--":
+                words.extend(opts[i + 1:])
+                break
             name = x.partition("=")[0]
             if name in GIT_LIST_VALUES:
                 listing = True
@@ -905,9 +948,9 @@ def cmd_git(a):
     ln = desk.settings()["lanes"].get(a.lane)
     if not ln:
         raise SystemExit(f"hansa: no lane {a.lane}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
-    why = git_refused(args)
+    why = git_refused(args, where)
     if why:
-        raise SystemExit(f"hansa git: {why}. Nothing was run")
+        raise SystemExit(desk.redact(f"hansa git: {why}. Nothing was run"))
     for tid in dict.fromkeys(re.findall(r"(?<![\w.-])task/(t\d+)(?![\w])", " ".join(args))):
         try:
             named = desk.meta(tid)
@@ -931,15 +974,28 @@ def cmd_git(a):
     # gpg for signatures (also for a format such as %G?); a filter driver it names still runs, as the desk's account.
     # The signature programs become hansa's stand-in, which reads its input and fails: not false, which can end
     # before git has written the signed text to it, and git then dies of SIGPIPE
-    # in a worktree, git status and diff look into a repository inside it (a submodule, or one a worker made) and
-    # run git there under that one's config: never there
-    inside = ("--ignore-submodules=all",) if where and args[0] in ("status", "diff") else ()
-    args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *inside, *args[1:]]
+    cmd = args[0]
+    flags = GIT_NO_PROGRAMS.get(cmd, ())
+    # Worktree status and diff must never run Git under a nested repository's own config.
+    if where and cmd in GIT_WORKTREE_STATUS:
+        flags += (NO_SUBMODULES,)
+    elif cmd in GIT_PATCH_READS:
+        flags = GIT_REVIEW_DIFF
+    elif cmd == "status":
+        flags += ("--ignore-submodules=dirty",)
+    elif cmd == "blame":
+        flags += ("--no-ignore-revs-file",)
     no_sig = str(NO_SIGNATURE)
-    no_programs = ["-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false",
-                   "-c", "submodule.recurse=false",
-                   "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
-    r = subprocess.run(["git", "--no-pager", *no_programs, *args],
+    git_cmd = ["git", "--no-pager", *GIT_REVIEW_CONFIG, "-c", "core.quotePath=false", "-c", "core.fsmonitor=false",
+               "-c", "log.showSignature=false", "-c", "grep.fallbackToNoIndex=false",
+               "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
+    if cmd == "diff":  # Outside a repository Git defaults to --no-index, even with two relative paths.
+        location = subprocess.run([*git_cmd, "rev-parse", "--is-inside-work-tree", "--is-bare-repository"],
+                                  cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  errors="replace") if cwd.is_dir() else None
+        if location is None or location.returncode or "true" not in location.stdout.splitlines():
+            raise SystemExit(f"hansa git: no Git checkout at lane {a.lane}'s repository or worktree. Nothing was run")
+    r = subprocess.run([*git_cmd, cmd, *flags, *args[1:]],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     sys.stdout.write(desk.redact(r.stdout))
     sys.stderr.write(desk.redact(r.stderr))
@@ -950,8 +1006,9 @@ def cmd_git(a):
 def cmd_merge(a):
     desk = Desk.find(a.desk)
     # Nothing changes the task, its verification, the keys or another merge until this one is done.
-    # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
-    # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
+    # hansa's git runs none of the repository's hooks (checkout_git_settings); a program its config names that git
+    # still runs here (a merge or filter driver) and that would change the desk stops at once (HANSA_MERGING)
+    # instead of waiting for this merge forever.
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
         verification_note = (f"; verification {v['task']}: holds, with notes (report: hansa show {v['task']} --report)"
@@ -2587,6 +2644,10 @@ def cmd_coordinator(a):
     hooks = {**turns, "SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
         f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}, *turns["SessionStart"]]}
+    # A named Agent call can launch a teammate with mandatory messaging, even when its definition
+    # denies it. The ordinary command hook also runs on versions and starts without hansa's mod.
+    guard = shlex.join([sys.executable, "-I", str(Path(__file__).resolve().with_name("helper_spawn.py"))])
+    hooks["PreToolUse"] = [{"matcher": "^Agent$|^Task$", "hooks": [{"type": "command", "command": guard + " || exit 2"}]}]
     own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)
@@ -2768,8 +2829,9 @@ def helper_text(text: str, model: str) -> str:
     own model field; with none, as hansa ships it, so it runs on the coordinator's model. A model the coordinator names
     for one call of the Agent tool comes before either (Claude Code's order)."""
     # the read-only helpers' hook that holds their shell to reading commands (helper_bash.py), as this hansa runs it
-    text = text.replace('"HANSA_HELPER_BASH"', json.dumps(shlex.join(
-        [sys.executable, "-I", str(Path(__file__).with_name("helper_bash.py"))])))
+    command = shlex.join([sys.executable, "-I", str(Path(__file__).with_name("helper_bash.py"))])
+    # Claude Code blocks on exit 2. A missing interpreter otherwise gives the shell's exit 127.
+    text = text.replace('"HANSA_HELPER_BASH"', json.dumps(command + " || exit 2"))
     if not model:
         return text
     head, sep, rest = text.partition("\n---\n")

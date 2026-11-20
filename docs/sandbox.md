@@ -171,6 +171,46 @@ conversation, but for two cases: a follow-up may go on in the conversation of th
 ([Going on in the earlier conversation](tasks.md#going-on-in-the-earlier-conversation)), and a repeated
 verification of the same task in the earlier verification's ([A repeated verification](tasks.md#a-repeated-verification)).
 
+Hansa gives each Claude Code worker an explicit list of built-in tools with `--tools`.
+The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit` and sandboxed
+`Bash`. Bench commands run through Bash.
+
+**Workers have no built-in checklist on Claude Code 2.1.329 with its default task tools.**
+`TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` normally use the current session's
+list. Claude Code can select a shared list through `CLAUDE_CODE_TASK_LIST_ID`, and in
+team mode `TaskUpdate` can send an assignment to a teammate. Hansa starts workers
+without inherited list or team variables. Claude Code can still apply those variables
+from settings after launch, and managed settings take precedence over hansa's command-line
+settings. Hansa therefore denies all four tools. Workers can use `TodoWrite` on releases
+that offer it.
+
+Workers can watch a running command with `Monitor` and stop a job with `TaskStop`
+(`KillShell` in older versions). Hansa also allows `TaskOutput` and its older name
+`BashOutput` on releases that provide them. Claude Code 2.1.329 delivers background
+results as notifications. The worker's Monitor hook accepts the shell-command form, which uses Bash
+permissions. Hansa drops blanket lane grants for Monitor. If managed policy disables
+command hooks, Claude Code's own WebSocket permissions and the lane's network list
+govern its WebSocket form.
+The lane can also grant `WebSearch` and site-specific `WebFetch`. A lane permission can approve
+the use of an available tool. Adding another built-in name to the lane cannot enable that tool.
+Hansa denies the known session, team, scheduling, project and connector tools by name.
+Claude Code's `Agent` can deliver a prompt to a teammate or start a cloud session, so workers
+also forgo ordinary subagents. `Skill` can fork an agent and `ToolSearch` can reconnect to
+MCP servers. Workers can read project skill instructions with `Read`.
+Verifications, follow-ups, resumes and wrap-ups use the same list, including when a saved
+command predates an upgrade. Newly introduced built-ins stay outside the list.
+`hansa ping` uses an empty list.
+
+The coordinator's `scout` and `reviewer` subagents get `Read` and `Bash`. A hook in
+each definition checks that its Bash command only reads. If the hook's Python interpreter
+is missing, Claude Code blocks the command.
+`operator` also gets `Edit` and `Write`. All three exclude messaging, agent discovery and
+the background-task tools Claude Code can add alongside Bash. Launch these helpers as ordinary
+subagents, omitting `name` and `team_name`. The coordinator's agent-launch hook blocks named
+or team launches of these three roles even without hansa's mod. Claude Code gives experimental
+teammates mandatory messaging and shared task tools. If the principal disables all Claude Code
+hooks and enables experimental teams, only ordinary subagent launches retain the restrictions.
+
 ## Headless browsers
 
 Measured 2026-10-23, srt 0.0.77, as lane checks (`hansa lane try`):
@@ -205,6 +245,11 @@ Adding, modifying, deleting, changing the mode of, or moving into or out of a pr
 worker run's end, and stops `hansa lane remove --keep`; nothing is committed and the work stays staged.
 The check reads git's index, including entries with no file on disk. Unchanged tracked settings are
 allowed; untracked files that git ignores stay in the worktree and are not committed.
+Except project settings: just before a worker or verifier starts, and again after the lane's setup,
+hansa itself (lstat, no link followed, no git) removes any file, folder, link or pipe under `.claude`,
+`.codex` or `.agents` (at any depth) or named `.mcp.json` that the run's start commit does not hold, and
+puts back the ones it holds with other content, so the run loads exactly its commit's settings;
+`hansa show` names what it removed, and a removal that fails stops the run before it starts.
 
 Empty sandbox placeholders absent from the branch's tip are left out first. These include empty
 regular files named exactly `.codex` or `.agents` at the worktree's top, even if already staged;
@@ -276,9 +321,13 @@ use exactly that commit, never what the branch's name leads to: while the
 branch does not hold it, merge, verify and retry refuse with a line saying
 what it holds instead, and `hansa show` says so. In the lane's own checkout, a `commondir` in its `.git`
 stops every hansa git command there until it is removed by hand; hansa does
-not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
-hooks from an empty folder and commit and tag signing off, whatever a
-setting there says; in the lane's own checkout its hooks run as before.
+not remove it. hansa's own git, in a worktree and in the lane's own checkout
+(its merges, the landing of a checked merge, a fixed release's checkout), runs
+with `core.fsmonitor` off, hooks from an empty folder and commit and tag
+signing off, whatever a setting there says: the repository's git hooks never
+run there. Put what such a hook did in the lane's setup or a release target's
+command; git runs its hooks as usual in that command (a `pre-push` hook of
+`git push`, say).
 A repository inside the worktree (one a worker made, anywhere below its top,
 outside an ignored folder) is never looked into by hansa's git: at a run's end
 the task fails, nothing is committed, and its error names up to five of them to

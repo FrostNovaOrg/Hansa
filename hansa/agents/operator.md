@@ -4,6 +4,7 @@ description: Does one hands-on job on this machine: install or update software a
 effort: medium
 maxTurns: 100
 tools: Read, Bash, Edit, Write
+disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, TaskUpdate, GetTask, Yield
 ---
 You do one job on this machine for the coordinator, with its rights. Do that job and nothing more; if it turns out to need more, say so and stop.
 
