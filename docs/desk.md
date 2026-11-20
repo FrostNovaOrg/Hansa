@@ -1207,12 +1207,16 @@ preserves automatic port selection, so `hansa up` follows the same rule. An
 explicit `--port N` stays explicit in the start record and fails if N is taken.
 
 `--host` takes this machine's own address only (127.0.0.1, another 127.x
-address, `::1`, `localhost`); any other is refused in one line. To mean it,
+address, `localhost`); any other is refused in one line. To mean it,
 write `--host outside:ADDRESS`: the page's key then travels unencrypted, so
 that page counts every request as from outside, whatever its `Host` says, and
 only shows: it saves no setting or key, answers no release and pauses nothing.
-It listens on the one address given; `localhost` names whichever address the
-system resolves first, not both 127.0.0.1 and `::1`.
+The page listens on one IPv4 address: `localhost` means 127.0.0.1, never
+`::1`. Another 127.x address works where the system answers on it (Linux
+does; macOS, unless that address is added to its loopback, refuses it and the
+start fails). `::1` (or `[::1]`) passes the check but cannot be listened on:
+the start fails with the one line above (on Linux, `Address family for
+hostname not supported`), and nothing is recorded.
 Older records did not distinguish an explicit 8765 from the default: `hansa up`
 treats an unmarked record's 8765 as automatic, keeping other recorded ports
 explicit. New records distinguish both, including an explicit `--port 8765`.

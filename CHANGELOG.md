@@ -8,8 +8,19 @@ entries for those versions keep the names of their time. Commits up to 9 October
 Hansa is a rewrite: one directory holds a desk, with a command line for the coordinator,
 a web page for the principal (the person directing the work), and task workers. MIT License.
 
-Upgrading needs nothing done: a desk that reaches Codex the old way, through the adapter and `HANSA_CLAUDE`,
-keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
+Upgrading needs a few things done:
+
+- `hansa up` starts a recorded claude only when it is the one its shell finds, the one at `~/.local/bin/claude`,
+  or hansa's own Codex adapter inside a hansa installation. A desk whose server was started with `HANSA_CLAUDE`
+  naming a copy of the adapter kept elsewhere must point it at the shipped one, or better change the provider
+  to the kind Codex, and start `hansa serve` again before the next `hansa up`
+  ([Codex](docs/codex.md#desks-set-up-the-old-way), [the desk guide](docs/desk.md#starting-the-server-and-the-coordinator-again)).
+- A coordinator's session started before the upgrade keeps its old permission rules until `hansa coordinator`
+  starts it again.
+- Each start of `hansa coordinator` rewrites the allow rules in the desk's `.claude/settings.json` to hansa's own,
+  keeping the earlier file in `.hansa/`; keep your own rules in `.claude/settings.local.json`.
+- A lane whose setup writes or deletes a folder named `.claude`, `.codex` or `.agents` in the worktree is now
+  refused there: run `hansa lane try L` once for each lane after upgrading.
 
 ### Work that goes on where it stopped
 
@@ -59,6 +70,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - Workers are told to leave pictures of changes people see, at desktop and phone widths and with one per language.
   Verifiers end their reports by saying what they did not look at.
 - Workers and verifiers have auto memory off, whatever repository settings say; their CLAUDE.md still loads.
+- Workers and verifiers can again start local subagents (not named, team or cloud ones) and keep their own
+  checklist; when hansa cannot read a subagent type's definition exactly, subagents are off for that run.
 - `hansa add --after T` queues work that starts only after T is merged into its lane's base.
   See [queuing after another task](docs/tasks.md#queuing-after-another-task).
 - When hansa cannot inspect a process, its task keeps running and its lane stays taken.
@@ -113,6 +126,15 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 
 - Security: four fixes.
 - hansa refuses a worker's changes to `.claude`, `.codex` and `.agents` paths at any depth, leaving the work staged.
+  A run loads only the project settings its starting commit holds, never ones an earlier run, check or setup left
+  in the lane's folder; skills kept as a submodule stay, and `hansa show` says what was removed.
+- A task that leaves a git repository inside its worktree, or adds or changes a submodule, fails with nothing
+  committed, and hansa clears such repositories before the lane's next run.
+- Claude Code workers, verifiers and helpers use only the tools approved for them. In the coordinator's session
+  only hansa's everyday commands run without asking you; those that change settings (`notify`, `lane add`,
+  `lane remove`, `lane target`, `up`, `coordinator`) ask first. A coordinator started from a session cannot loosen
+  its own permissions, hansa's internal commands answer only their own caller, and scout and reviewer run only
+  commands that read, and none at all if their read-only check cannot run.
 - Workers and verifiers are kept from the account's shell startup files.
 - Settings lists the places hansa always keeps from workers and marks which exist on this machine,
   beside the box for what else workers may not read.
@@ -123,8 +145,13 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   just as hansa checks.
 - Folders hansa makes for desks, new projects and the coordinator's mod are private whatever the umask.
   For an existing folder others can write in, hansa gives the `chmod go-w` fix.
+- A desk is private to its account: `hansa init` and `hansa serve` make its folder and hansa's own files in it
+  readable by that account only, as are the page's key and the account's list of desks, and the event log's lock
+  is one no other account can open. A desk another account owns is used only when named with `--desk`.
 - Worker commands run in an operating-system sandbox with lane-specific network hosts and write
   folders. Setup, checks and lane tries use srt; commands cannot fall back to running outside it.
+  There they cannot change `.claude`, `.codex` or `.agents` settings: at any depth on macOS, and on Linux
+  at the top of the worktree and wherever such a folder already exists.
 - Runs cannot read the desk's private files, other runs' temporary folders or common credentials.
   Listed desks are kept apart; an unusable account desk list holds runs. The principal can add
   read restrictions; invalid rules stop new runs, while repository or PATH conflicts are reported.
@@ -153,6 +180,10 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - After a check or merge stopped for a reason not the task's doing (a timeout, a failed setup, the owner's uncommitted
   changes, a forbidden word, a conflict), `hansa show` and the coordinator's post give steps that work.
 - A merge git cannot make is shown as that, not as a failed merge check, and suggests `--update` only for a conflict.
+- hansa's own merges, merge-check landings and fixed-release checkouts do not run the repository's git hooks;
+  put such steps in the lane's setup or the release target's command.
+- `hansa git` on a lane does not show the contents of untracked files, leaves out repositories nested in task
+  worktrees, still shows commit diffs in bare and checkout lanes, and hides the page's key and the release-code key.
 - hansa reads git's refusals in any language and quotes paths in commands it prints.
 - File names from git keep non-ASCII characters, spaces, quotes and backslashes in task records,
   release file matching and lists, text-only detection, word scans and conflict reports;
@@ -216,6 +247,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   name the target before a one-word note, or give a quoted note with spaces.
 - A repeated release request names the waiting request it replaces and says its code no longer works.
   At the last release's commit, it first says there is nothing new and the release was asked to run again.
+  It counts, lists and scans commits for its own target: from that target's last successful release when the
+  command is the same, or against the branch its push goes to when hansa can tell which.
 - A target's first release with several remotes counts, shows and scans every commit missing from at least one remote,
   including for fixed-checkout targets; the request and page show how many each remote lacks.
 - Approve on the page or pass the one-time code from the principal's alert through the coordinator.
@@ -301,12 +334,14 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - The page sends its origin's cookies for sign-in proxies; answers that are not from `hansa serve` show a notice with **Reload**.
 - Settings and provider keys can be changed from outside this machine only after the principal enables **Allow changing settings from outside this machine** in **Settings → Lanes → General** from the machine's own address. Until then the page shows a notice and disables settings saves, key fields, alert and push tests, push address recognition, provider checks and top-up confirmations; only reading, answering or stopping releases, and pausing or resuming dispatch remain available.
 - Opened from outside while that switch is off, Settings says so at the top of every section and locks its fields;
-  their text stays readable and copyable.
+  their text stays readable and copyable. Visitors who come through a sign-in proxy are held to reading more reliably.
 - [The desk guide](docs/desk.md#opening-the-page-from-outside-the-machine) explains sign-in proxy precautions and how either the browser or proxy supplies the page key.
 - English and Chinese views show the pipeline, active lanes, waiting decisions and searchable tasks.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.
 - The page shows pictures left by workers and verifiers in the task's details and at its verification step.
   Click a picture to enlarge it. Each of a goal's task chains shows how many pictures it has.
+  On a phone, tap an opened picture to see it at its real size and scroll around it, and tap again to fit it;
+  its Close and the picture counts are easier to press.
 - The card for a release waiting for your answer names the tasks it sends out that have saved pictures.
   It shows how many pictures each task has. Click a count to open the pictures.
 - On phones, Status tables scroll sideways inside their own boxes with readable columns; the page itself stays within the screen.
@@ -391,6 +426,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - When a timed rest holds tasks, the coordinator hears once with the provider, reason, end time and waiting tasks; `hansa wait` shows the reason.
 - Use Claude's login or compatible providers, with per-provider models, effort and ordered lane
   selection. Known keys are redacted from published text and logs.
+- On the page (**Settings, Coordinator**) the coordinator's helpers (scout, reviewer, operator) can have a model
+  of their own, such as a cheaper one; left empty, they run on the coordinator's model as before.
 - Usage limits requeue work and rest the provider until its reported reset, or a configured rest.
   Desks sharing a login share usage and credit rests; confirming a top-up clears shared credit rests.
 - Connection failures hold the provider until a check answers, then resume tasks from safe saved
@@ -434,6 +471,10 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   when available. Runs with `-p`, help or version leave the interactive session's saved start alone.
 - A failed `hansa serve` bind gives one line with host, port and the system's reason and keeps the last successful
   start for `hansa up`. Simultaneous `hansa up` calls wait for the first start, then report the server running.
+- From a Claude Code session or a run, hansa never takes a folder inside a desk as a desk of its own.
+  `hansa up` starts only a hansa this account runs, and only the claude its shell finds, the one at
+  `~/.local/bin/claude` or hansa's own Codex adapter; for any other claude it says to set `PATH` or `HANSA_CLAUDE`
+  in that shell.
 - `hansa up` starts a coordinator on a desk that never had one, including with tasks added from a shell.
   It resumes the coordinator's own conversation by session id, or starts a new one when none remains, and says which;
   older records still continue the folder's latest conversation until its id is recorded.
@@ -444,7 +485,11 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   leave the pane's last screen on disk.
 - `hansa desks` shows no page address for a desk never started, points to `hansa init` for an empty list
   and gives `hansa desks --forget PATH` for a desk whose folder is gone.
-- Serving without an explicit port finds a free one and remembers it.
+- Serving without an explicit port finds a free one the first time and remembers it. If that port is taken
+  later, the page does not move to another one: hansa keeps running tasks and says once (with an alert, if alerts
+  are set up) how to choose a port on purpose with `--port N`.
+- `hansa serve --host` takes only this machine's own address; for another, write `outside:` before it, and the
+  page there only shows. See [the desk guide](docs/desk.md#starting-the-server-and-the-coordinator-again).
   Hansa starts no second server when it cannot inspect the one holding the desk.
   A symbolic link to `bin/hansa` on PATH works. [Getting started](docs/getting-started.md) covers local and SSH use.
 - `hansa doctor` checks tools, login and sandbox operation, with fixes, JSON output and English or Chinese.
@@ -505,7 +550,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - The optional Codex adapter no longer keeps run output files; `HANSA_CODEX_LOGS` is accepted and has no effect. After stopping older runs, remove their output from the former `logs/` folder or the folder that setting named.
 - A ChatGPT plan without Codex is named as one to upgrade; it still rests until confirmed.
 - Lost logins ask for `codex login`, then `hansa ping`. Workspaces out of credits and plans without Codex wait for a confirmed top-up or saved key.
-- Cancelled runs and runs stopped at their time ceiling keep their last message, turns and reported usage.
+- Codex tasks always show the worker's final report, with a note when it was shortened. Cancelled runs and runs
+  stopped at their time ceiling keep their last message, turns and reported usage.
 - `codex.env` accepts `export` lines; misspelt efforts and leftover example notes fail at startup.
 - Previously working `codex.env` files with unknown `HANSA_CODEX_` keys now fail until those keys are removed.
 - The adapter runs Codex workers inside srt, translates results and live progress for hansa and,
