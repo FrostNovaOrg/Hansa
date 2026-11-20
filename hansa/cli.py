@@ -893,9 +893,13 @@ def cmd_git(a):
     # gpg for signatures (also for a format such as %G?); a filter driver it names still runs, as the desk's account.
     # The signature programs become hansa's stand-in, which reads its input and fails: not false, which can end
     # before git has written the signed text to it, and git then dies of SIGPIPE
-    args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *args[1:]]
+    # in a worktree, git status and diff look into a repository inside it (a submodule, or one a worker made) and
+    # run git there under that one's config: never there
+    inside = ("--ignore-submodules=all",) if where and args[0] in ("status", "diff") else ()
+    args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *inside, *args[1:]]
     no_sig = str(NO_SIGNATURE)
     no_programs = ["-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false",
+                   "-c", "submodule.recurse=false",
                    "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
     r = subprocess.run(["git", "--no-pager", *no_programs, *args],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
@@ -3147,7 +3151,7 @@ def _worktree_state(desk: Desk, wt: Path, repos: list) -> dict:
         check_git_file(desk, wt, repo)  # no git through a .git file hansa did not see git write
         left = set(sandbox_leftovers(desk, wt))
         try:
-            changed = wgit(desk, wt, "diff", "--name-only", "-z", "HEAD").split("\0")
+            changed = wgit(desk, wt, "diff", "--name-only", "--ignore-submodules=all", "-z", "HEAD").split("\0")
         except RuntimeError:  # no commit at HEAD: everything is uncommitted
             changed = wgit(desk, wt, "ls-files", "-z").split("\0")
         untracked = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
