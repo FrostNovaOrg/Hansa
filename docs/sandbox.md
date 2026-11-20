@@ -103,7 +103,10 @@ changes history. They do not commit: hansa commits each task's changes on its
 own branch, and merges only what the coordinator merges. The lane's setup,
 before the worker, and its check, after it, run in the same sandbox (with
 `srt`): the lane's network and write lists hold for them too, so a setup that
-downloads needs its registry on the network list.
+downloads needs its registry on the network list. Setup, check, merge check and
+`hansa lane try` keep `.claude`, `.codex`, `.agents` and `.mcp.json` read-only
+at every depth on macOS, while Linux protects the top-level names even when
+absent and the nested entries hansa finds when it prepares the command.
 
 The shell startup names kept from workers and verifiers are `~/.bashrc`,
 `~/.bash_profile`, `~/.bash_login`, `~/.bash_logout`, `~/.bash_aliases`,

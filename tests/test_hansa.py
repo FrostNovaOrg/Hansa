@@ -6218,6 +6218,17 @@ class DeskTest(unittest.TestCase):
         calls = [c for c in calls if not tried(c)]
         return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
 
+    def assert_lane_project_denies(self, call):
+        wt = Path(call["cwd"])
+        fs = call["settings"]["filesystem"]
+        with self.subTest(settings=call["argv"][1]):
+            for name in (".claude", ".codex", ".agents", ".mcp.json"):
+                self.assertIn(str(wt / name), fs["denyWrite"])
+                self.assertIn(f"{wt}/**/{name}", fs["denyWrite"])
+                self.assertTrue(self.read_open(fs, wt / name), name)
+            self.assertTrue(may_write(call["settings"], wt / "ok.txt"))
+            self.assertTrue(may_write(call["settings"], Path(call["tmpdir"]) / "ok.txt"))
+
     def commands_tmp(self, call, allow) -> str:
         """The TMPDIR a lane's command saw after the prelude, given a stand-in srt call: srt's (the run's folder),
         or on Linux the command's own on disk that its link leads to (run.run_tmp), which it may write too."""
@@ -17093,6 +17104,8 @@ def save():'''))
         self.assertIn("merge check: echo the heavy build\n  exit 0", said)
         self.assertNotIn("light check", said)
         self.assertEqual([self.ran(c) for c in self.srt_calls()], ["echo set up", "echo the heavy build"])
+        for call in self.srt_calls():
+            self.assert_lane_project_denies(call)
         [tried] = self.events("lane_tried")
         self.assertEqual((tried["ok"], tried["merge_check"]["exit"], "check" in tried), (True, 0, False))
         self.assertTrue(self.events("lane_try_queued")[-1]["merge_check"])
@@ -32251,6 +32264,7 @@ def save():'''))
             self.assertNotIn("LANE_VAR", c["env"])
             self.assertNotEqual(c["env"].get("TMPDIR"), "/tmp")
             if c["argv"][-2:] != ["--", "true"]:
+                self.assert_lane_project_denies(c)
                 self.assertTrue(c["argv"][-1].startswith(f"exec /usr/bin/env {shlex.quote('LANE_VAR=' + value)} "
                                                          "FAKE_HELLO=c.txt /bin/sh -c "), c["argv"])
         self.assertTrue(envs)
@@ -34178,6 +34192,147 @@ def save():'''))
         m = self.settle(Dispatcher(self.desk), tid)
         self.assertEqual(m["state"], "done", m)
         self.assertFalse(m.get("held"))
+
+    def test_lane_srt_settings_keep_project_files_readable_and_other_writes_open(self):
+        from hansa import run
+        cache = self.tmp / "build-cache"
+        (cache / ".codex").mkdir(parents=True)
+        lane = {**self.desk.settings()["lanes"]["a"], "write": [str(cache)]}
+        p = self.desk.settings()["providers"]["claude"]
+        nested = self.repo / "ignored" / ".hidden" / "deep"
+        nested.mkdir(parents=True)
+        (self.repo / ".gitignore").write_text("/ignored/\n")
+        (nested / ".agents").mkdir()
+        (nested / ".mcp.json").write_text("{}")
+        (nested / ".codex").mkdir()
+        (nested / ".claude").mkdir()
+        settings = nested / ".claude" / "settings.local.json"
+        settings.write_text("{}")
+        link = self.tmp / "checkout"
+        link.symlink_to(self.repo)
+        tmp = self.tmp / "command"
+        tmp.mkdir()
+        (self.repo / "ordinary").symlink_to(cache)
+        for linux in (False, True):
+            with self.subTest(linux=linux), unittest.mock.patch.object(account, "LINUX", linux):
+                box = run.srt_settings(self.desk, lane, "claude", p, link, str(tmp))
+                fs = box["filesystem"]
+                for wt in (link, self.repo.resolve()):
+                    for name in (".claude", ".codex", ".agents", ".mcp.json"):
+                        self.assertIn(str(wt / name), fs["denyWrite"])  # even if absent
+                        self.assertIn(f"{wt}/**/{name}", fs["denyWrite"])
+                        if linux:
+                            self.assertIn(str(wt / nested.relative_to(self.repo) / name), fs["denyWrite"])
+                self.assertTrue(self.read_open(fs, settings))
+                for folder in (nested, tmp, cache):
+                    self.assertTrue(may_write(box, folder / "ok.txt"), folder)
+                self.assertFalse(any(entry.startswith(f"{cache}/") for entry in fs["denyWrite"]))
+                self.assertFalse(any(os.path.lexists(link / name) for name in (".claude", ".agents", ".codex")))
+
+    def test_linux_project_denies_refuse_a_replaceable_settings_link(self):
+        from hansa import run
+        (self.repo / "sub").mkdir()
+        for path, target in ((self.repo / ".claude", "sub"), (self.repo / "sub" / ".mcp.json", "missing")):
+            with self.subTest(path=path), unittest.mock.patch.object(account, "LINUX", True):
+                path.symlink_to(target)
+                with self.assertRaises(run.SrtCannotRun) as held:
+                    run.project_write_deny(self.repo)
+                self.assertIn(str(path), str(held.exception))
+                self.assertEqual(os.readlink(path), target)
+                path.unlink()
+
+    def test_linux_project_denies_require_a_readable_directory_listing(self):
+        from hansa import run
+        folder = self.repo / "unreadable"
+        folder.mkdir(mode=0o000)
+        self.addCleanup(folder.chmod, 0o700)
+        if os.access(folder, os.R_OK):
+            self.skipTest("this account can list mode-000 directories")
+        with unittest.mock.patch.object(account, "LINUX", True), self.assertRaises(run.SrtCannotRun) as held:
+            run.project_write_deny(self.repo)
+        self.assertIn(str(folder), str(held.exception))
+
+    def test_linux_lane_try_stops_if_a_project_deny_would_be_read_as_a_glob(self):
+        from hansa import run
+        config = self.repo / "[app]" / ".agents" / "settings"
+        config.parent.mkdir(parents=True)
+        config.write_text("original")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "settings", cwd=self.repo)
+        lane = {**self.desk.settings()["lanes"]["a"], "setup": "true"}
+        run.write_try(self.desk, "a", {"phase": "queued"})
+        with unittest.mock.patch.object(account, "LINUX", True):
+            run.start_try(self.desk, "a", lane)
+        result = run.read_try(self.desk, "a")
+        self.assertTrue(result["could_not_run"], result)
+        self.assertIn("[app]/.agents", result["note"])
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertEqual(list((self.desk.state_dir / run.RUN_TMP_DIR).glob("hansa-setup-*")), [])
+
+    def test_real_lane_srt_refuses_project_changes_and_allows_ordinary_writes(self):
+        from hansa import run
+        path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
+                               if d and (Path(d) / "srt").resolve() != (self.tmp / "bin" / "srt").resolve())
+        srt = shutil.which("srt", path=path)
+        if not srt:
+            skip_in_sandbox(self, "srt is not installed", *NEED_SRT)
+        cache = self.tmp / "build-cache"
+        cache.mkdir()
+        lane = {**self.desk.settings()["lanes"]["a"], "write": [str(cache)]}
+        p = self.desk.settings()["providers"]["claude"]
+        wt, _ = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Check the sandbox")))
+        tmp, own = map(Path, run.run_tmp(self.desk, "check"))
+        for directory in {tmp, own}:
+            self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        f = tmp / "sandbox.json"
+        env = {**os.environ, "PATH": path, "TMPDIR": str(tmp), "CLAUDE_CODE_TMPDIR": str(tmp)}
+
+        def invoke(*args):
+            return subprocess.run([srt, "--settings", str(f), "--", *args], cwd=wt, env=env,
+                                  capture_output=True, text=True, timeout=120)
+
+        write_json(f, {"filesystem": {"allowWrite": run.full_paths([tmp]), "denyRead": [], "denyWrite": []},
+                       "network": {"allowedDomains": [], "deniedDomains": []}})
+        probe = invoke("/usr/bin/true")
+        if probe.returncode:
+            skip_in_sandbox(self, f"no sandbox can be applied here: {(probe.stderr or probe.stdout)[:200]}", *NEED_SRT)
+        nested = wt / "src" / "sub" / ".agents"
+        nested.mkdir(parents=True)
+        (nested / "entry").write_text("original")
+        conf = wt / ".claude"
+        conf.mkdir(exist_ok=True)
+        (conf / "settings.local.json").write_text("{}")
+        (wt / ".mcp.json").write_text("{}")
+        write_json(f, run.srt_settings(self.desk, lane, "claude", p, wt, str(tmp), own=str(own)))
+        # Each refused operation has a writable parent in the fixture. A redirection on ':' runs in a
+        # subshell since the shell may exit on a special builtin's redirection error.
+        command = """
+            set -e
+            test "$(cat .claude/settings.local.json)" = '{}'
+            test "$(cat src/sub/.agents/entry)" = original
+            : > ok.txt
+            : > "$1/ok.txt"
+            : > "$2/ok.txt"
+            if (: > .claude/settings.local.json); then exit 11; fi
+            if mkdir -p .claude/skills/x; then exit 12; fi
+            if mkdir .codex; then exit 13; fi
+            echo replacement > replacement
+            if mv -f replacement src/sub/.agents/entry; then exit 14; fi
+            if rm .mcp.json; then exit 15; fi
+        """
+        if not account.LINUX:  # Seatbelt checks the name even in a directory made by this command.
+            command += """
+                mkdir -p new/sub
+                if mkdir -p new/sub/.claude/skills/x; then exit 16; fi
+            """
+        result = invoke("/bin/sh", "-c", command, "lane-check", str(own), str(cache))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for directory in (wt, cache, own):
+            self.assertTrue((directory / "ok.txt").is_file(), directory)
+        self.assertEqual((conf / "settings.local.json").read_text(), "{}")
+        self.assertFalse((conf / "skills" / "x").exists())
+        self.assertEqual((nested / "entry").read_text(), "original")
+        self.assertEqual((wt / ".mcp.json").read_text(), "{}")
 
     def test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should(self):
         # srt itself (installed on GitHub's macOS machines in a run started by hand, with HANSA_TESTS_NEED_SRT=1);
