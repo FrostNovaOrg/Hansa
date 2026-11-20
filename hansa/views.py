@@ -2812,7 +2812,7 @@ def cost_turns_text(rep: dict) -> str:
 def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool = False) -> str:
     """hansa diff: a task's changes against its base, limited to these paths when given. new: only what this
     attempt added on top of the attempt it continues from (hansa retry), without the base merged into it."""
-    from .run import git, git_first_line, wgit
+    from .run import GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF, git, git_first_line, wgit
     m = desk.meta(tid)
     # git interprets paths from the checkout where it runs, which may be another lane's repository.
     # Reject absolute paths and traversal before git so these mistakes get the same useful explanation.
@@ -2857,11 +2857,12 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
                     if m.get("update_conflicts"):
                         # Compare the resolved merge with git's recreated conflicted tree, then show
                         # work after that merge. Comparing either parent would count the base's work.
-                        parts.append(read("show", "--format=", "--remerge-diff", mode, merge, *selected))
+                        parts.append(read(*GIT_REVIEW_CONFIG, "show", *GIT_REVIEW_DIFF, "--format=", "--remerge-diff",
+                                          mode, merge, *selected))
                         head += f"; resolution of merge {merge[:10]} and later changes, without the base's own changes"
                     else:
                         head += f", without the base merged into it at {merge[:10]}"
-        parts.append(read("diff", mode, since, m["head"], *selected))
+        parts.append(read(*GIT_REVIEW_CONFIG, "diff", *GIT_REVIEW_DIFF, mode, since, m["head"], *selected))
         out = desk.redact("\n".join(x for x in parts if x))
     except (RuntimeError, OSError) as e:
         return desk.redact(f"{notice}hansa: {git_first_line(e)}; the diff is not shown")

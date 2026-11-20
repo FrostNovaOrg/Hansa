@@ -1205,6 +1205,13 @@ def worktree_git_settings() -> list:
             "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"]
 
 
+# Review shows Git's own patch and gitlink commit IDs. An inline submodule diff can run a
+# program configured in that repository, and checking its dirty files also enters it.
+GIT_REVIEW_CONFIG = ("-c", "diff.submodule=short", "-c", "submodule.recurse=false",
+                     "-c", "diff.ignoreSubmodules=dirty", "-c", "status.submoduleSummary=false")
+GIT_REVIEW_DIFF = ("--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty")
+
+
 def git(*args, cwd, env=None) -> str:
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
     # Hansa reads git's diagnostics and --shortstat in English, even with a caller's locale override.

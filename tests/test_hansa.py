@@ -10340,6 +10340,7 @@ def save():'''))
                            (["push"], "git push is not one"), (["checkout", f"task/{tid}"], "git checkout is not one"),
                            (["branch", "-D", f"task/{tid}"], "git branch -D is refused"),
                            (["branch", "new"], "would make a branch"), (["tag", "v1"], "would make a tag"),
+                           (["branch", "--", "new"], "would make a branch"), (["tag", "--", "v1"], "would make a tag"),
                            (["tag", "-d", "v1"], "git tag -d is refused"),
                            (["diff", "--output=x"], "--output=x is refused"), (["diff", "--outp=x"], "refused"),
                            (["log", "--output", "x"], "refused"), (["grep", "-O", "demo"], "-O is refused"),
@@ -10395,6 +10396,204 @@ def save():'''))
             self.assertEqual(self.hansa_git("a", *args)[0], 0, args)
         self.assertEqual([w for w, p in made.items() if p.exists()], [])
         self.assertIn("+changed", self.hansa_git("a", "diff")[1])  # git's own diff, not the configured program's
+
+    def test_hansa_git_grep_refuses_to_search_untracked_and_ignored_files(self):
+        secret = "fixture-untracked-secret"
+        (self.repo / ".env").write_text(secret + "\n")
+        (self.repo / "ignored.env").write_text(secret + "\n")
+        (self.repo / ".git" / "info" / "exclude").write_text("ignored.env\n")
+        for option in ("--untracked", "--u", "--untr", "--exclude-standard", "--exc",
+                       "--no-exclude-standard", "--no-exc"):
+            with self.subTest(option=option):
+                code, out, err = self.hansa_git("a", "grep", option, "-e", "fixture-untracked")
+                self.assertNotIn(secret, out + err)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
+        code, out, err = self.hansa_git("a", "grep", "-e", "--", "--untracked", "-e", "fixture-untracked")
+        self.assertNotIn(secret, out + err)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("--untracked is refused", err)
+        self.assertEqual(self.hansa_git("a", "grep", "-edemo"), (0, "README.md:demo\n", ""))
+        self.assertEqual(self.hansa_git("a", "grep", "-e", "fixture-untracked"), (1, "", ""))
+
+    def test_hansa_git_keeps_untracked_names_but_refuses_ls_files_content_inputs(self):
+        (self.repo / ".env").write_bytes(b"fixture-name-only\r\n")
+        (self.repo / "ignored.env").write_text("fixture-name-only\n")
+        (self.repo / ".git" / "info" / "exclude").write_text("ignored.env\n")
+        code, out, err = self.hansa_git("a", "status", "--short", "--ignored")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("?? .env", out)
+        self.assertIn("!! ignored.env", out)
+        self.assertNotIn("fixture-name-only", out)
+        self.assertEqual(self.hansa_git("a", "ls-files", "-o", "--exclude-standard"), (0, ".env\n", ""))
+        code, out, err = self.hansa_git("a", "ls-files", "--eol")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("README.md", out)
+        self.assertNotIn(".env", out)
+        for args in (("-o", "--eol"), ("--o", "--eo"), ("--eol", "-k"),
+                     ("-oX", str(self.tmp / "patterns")), ("--exclude-f=patterns",),
+                     ("--exclude-per-dir", "patterns"), ("--rec",)):
+            with self.subTest(args=args):
+                code, out, err = self.hansa_git("a", "ls-files", *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("is refused", err)
+                self.assertIn("Nothing was run", err)
+
+    def test_hansa_git_refuses_grep_pattern_files_and_submodule_options(self):
+        patterns = self.tmp / "patterns"
+        patterns.write_text("demo\n")
+        calls = [
+            ("grep", "-f", str(patterns)),
+            ("grep", f"-if{patterns}"),
+            ("grep", "--recurse-submodules", "demo"),
+            ("grep", "--recurse", "demo"),
+        ]
+        calls += [(cmd, opt) for cmd in ("diff", "show", "log")
+                  for opt in ("--submodule", "--submodule=diff", "--submodule=log", "--submodule=short")]
+        calls += [(cmd, opt) for cmd in ("diff", "show", "log", "status")
+                  for opt in ("--ignore-submodules=none", "--ignore-submodules=untracked")]
+        calls.append(("status", "--no-ignore-submodules"))
+        for cmd, option, *args in calls:
+            with self.subTest(cmd=cmd, option=option):
+                code, out, err = self.hansa_git("a", cmd, option, *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
+        # Attached values and pathspecs are data, even if they look like a refused option.
+        self.assertEqual(self.hansa_git("a", "grep", "-ef"), (1, "", ""))
+        (self.repo / "--untracked").write_text("demo\n")
+        self.git_out("add", "--", "--untracked")
+        self.assertEqual(self.hansa_git("a", "grep", "demo", "--", "--untracked"), (0, "--untracked:demo\n", ""))
+
+    def test_hansa_git_diff_requires_the_lane_checkout_and_refuses_traversal_after_dash_dash(self):
+        code, out, err = self.hansa_git("a", "diff", "--", "README.md", "-dir/../README.md")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("-dir/../README.md is refused", err)
+
+        (self.repo / ".git").rename(self.tmp / "removed-git")
+        (self.repo / "other.txt").write_text("fixture file outside Git history\n")
+        code, out, err = self.hansa_git("a", "diff", "README.md", "other.txt")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("no Git checkout", err)
+        self.assertIn("Nothing was run", err)
+
+    def test_hansa_git_disables_a_configured_blame_revision_file_and_cat_file_textconv_abbreviation(self):
+        revisions = self.tmp / "revisions"
+        revisions.write_text("not-a-revision\n")
+        self.git_out("config", "blame.ignoreRevsFile", str(revisions))
+        code, out, err = self.hansa_git("a", "blame", "README.md")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("demo", out)
+        code, out, err = self.hansa_git("a", "cat-file", "--t", "HEAD:README.md")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("--t is refused", err)
+
+    def test_hansa_git_refuses_to_enumerate_alternate_refs_and_all_objects(self):
+        calls = (("cat-file", "--batch", "--batch-all-objects"), ("cat-file", "--batch", "--batch-a"),
+                 ("log", "--alternate-refs", "HEAD"), ("rev-list", "--alternate-refs", "HEAD"))
+        for args in calls:
+            with self.subTest(args=args):
+                code, out, err = self.hansa_git("a", *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("is refused", err)
+                self.assertIn("Nothing was run", err)
+        self.assertEqual(self.hansa_git("a", "cat-file", "-p", "HEAD:README.md"), (0, "demo\n", ""))
+
+    def test_hansa_git_and_diff_use_short_submodule_diffs_even_when_git_config_says_diff(self):
+        module = self.repo / "module"
+        module.mkdir()
+        self.git_out("init", "-q", "-b", "main", cwd=module)
+        (module / "file").write_text("demo in module\n")
+        self.git_out("add", "file", cwd=module)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "module base", cwd=module)
+        before = self.git_out("rev-parse", "HEAD", cwd=module)
+        (self.repo / ".gitmodules").write_text('[submodule "module"]\n\tpath = module\n\turl = ./module\n')
+        self.git_out("add", ".gitmodules")
+        self.git_out("update-index", "--add", "--cacheinfo", f"160000,{before},module")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add module")
+        base = self.git_out("rev-parse", "HEAD")
+        (module / "file").write_text("demo in module changed\n")
+        self.git_out("add", "file", cwd=module)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "module update", cwd=module)
+        after = self.git_out("rev-parse", "HEAD", cwd=module)
+        self.git_out("update-index", "--cacheinfo", f"160000,{after},module")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "update module")
+        head = self.git_out("rev-parse", "HEAD")
+
+        def assert_short(out):
+            self.assertIn(f"-Subproject commit {before}", out)
+            self.assertIn(f"+Subproject commit {after}", out)
+            self.assertNotIn("demo in module", out)
+
+        self.git_out("config", "diff.submodule", "diff")
+        self.git_out("config", "submodule.recurse", "true")
+        self.git_out("config", "submodule.module.active", "true")
+        with self.subTest(args=("grep", "demo")):
+            self.assertEqual(self.hansa_git("a", "grep", "demo"), (0, "README.md:demo\n", ""))
+        for args in (("diff", base, head), ("show", head), ("log", "-p", "-1", head)):
+            with self.subTest(args=args):
+                code, out, err = self.hansa_git("a", *args)
+                self.assertEqual((code, err), (0, ""))
+                assert_short(out)
+        (module / "file").write_text("dirty module worktree\n")
+        self.git_out("config", "status.submoduleSummary", "true")
+        with self.subTest(args=("status", "--short")):
+            self.assertEqual(self.hansa_git("a", "status", "--short"), (0, "", ""))
+        self.git_out("config", "--unset", "diff.submodule")
+
+        # Review a recorded task whose worktree went away. This reads the remaining checkout with its submodule.
+        tid = self.desk.new_task("Update the example submodule")
+        self.git_out("branch", f"task/{tid}", head)
+        self.desk.update(tid, base=base, head=head, worktree=str(self.tmp / "removed-worktree"))
+        global_config = self.tmp / "gitconfig"
+        self.git_out("config", "--file", str(global_config), "diff.submodule", "diff")
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(global_config)}):
+            assert_short(self.hansa("diff", tid))
+
+    def test_hansa_diff_and_git_show_the_builtin_patch_without_diff_or_textconv_drivers(self):
+        tid = self.done_with()
+        ran, driver = self.tmp / "driver-ran", self.tmp / "driver.sh"
+        driver.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(ran))}\nprintf 'converted text\\n'\n")
+        driver.chmod(0o755)
+        (self.repo / ".git" / "info" / "attributes").write_text("*.txt diff=fixture\n")
+        for key in ("diff.external", "diff.fixture.textconv"):
+            with self.subTest(key=key):
+                ran.unlink(missing_ok=True)
+                self.git_out("config", key, str(driver))
+                code, out, err = self.hansa_git("a", "show", f"task/{tid}")
+                self.assertEqual((code, err), (0, ""))
+                self.assertFalse(ran.exists())
+                for patch in (out, self.hansa("diff", tid)):
+                    self.assertIn(f"+hello from {tid}", patch)
+                    self.assertNotIn("converted text", patch)
+                self.assertFalse(ran.exists())
+            self.git_out("config", "--unset", key)
+
+    def test_page_token_and_release_key_are_replaced_in_output_and_events(self):
+        from hansa import release
+        token, code_key = self.desk.web_token(), release._code_key(self.desk).decode()
+        self.commit_in_repo("fixture.txt", f"page {token}\nrelease {code_key}\n")
+        code, out, err = self.hansa_git("a", "show", "HEAD:fixture.txt")
+        self.assertEqual((code, err), (0, ""))
+        self.desk.event("fixture", detail=f"page {token}, release {code_key}")
+        [event] = self.events("fixture")
+        for shown in (out, event["detail"]):
+            self.assertNotIn(token, shown)
+            self.assertNotIn(code_key, shown)
+            self.assertIn("page [key of ", shown)
+            self.assertIn("release [key of ", shown)
+        exit_code, out, err = self.hansa_git("a", "blame", f"--contents={token}-{code_key}", "README.md")
+        self.assertEqual((exit_code, out), (1, ""))
+        self.assertNotIn(token, err)
+        self.assertNotIn(code_key, err)
+        self.assertIn("--contents=[key of the page]-[key of release codes] is refused", err)
+
+    def test_redact_replaces_the_longer_of_two_keys_with_the_same_prefix_first(self):
+        shorter = "fixture-shared-prefix"
+        self.desk.write_key("mimo", shorter)
+        self.desk.write_key("zai", shorter + "-tail")
+        self.assertEqual(self.desk.redact(f"{shorter}-tail and {shorter}"), "[key of zai] and [key of mimo]")
 
     def test_hansa_git_runs_no_gpg_for_a_signed_commit(self):
         made = self.tmp / "gpg-ran"
@@ -60404,7 +60603,7 @@ else:
         self.assertEqual(r["code"]["hash"], release._code_hash(self.desk, 1, code))
         key = release.code_key_file(self.desk)
         self.assertEqual((key.parent, key.stat().st_mode & 0o777), (self.desk.secrets_dir, 0o600))
-        self.assertEqual(self.desk.keys(), {})
+        self.assertEqual(self.desk.keys(), {"release codes": key.read_text().strip()})
         row = release.page_rows(self.desk, self.desk.settings())[0]
         self.assertTrue(row["code_sent"])
         self.assertIn("went out in the principal's alert", row["code"])
