@@ -42616,6 +42616,41 @@ def save():'''))
                 self.assertIs(reply["from_outside"], True)
                 self.assertIs(reply["settings"]["settings_from_outside"], False)
 
+    def test_browser_headers_keep_a_request_with_rewritten_host_outside(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        settings = {"settings": {**self.desk.settings(), "cool_minutes": 31}}
+        for headers in ({"Origin": "https://desk.example", "Sec-Fetch-Site": "same-origin"},
+                        {"origin": "https://localhost.desk.example"},
+                        {"Origin": "https://localhost@desk.example"},
+                        {"Origin": "null"}, {"Origin": "http://[::1]desk.example"},
+                        {"sec-fetch-site": "cross-site"},
+                        {"Origin": "http://localhost:8765", "Sec-Fetch-Site": "cross-site"}):
+            with self.subTest(headers=headers):
+                before = self.settings_and_keys()
+                code, reply, _ = self.web_request("/api/settings", headers={**auth, **headers})
+                self.assertEqual(code, 200)
+                self.assertIs(reply["from_outside"], True)
+                self.assert_settings_refused_from_outside(*self.settings_post("/api/settings", settings, headers)[:2])
+                self.assertEqual(self.settings_and_keys(), before)
+
+    def test_local_browser_headers_leave_settings_writable(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for i, headers in enumerate((
+            {"Sec-Fetch-Site": "none"}, {"Sec-Fetch-Site": "same-origin"},
+            {"Origin": "http://localhost:8765"},
+            {"Origin": "http://LoCaLhOsT:8765", "Sec-Fetch-Site": "same-origin"},
+            {"Host": "[::1]:8765", "Origin": "http://[::1]:8765", "Sec-Fetch-Site": "same-origin"},
+            {"Origin": "http://127.0.0.2:8765", "Sec-Fetch-Site": "none"},
+        )):
+            with self.subTest(headers=headers):
+                code, reply, _ = self.web_request("/api/settings", headers={**auth, **headers})
+                self.assertEqual(code, 200)
+                self.assertIs(reply["from_outside"], False)
+                settings = {"settings": {**self.desk.settings(), "cool_minutes": 40 + i}}
+                code, reply, _ = self.settings_post("/api/settings", settings, headers)
+                self.assertEqual((code, reply["ok"]), (200, True), reply)
+                self.assertEqual(self.desk.settings()["cool_minutes"], 40 + i)
+
     def test_settings_switch_lets_outside_requests_change_settings_and_keys(self):
         s = self.desk.settings()
         before = len(self.history_entries()) if (self.desk.state_dir / "settings-history.jsonl").exists() else 0
@@ -42786,7 +42821,8 @@ def save():'''))
             return Wire(wire.output.getvalue())
 
         request = f"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n".encode()
-        wire = exchange(request + request)
+        zero_length = request.replace(b"\r\n\r\n", b"\r\nContent-Length: 0\r\nContent-Length: 00 \t\r\n\r\n")
+        wire = exchange(zero_length + request)
         for _ in range(2):
             response = http.client.HTTPResponse(wire)
             response.begin()
@@ -42805,8 +42841,9 @@ def save():'''))
             self.assertEqual(response.status, code)
             self.assertEqual(bool(response.read()), code == 200)
         post = (f"POST /api/pause HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n"
-                "X-Hansa: 1\r\nContent-Length: 2\r\n\r\n{}").encode()
+                "X-Hansa: 1\r\nContent-Length: 2\r\nContent-Length: 02\r\nExpect: 100-continue\r\n\r\n{}").encode()
         wire = exchange(post + request)
+        self.assertEqual(wire.input.read(len(b"HTTP/1.1 100 Continue\r\n\r\n")), b"HTTP/1.1 100 Continue\r\n\r\n")
         for _ in range(2):
             response = http.client.HTTPResponse(wire)
             response.begin()
@@ -42816,6 +42853,7 @@ def save():'''))
         # Refusing a POST before reading its body must close, rather than interpret that body as a request.
         cases = [("", 403)] + [(f"Authorization: Bearer {token}\r\nX-Hansa: 1\r\n" + framing, 400)
                               for framing in ("Content-Length: -1\r\n", "Content-Length: invalid\r\n",
+                                              f"Content-Length: {1 << 64}\r\n",
                                               "Transfer-Encoding: chunked\r\n")]
         for extra, code in cases:
             wire = exchange(("POST /api/pause HTTP/1.1\r\nHost: localhost\r\n" + extra + "\r\n{}").encode() + request)
@@ -42825,6 +42863,64 @@ def save():'''))
             self.assertEqual(response.getheader("Connection"), "close")
             response.read()
             self.assertEqual(wire.input.read(), b"")
+
+    def assert_web_closes_with_one_response(self, httpd, method, framing, body, code, *, problem=None):
+        request = (f"{method} /missing HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n"
+                   f"{framing}\r\n").encode("ascii") + body
+        with socket.create_connection(httpd.server_address, timeout=10) as sock, sock.makefile("rb") as wire:
+            sock.sendall(request)
+            reply = wire.read()  # EOF must come from the server without a shutdown from the client.
+        headers, _, data = reply.partition(b"\r\n\r\n")
+        self.assertEqual(reply.count(b"HTTP/1.1 "), 1)
+        self.assertEqual(headers.split(b"\r\n", 1)[0].split()[:2], [b"HTTP/1.1", str(code).encode()])
+        self.assertIn(b"\r\nConnection: close", headers)
+        if method == "HEAD":
+            self.assertEqual(data, b"")
+        elif problem:
+            self.assertIn(problem, json.loads(data)["problems"][0])
+
+    def test_web_closes_get_and_head_with_a_body(self):
+        skip_unless_ports(self)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        following = b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        for method in ("GET", "HEAD"):
+            for framing, body in ((f"Content-Length: {len(following)}\r\n", following),
+                                  ("Transfer-Encoding: chunked\r\n", b"%x\r\n%s\r\n0\r\n\r\n" % (len(following), following)),
+                                  ("Transfer-Encoding:\r\n", following),
+                                  (f"Content-Length: {len(following)}\r\nExpect: 100-continue\r\n", following)):
+                with self.subTest(method=method, framing=framing):
+                    self.assert_web_closes_with_one_response(httpd, method, framing, body, 400,
+                                                             problem="request body is not allowed")
+
+    def test_web_closes_ambiguous_framing_before_dispatch(self):
+        skip_unless_ports(self)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        following = b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        for method in ("GET", "HEAD", "POST", "OPTIONS", "PUT"):
+            for framing in ("Content-Length: 0\r\nTransfer-Encoding: chunked\r\n",
+                            "Content-Length: 0\r\nTransfer-Encoding:\r\n",
+                            "Content-Length: +0\r\n", "Content-Length: 0, 0\r\n",
+                            "Content-Length:\r\n", "Content-Length: 0\r\nContent-Length: 1\r\n",
+                            "Content-Length : 0\r\n", "Content-Length: +0\r\nExpect: 100-continue\r\n"):
+                with self.subTest(method=method, framing=framing):
+                    self.assert_web_closes_with_one_response(httpd, method, framing, following, 400,
+                                                             problem="nonnegative Content-Length")
+
+    def test_web_unsupported_methods_with_a_body_close(self):
+        skip_unless_ports(self)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        following = b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        for method in ("HEAD", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"):
+            with self.subTest(method=method):
+                framing, body = ("Content-Length: 0\r\n", b"") if method == "HEAD" else (
+                    f"Content-Length: {len(following)}\r\n", following)
+                self.assert_web_closes_with_one_response(httpd, method, framing, body, 501)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_page_tunnel_polls_back_off_revalidate_and_recover_in_both_languages(self):
