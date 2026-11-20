@@ -6,7 +6,9 @@ The page keeps the address's token in sessionStorage for its origin and tab,
 and sends it explicitly in Authorization. Changes also need X-Hansa: 1.
 The HTML shell is public; every API request requires the bearer token.
 A request from outside this machine (from_outside: a proxy's) may only read, answer or stop releases,
-and pause or resume while the principal's switch, settings_from_outside, is off.
+and pause or resume while the principal's switch, settings_from_outside, is off. A page bound beyond
+this machine's own address (hansa serve --host outside:ADDRESS) counts every request as from outside,
+whatever its Host says, and changes nothing.
 """
 from __future__ import annotations
 
@@ -107,6 +109,21 @@ OUTSIDE_LOCAL_ONLY = ('POST {path} was refused from outside this machine; to all
                       '"Allow changing settings from outside this machine" in Settings, Lanes, General, '
                       "on the page opened at this machine's own address (through the SSH tunnel)")
 
+# A page served beyond this machine's own address (hansa serve --host outside:ADDRESS) changes nothing
+WIDE_READ_ONLY = ("this page only shows, as hansa serve serves it beyond this machine's own address; make changes "
+                  "on the page at this machine's own address (127.0.0.1, through the SSH tunnel)")
+
+
+def loopback(host: str) -> bool:
+    """Whether hansa serve's --host is this machine's own address only (127.0.0.1, ::1, localhost)."""
+    import ipaddress
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip().strip("[]")).is_loopback
+    except ValueError:
+        return False
+
 
 def from_outside(headers) -> bool:
     """Whether a request to the page came from outside this machine: it is local only with one Host, a loopback
@@ -206,6 +223,11 @@ def _top_up_provider(desk: Desk, name: str) -> dict:
 
 def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
     token = desk.web_token()
+    # Beyond this machine's own address a client names any Host it likes: every request there is from outside.
+    everyone_outside = not loopback(host)
+
+    def outside(headers) -> bool:
+        return everyone_outside or from_outside(headers)
 
     class Page(http.server.BaseHTTPRequestHandler):
         server_version = "hansa"
@@ -220,7 +242,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
 
         def _settings_refused(self) -> bool:
             """A request from outside this machine, while the principal's switch is off."""
-            return from_outside(self.headers) and desk.settings().get("settings_from_outside") is not True
+            return outside(self.headers) and desk.settings().get("settings_from_outside") is not True
 
         def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False,
                   headers=None):
@@ -344,7 +366,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 # and whether this request came from outside this machine, where the page cannot save them
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0],
-                                        "from_outside": from_outside(self.headers)})
+                                        "from_outside": outside(self.headers)})
             if url.path == "/api/cost/calendar":
                 return self._send(200, cost.calendar(desk))
             if url.path == "/api/cost":
@@ -405,6 +427,9 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if not isinstance(body, dict):
                     return self._bad_request("invalid_type", "body", "body must be a JSON object")
                 path = urllib.parse.urlparse(self.path).path
+                if everyone_outside:  # the key and the page's answers travel unencrypted there: it only shows
+                    return self._send(200, {"ok": False, "code": "page_read_only", "problems": [WIDE_READ_ONLY],
+                                            "problem_details": [{"code": "page_read_only", "values": {}}]})
                 if path not in OUTSIDE_OPEN_POSTS and self._settings_refused():
                     settings = path in ("/api/settings", "/api/key")
                     code = "settings_local_only" if settings else "outside_local_only"

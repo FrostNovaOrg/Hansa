@@ -126,7 +126,7 @@ with or endorsed by Anthropic or OpenAI.
   hides the keys it knows wherever they might appear and refuses to merge one, but cannot see into compressed files.
   The event log keeps what it recorded before a key was saved. [The desk](docs/desk.md#where-a-desks-files-are)
 - **The page is private by default.** It listens only on the machine itself and needs the token in the address
-  `hansa web` prints. `hansa serve --host` can open it wider; whoever holds that address can approve a release.
+  `hansa web` prints. `hansa serve --host outside:ADDRESS` opens it wider on purpose, and there it only shows.
   [The token](docs/who-changes-what.md#a-claude-code-sessions-identity-and-the-pages-token)
 
 More: [Limits](docs/concepts.md#limits).

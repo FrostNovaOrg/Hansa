@@ -317,8 +317,13 @@ def server_up(desk: Desk) -> bool:
             # The pulse follows binding the page and recording its port. A held lock alone is too early
             # to report success: the page may fail to bind and the server immediately exit.
             if st["state"] != "gone" and st.get("answers"):
-                port = (desk.state_dir / "web-port").read_text().strip()
-                print(f"server started (pid {st['pid']}), page on port {port}")
+                from .views import held_port, page_held_text
+                held = held_port(desk, st)
+                if held:  # it started without its page rather than on another port
+                    print(f"server started (pid {st['pid']}) and runs tasks, but {page_held_text(held)}")
+                else:
+                    port = (desk.state_dir / "web-port").read_text().strip()
+                    print(f"server started (pid {st['pid']}), page on port {port}")
                 print("watch: " + (watch or shlex.join(["tail", "-f", str(log)])))
                 return True
             if (child is not None and child.poll() is not None) or time.monotonic() >= end:

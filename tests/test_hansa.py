@@ -3116,9 +3116,6 @@ class UpTest(unittest.TestCase):
         self.assertNotIn("--port", up.serve_command(self.desk, {}))
         occupied.clear()  # even the original default is free again; the saved port wins
         self.assertEqual(self.fake_serve(bind)[1], [8767])
-        occupied.add(8767)
-        self.assertEqual(self.fake_serve(bind)[1], [8767, 8768])
-        self.assertEqual(cli.web_port(self.desk), 8768)
 
     def test_up_replays_legacy_default_port_automatically(self):
         from hansa import up
@@ -3152,12 +3149,9 @@ class UpTest(unittest.TestCase):
         bind.assert_called_once()
         self.assertEqual(bind.call_args.args[1:], ("127.0.0.1", 8765))
 
-    def test_serve_says_when_it_moves_from_the_default_or_saved_port(self):
-        for first in (8765, 9123):
+    def test_serve_says_when_it_moves_from_the_default_before_any_port_was_recorded(self):
+        for first in (8765,):
             with self.subTest(first=first):
-                if first != 8765:
-                    (self.desk.state_dir / "web-port").write_text(str(first))
-
                 def bind(desk, host, port):
                     if port == first:
                         raise OSError(errno.EADDRINUSE, "taken")
@@ -3189,9 +3183,92 @@ class UpTest(unittest.TestCase):
         refused.assert_called_once()
         (self.desk.state_dir / "web-port").write_text("65535")
         bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
-        with self.assertRaisesRegex(SystemExit, "port 65535: taken"):
-            self.fake_serve(bind)
+        said, _ = self.fake_serve(bind)
+        self.assertIn("port 65535, where it was served last time, is held by something else", said)
         bind.assert_called_once()
+
+    def test_serve_with_its_recorded_port_held_runs_tasks_without_the_page_and_says_so(self):
+        from hansa import alert, up
+        write_json(self.desk.settings_path, {"alert": {"command": "cat >/dev/null"}})
+        (self.desk.state_dir / "web-port").write_text("9123")
+        (self.desk.state_dir / "web-host").write_text("127.0.0.1")
+
+        def bind(desk, host, port):
+            raise OSError(errno.EADDRINUSE, "taken")
+
+        said, tried = self.fake_serve(bind)
+        self.assertEqual(tried, [9123])  # not the next port: whatever holds 9123 would get the page's key
+        self.assertIn("tasks run, but the web page did not start: port 9123", said)
+        self.assertIn("held by something else", said)
+        self.assertIn("hansa serve --port N", said)
+        self.assertEqual(len([x for x in said.splitlines() if "9123" in x]), 1)
+        self.assertEqual(cli.web_port(self.desk), 9123)  # the record stays
+        self.assertTrue((self.desk.state_dir / "serve-start.json").exists())  # hansa up starts it so again
+        # hansa status: the same sentence while this server runs
+        me = {"state": "up", "pid": os.getpid(), "answers": True}
+        page = views.page_text(views.page_of(self.desk, me))
+        self.assertIn("not served", page)
+        self.assertIn("port 9123, where it was served last time, is held by something else", page)
+        self.assertIn("hansa serve --port N", page)
+        self.assertNotIn("held by", views.page_text(views.page_of(self.desk, self.gone)))
+        # the principal's alert, once for the start
+        held = [x for x in alert.queued(self.desk) if x["kind"] == "page_held"]
+        self.assertEqual(len(held), 1)
+        self.assertIn("port 9123", held[0]["text"])
+        self.assertEqual(held[0]["level"], "urgent")
+        # hansa web prints no address with the key, which would go to whatever holds 9123
+        with unittest.mock.patch.object(cli, "server_state", return_value=me), \
+                unittest.mock.patch.object(cli.os, "read", return_value=b""), \
+                self.assertRaises(SystemExit) as e:
+            printed = self.say("web")
+        self.assertIn("nothing was printed", str(e.exception.code))
+        self.assertNotIn(self.desk.web_token(), str(e.exception.code))
+        # hansa up says it too
+        write_json(self.desk.state_dir / "web-held", {"port": 9123, "pid": 123})
+        self.record()
+        child = types.SimpleNamespace(poll=lambda: None)
+        with unittest.mock.patch.object(up, "program", return_value=""), \
+                unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running, self.running]), \
+                unittest.mock.patch.object(up.subprocess, "Popen", return_value=child), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            main(["--desk", str(self.desk.root), "up"])
+        self.assertIn("server started (pid 123) and runs tasks, but the web page did not start: port 9123",
+                      out.getvalue())
+        # --port N on purpose: as before, and the page's record moves with it
+        said, tried = self.fake_serve(lambda desk, host, port: types.SimpleNamespace(server_address=(host, port)),
+                                      "--port", "9200")
+        self.assertEqual(tried, [9200])
+        self.assertIn("web page on 127.0.0.1:9200", said)
+        self.assertEqual(cli.web_port(self.desk), 9200)
+        self.assertFalse((self.desk.state_dir / "web-held").exists())
+
+    def test_serve_refuses_a_host_beyond_this_machine_unless_the_principal_says_outside(self):
+        from hansa import web
+        for host in ("0.0.0.0", "::", "192.168.1.5", "example.com", ""):
+            with self.subTest(host=host):
+                bind = unittest.mock.Mock()
+                with self.assertRaises(SystemExit) as e:
+                    self.fake_serve(bind, "--host", host)
+                said = str(e.exception.code)
+                self.assertEqual(len(said.splitlines()), 1, said)
+                self.assertIn("not this machine's own address", said)
+                self.assertIn(f"--host outside:{host}", said)
+                bind.assert_not_called()
+                self.assertFalse((self.desk.state_dir / "serve-start.json").exists())
+        for host in ("127.0.0.1", "127.0.0.2", "localhost", "::1"):
+            with self.subTest(host=host):
+                said, tried = self.fake_serve(
+                    lambda desk, h, port: types.SimpleNamespace(server_address=(h, port)), "--host", host)
+                self.assertIn(f"web page on {host}:", said)
+                self.assertTrue(web.loopback(host))
+        bound = []
+        said, tried = self.fake_serve(
+            lambda desk, h, port: bound.append(h) or types.SimpleNamespace(server_address=(h, port)),
+            "--host", "outside:0.0.0.0")
+        self.assertEqual(bound, ["0.0.0.0"])
+        self.assertEqual((self.desk.state_dir / "web-host").read_text(), "0.0.0.0")
+        rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+        self.assertEqual(rec["options"]["host"], "outside:0.0.0.0")  # hansa up starts it so again
 
     def test_a_serve_that_cannot_bind_keeps_the_saved_start_and_says_why_in_one_line(self):
         self.record()  # the last start that served the page
@@ -3205,7 +3282,7 @@ class UpTest(unittest.TestCase):
                  "0-65535. Nothing was started or recorded"),
                 (OSError(errno.EINVAL, "Invalid argument."), ("--port", "80"), "127.0.0.1", 80,
                  "Invalid argument. Nothing was started or recorded"),
-                (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "lcalhost"), "lcalhost",
+                (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "outside:lcalhost"), "lcalhost",
                  8765, "Name or service not known. Nothing was started or recorded")):
             with self.subTest(error=error):
                 bind = unittest.mock.Mock(side_effect=error)
@@ -9507,7 +9584,7 @@ def save():'''))
     def test_status_and_explain_say_where_the_web_page_is(self):
         st = views.status(self.desk)
         self.assertEqual(st["page"], {"host": "127.0.0.1", "port": 8765, "up": False, "stuck": False, "answers": True,
-                                      "served": False})
+                                      "served": False, "held": None})
         says = ("web page: not served now, since hansa serve is not running; it serves it at http://127.0.0.1:8765/ "
                 "(the default)")
         self.assertIn(says, views.status_text(st))
@@ -42181,6 +42258,35 @@ def save():'''))
             httpd.shutdown()
             httpd.server_close()
 
+    def test_a_page_bound_beyond_this_machine_counts_every_request_from_outside_and_changes_nothing(self):
+        skip_unless_ports(self)
+        from hansa import web
+        self.assertFalse(web.loopback("0.0.0.0"))
+        self.assertTrue(web.loopback("::1"))
+        s = json.loads(self.desk.settings_path.read_text())
+        s["settings_from_outside"] = True  # not even the principal's switch opens it
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertIs(self.desk.settings().get("settings_from_outside"), True)
+        # bound on loopback here (the test's sandbox), as if on a wider address
+        with unittest.mock.patch.object(web, "loopback", return_value=False):
+            httpd = start_web(self.desk, "127.0.0.1", 0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "Host": "127.0.0.1"}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/settings", headers=auth)) as r:
+                self.assertTrue(json.load(r)["from_outside"])  # whatever its Host says
+            for path in ("/api/pause", "/api/settings"):
+                with urllib.request.urlopen(urllib.request.Request(
+                        f"{base}{path}", data=b"{}", method="POST", headers={**auth, "X-Hansa": "1",
+                                                                            "Content-Type": "application/json"})) as r:
+                    said = json.load(r)
+                self.assertEqual((said["ok"], said["code"]), (False, "page_read_only"))
+                self.assertIn("only shows", said["problems"][0])
+            self.assertFalse(self.desk.paused())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_merge_wait_page_test_reports_a_skip_without_node(self):
         # Without node the page assertion must be a visible skip, before starting a server or task.
         with unittest.mock.patch("shutil.which", return_value=None):
@@ -58916,6 +59022,8 @@ else:
                 with self.subTest(language=language, event=kind, fields=fields):
                     check(alert_kind, lambda: self.desk.event(kind, **fields), en, zh,
                           "active" if alert_kind == "ask" else "urgent", language)
+            check("page_held", lambda: alert.page_held(self.desk, 9123), "port 9123, where it was served last time, "
+                  "is held by something else", "端口 9123 被别的程序占用", "urgent", language)
             write_json(self.desk.state_dir / "heartbeat", time.time() - alert.STUCK_ALERT - 60)
             check("server_stuck", lambda: alert.stuck_check(self.desk, 0), "hansa serve has finished no round",
                   "分钟没跑完一轮", "urgent", language)

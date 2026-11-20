@@ -678,6 +678,40 @@ def web_address(desk: Desk) -> tuple:
     return host, port
 
 
+def recorded_port(desk: Desk) -> int | None:
+    """The port this desk's hansa serve last served the page on (web-port, written as it binds it); None before
+    it ever did, or when the record cannot be read."""
+    try:
+        return int((desk.state_dir / "web-port").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def page_held_file(desk: Desk) -> Path:
+    """Written by a hansa serve that started without its page, as its recorded port was held by something else."""
+    return desk.state_dir / "web-held"
+
+
+def held_port(desk: Desk, server: dict) -> int | None:
+    """The recorded port that kept the running hansa serve from serving its page; None when it serves it, or
+    when the record is a stopped server's."""
+    rec = read_json(page_held_file(desk), {}) or {}
+    if not isinstance(rec, dict) or server.get("state") == "gone" or rec.get("pid") != server.get("pid"):
+        return None
+    port = rec.get("port")
+    return port if isinstance(port, int) and not isinstance(port, bool) else None
+
+
+def page_held_text(port: int, zh: bool = False) -> str:
+    """One sentence for a page that did not start elsewhere: its port is held by something else."""
+    if zh:
+        return (f"网页没有启动：上次网页所在的端口 {port} 被别的程序占用；如果有意换一个端口，"
+                "请停止服务器后用 hansa serve --port N（N 为空闲端口）启动")
+    return (f"the web page did not start: port {port}, where it was served last time, is held by something else; "
+            "to serve the page on another port on purpose, stop this server and start it with hansa serve --port N "
+            "(N a free port)")
+
+
 def page_address(host: str, port) -> str:
     """The page's address without its key, as hansa status gives it: a server listening on every address
     (0.0.0.0, ::) at 127.0.0.1 (or ::1)."""
@@ -691,6 +725,8 @@ def page_text(page: dict) -> str:
     listening on every address (0.0.0.0, ::) is given at 127.0.0.1 (or ::1), an address one can open."""
     every = page["host"] in ("0.0.0.0", "", "::")
     at = page_address(page["host"], page["port"]) + (" (it listens on every address)" if every else "")
+    if page["up"] and page.get("held"):
+        return "web page: not served: " + page_held_text(page["held"]).removeprefix("the web page did not start: ")
     if page["up"] and not page.get("answers", True):
         return (f"web page: {at}, but hansa serve is not answering now (its process is stopped or stuck: "
                 "hansa status says more), so neither is the page")
@@ -705,7 +741,8 @@ def page_of(desk: Desk, server: dict) -> dict:
     host, port = web_address(desk)
     stuck = server["state"] == "stuck"  # its rounds stopped coming; its page answers while its process does
     return {"host": host, "port": port, "up": server["state"] != "gone", "stuck": stuck,
-            "answers": not stuck or bool(server.get("answers")), "served": (desk.state_dir / "web-port").exists()}
+            "answers": not stuck or bool(server.get("answers")), "served": (desk.state_dir / "web-port").exists(),
+            "held": held_port(desk, server)}
 
 
 def killed_last(m: dict) -> dict:
