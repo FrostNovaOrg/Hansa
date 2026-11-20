@@ -12064,11 +12064,32 @@ def save():'''))
         return self.git_out("rev-parse", "HEAD")
 
     def test_word_scan_gitlink_row_1_task_merges_but_forbidden_entry_name_is_refused(self):
+        from hansa import run
         self.forbid(r"re:\bAI\b")
-        tid = self.done_with(env={"FAKE_GITLINK": "vendor/lib"})
+        # a task cannot add a submodule (a repository inside the worktree): it fails and nothing is committed
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_GITLINK": "vendor/lib"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add a dependency"))
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at vendor/lib;", m["error"])
+        self.assertEqual(m["head"], "")
+        # one the base holds already (a commit made there directly): a task that leaves it as it is merges
+        (self.repo / "vendor/lib").mkdir(parents=True)
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{self.git_out('rev-parse', 'HEAD')},vendor/lib",
+           cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add dependency", cwd=self.repo)
+        tid = self.done_with(env={})
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
         self.assertTrue(self.git_out("ls-tree", "main", "vendor/lib").startswith("160000 commit "))
-        tid = self.done_with(env={"FAKE_GITLINK": "vendor/AI"})
+        # the merge's scan still sees a submodule entry's name, in a commit hansa recorded for a task (one recorded
+        # before tasks were refused a submodule, say)
+        tid = self.done_with(env={})
+        wt = Path(self.desk.meta(tid)["worktree"])
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{self.git_out('rev-parse', 'HEAD')},vendor/AI",
+           cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add AI", cwd=wt)
+        self.desk.update(tid, head=self.git_out("rev-parse", "HEAD", cwd=wt))
         self.assertIn("file name: vendor/AI", self.refused("merge", tid))
 
     def test_word_scan_gitlink_row_2_release_is_asked_even_without_the_submodule_object(self):
@@ -34479,6 +34500,197 @@ def save():'''))
         (own / "config.worktree").write_text("")
         sh("git", "checkout", "-q", f"task/{m['id']}", cwd=wt)
         self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0], wt)  # put right: it works again
+
+    def plant_repository(self, wt, form, kind, marker, at="nest"):
+        """A repository inside the worktree at `at` whose own config names a command that makes `marker` when git looks
+        into it: kind "filter" (a content filter its .gitattributes names) or "fsmonitor". form: "folder" (a .git
+        folder), "file" (a one-line .git file naming a git folder kept under another name in the worktree), "link" (a
+        .git link to such a folder) or "index" (a .git folder the worktree's index names, as a worker's git add
+        would). Its file is changed since its commit, so git would look into it again."""
+        nest = wt / at
+        nest.mkdir(parents=True, exist_ok=True)
+        if form in ("folder", "index"):
+            sh("git", "init", "-q", cwd=nest)
+        else:
+            kept = wt / f"{at.replace('/', '-')}-kept"
+            sh("git", "init", "-q", f"--separate-git-dir={kept}", cwd=nest)
+            if form == "link":
+                (nest / ".git").unlink()
+                (nest / ".git").symlink_to(kept)
+        if kind == "filter":
+            (nest / ".gitattributes").write_text("* filter=mark\n")
+            sh("git", "config", "filter.mark.clean", f"touch {marker}; cat", cwd=nest)
+        else:
+            sh("git", "config", "core.fsmonitor", f"touch {marker}", cwd=nest)
+        (nest / "f.txt").write_text("one\n")
+        sh("git", "add", "-A", cwd=nest)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "n", cwd=nest)
+        (nest / "f.txt").write_text("two\n")
+        marker.unlink(missing_ok=True)  # the commit above ran it: from now on only hansa's git could
+        if form == "index":
+            sh("git", "update-index", "--add", "--cacheinfo",
+               f"160000,{sh_out('git', 'rev-parse', 'HEAD', cwd=nest)},{at}", cwd=wt)
+
+    def started_run(self, title="Add a file"):
+        """A task whose run has started in lane a's worktree, as finish finds it when its worker ends: (id, worktree,
+        the commit it started from)."""
+        from hansa import run
+        tid = self.desk.new_task(title)
+        wt = run.prepare(self.desk, "a", self.desk.settings()["lanes"]["a"], self.desk.meta(tid))[0]
+        base = self.git_out("rev-parse", "main")
+        self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
+                         model_asked="sonnet", branch=f"task/{tid}", base=base)
+        return tid, wt, base
+
+    def test_a_repository_inside_the_worktree_is_refused_at_a_runs_end_and_removed_before_the_next(self):
+        # hansa's git runs outside the sandbox: git looks into a repository inside the worktree under that one's
+        # config, whose filter or file monitor is a command. None runs; nothing is committed; the next run removes it
+        from hansa import run
+        for form in ("folder", "file", "link", "index"):
+            for kind in ("filter", "fsmonitor"):
+                with self.subTest(form=form, kind=kind):
+                    marker = self.tmp / f"ran-{form}-{kind}"
+                    tid, wt, base = self.started_run()
+                    self.assertFalse(os.path.lexists(wt / "nest" / ".git"))  # the last one's was removed
+                    self.plant_repository(wt, form, kind, marker, at="deep/nest")
+                    (wt / "work.txt").write_text("work\n")
+                    m = run.finish(self.desk, tid, 0)
+                    self.assertFalse(marker.exists(), "hansa's git ran a command the worktree's repository names")
+                    self.assertEqual(m["state"], "failed", m)
+                    self.assertIn("repository inside", m["error"])
+                    self.assertIn("deep/nest", m["error"])
+                    self.assertIn("remove", m["error"])
+                    self.assertEqual(m["head"], "")
+                    self.assertEqual(self.git_out("rev-parse", f"task/{tid}"), base)  # nothing committed
+                    tid, wt, base = self.started_run("The next one")
+                    self.assertFalse(os.path.lexists(wt / "deep" / "nest" / ".git"))
+                    self.assertFalse(marker.exists())
+                    self.assertNotIn("160000", sh_out("git", "ls-files", "--stage", cwd=wt))
+                    self.assertTrue(any(e["event"] == "repository_inside_removed" and e["paths"] == ["deep/nest"]
+                                        for e in map(json.loads, self.desk.events_path.read_text().splitlines())))
+        # up to 5 are named, and how many more
+        tid, wt, base = self.started_run()
+        for i in range(7):
+            self.plant_repository(wt, "folder", "filter", self.tmp / "ran-many", at=f"many{i}")
+        m = run.finish(self.desk, tid, 0)
+        self.assertIn("many0, many1, many2, many3, many4 (and 2 more)", m["error"])
+        self.assertFalse((self.tmp / "ran-many").exists())
+        # a submodule the run's own commit brought in is refused as well: checked against where the run started
+        tid, wt, base = self.started_run()
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{base},vendor/lib", cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add a dependency", cwd=wt)
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at vendor/lib;", m["error"])
+        self.assertEqual(m["head"], "")
+
+    def test_hansas_git_calls_never_look_into_a_repository_inside_the_worktree(self):
+        from hansa import run
+        marker = self.tmp / "ran"
+        # stage_work (a lane's removal with --keep stages with it too): refused before git scans the worktree
+        tid, wt, base = self.started_run()
+        self.plant_repository(wt, "folder", "filter", marker)
+        with self.assertRaisesRegex(run.RepositoryInside, "repository inside it, at nest;"):
+            run.stage_work(self.desk, wt, base)
+        self.assertFalse(marker.exists())
+        self.assertNotIn("nest", sh_out("git", "ls-files", cwd=wt))
+        # snapshot_tree, keep_work: what they keep leaves the repository out, and the cleaned worktree holds none
+        for form in ("folder", "index"):
+            with self.subTest(form=form):
+                tid, wt, base = self.started_run()
+                self.plant_repository(wt, form, "filter", marker)
+                (wt / "work.txt").write_text("work\n")
+                self.assertNotIn("nest", sh_out("git", "ls-tree", "--name-only", run.snapshot_tree(self.desk, wt, base),
+                                                cwd=wt))
+                kept = run.keep_work(self.desk, wt, tid)
+                self.assertEqual(kept, {"kept_ref": f"refs/hansa/kept/{tid}"})
+                self.assertEqual(sh_out("git", "ls-tree", "--name-only", kept["kept_ref"], cwd=wt).split(),
+                                 ["README.md", "work.txt"])
+                self.assertFalse(os.path.lexists(wt / "nest"))  # removed with the rest
+                self.assertFalse(marker.exists())
+        # _save_changes (a blocked run's patch): without the repository
+        tid, wt, base = self.started_run()
+        self.plant_repository(wt, "folder", "filter", marker)
+        (wt / "work.txt").write_text("work\n")
+        out = self.tmp / "changes.patch"
+        run._save_changes(self.desk, wt, base, out)
+        self.assertFalse(marker.exists())
+        self.assertIn("work.txt", out.read_text())
+        self.assertNotIn("nest", out.read_text())
+
+    def test_hansas_git_never_looks_into_a_submodule_and_a_task_cannot_change_one(self):
+        from hansa import run
+        sub = self.tmp / "sub"
+        sub.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=sub)
+        (sub / "f.txt").write_text("one\n")
+        sh("git", "add", "-A", cwd=sub)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "s", cwd=sub)
+        first = sh_out("git", "rev-parse", "HEAD", cwd=sub)
+        sh("git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a submodule", cwd=self.repo)
+        marker = self.tmp / "ran"
+        # not populated: the run's work is committed as before
+        tid, wt, base = self.started_run()
+        (wt / "work.txt").write_text("work\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["files"], ["work.txt"], m)
+        # populated, with a filter in its config and a changed file: never looked into, its commit unchanged
+        tid, wt, base = self.started_run()
+        sh("git", "-c", "protocol.file.allow=always", "clone", "-q", str(sub), ".", cwd=wt / "sub")
+        (wt / "sub" / ".gitattributes").write_text("* filter=mark\n")
+        sh("git", "config", "filter.mark.clean", f"touch {marker}; cat", cwd=wt / "sub")
+        (wt / "sub" / "f.txt").write_text("two\n")
+        (wt / "work.txt").write_text("more\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertFalse(marker.exists())
+        self.assertEqual(m["files"], ["work.txt"], m)
+        self.assertEqual(sh_out("git", "rev-parse", f"{m['head']}:sub", cwd=wt), first)
+        # nor when .gitmodules asks git to look (a protected path: that run fails for it)
+        tid, wt, base = self.started_run()
+        (wt / "sub" / "f.txt").write_text("again\n")
+        sh("git", "config", "-f", ".gitmodules", "submodule.sub.ignore", "none", cwd=wt)
+        self.hansa("git", "a", "--worktree", "status")  # the coordinator's git there neither
+        self.hansa("git", "a", "--worktree", "diff")
+        self.assertFalse(marker.exists())
+        m = run.finish(self.desk, tid, 0)
+        self.assertIn("protected paths: .gitmodules", m["error"])
+        self.assertFalse(marker.exists())
+        # the next run starts with it as it is: a submodule's own repository is not removed, and still not looked into
+        tid, wt, base = self.started_run()
+        self.assertTrue((wt / "sub" / ".git").exists())
+        self.assertFalse(marker.exists())
+        # a task that changes the submodule's commit is refused
+        (wt / "sub" / "f.txt").write_text("three\n")
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "t", cwd=wt / "sub")
+        marker.unlink(missing_ok=True)
+        sh("git", "update-index", "--cacheinfo", f"160000,{sh_out('git', 'rev-parse', 'HEAD', cwd=wt / 'sub')},sub",
+           cwd=wt)
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at sub;", m["error"])
+        self.assertFalse(marker.exists())
+        tid, wt, base = self.started_run()  # put back to the commit's
+        self.assertEqual(sh_out("git", "rev-parse", ":sub", cwd=wt), first)
+
+    def test_a_repository_inside_an_ignored_folder_is_left_alone(self):
+        # git with hansa's options does not look into an ignored folder: a build's or node_modules' repositories stay
+        from hansa import run
+        (self.repo / ".gitignore").write_text("build/\n")
+        sh("git", "add", ".gitignore", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "ignore", cwd=self.repo)
+        marker = self.tmp / "ran"
+        tid, wt, base = self.started_run()
+        for kind in ("filter", "fsmonitor"):
+            self.plant_repository(wt, "folder", kind, marker, at=f"build/{kind}")
+        (wt / "work.txt").write_text("work\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["files"], ["work.txt"], m)
+        self.assertFalse(marker.exists())
+        tid, wt, base = self.started_run()
+        self.assertTrue((wt / "build" / "filter" / ".git").is_dir())
+        self.assertTrue((wt / "build" / "fsmonitor" / ".git").is_dir())
+        self.assertFalse(marker.exists())
 
     def test_a_branch_ref_that_leads_to_another_ref_does_not_lead_hansas_commit_onto_it(self):
         # commit hansa's end-of-session commit onto the base, while HEAD still names the session's branch

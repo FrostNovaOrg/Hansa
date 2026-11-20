@@ -276,6 +276,12 @@ stops every hansa git command there until it is removed by hand; hansa does
 not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
 hooks from an empty folder and commit and tag signing off, whatever a
 setting there says; in the lane's own checkout its hooks run as before.
+A repository inside the worktree (one a worker made, anywhere below its top,
+outside an ignored folder) is never looked into by hansa's git: at a run's end
+the task fails, nothing is committed, and its error names up to five of them to
+remove; before a run starts, and when a worktree is cleaned, hansa removes
+them itself. Tasks do not change submodules: hansa's git never looks into one,
+and a run that changes one fails the same way.
 That empty folder, `hansa-no-hooks-*` in the temporary folder, is made once
 by each hansa process that needs it and removed as the process exits. One a
 process could not remove (it became another program, as `hansa coordinator`
