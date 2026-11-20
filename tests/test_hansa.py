@@ -53706,7 +53706,11 @@ else if (ask === "task-steps")'''))
     def test_status_picture_fetch_failure_keeps_last_status_and_recovers(self):
         st = self.picture_status()
         st["running"] = [self.picture_worker()]
-        for language, [initial, stopped, shown, failed, events_failed, recovered] in self.picture_pages(st, "status-picture-errors"):
+        # The lane's started time and the header's "now" clock are drawn from the page's clock: pin it just before
+        # a minute boundary, so the loads' renders compare equal whatever the wall clock does between them.
+        clock = "2026-11-13T08:00:59Z"
+        for language, [initial, stopped, shown, failed, events_failed, recovered] in self.picture_pages(
+                st, "status-picture-errors", clock=clock):
             self.assertEqual(failed["boxes"], shown["boxes"])
             self.assertEqual(failed["rows"], shown["rows"])
             self.assertEqual(failed["text"], shown["text"])
@@ -53745,7 +53749,10 @@ else if (ask === "task-steps")'''))
     def test_status_picture_events_failure_then_status_failure_keeps_last_status(self):
         st = self.picture_status()
         st["running"] = [self.picture_worker()]
-        for _, [shown, failed, recovered] in self.picture_pages(st, "status-picture-events-initial-error"):
+        # Two loads are compared: pin the page's clock (the lane's started time and the header's "now") just
+        # before a minute boundary, as those texts otherwise change between renders.
+        clock = "2026-11-13T08:00:59Z"
+        for _, [shown, failed, recovered] in self.picture_pages(st, "status-picture-events-initial-error", clock=clock):
             self.assertIn("events connection lost", shown["text"])
             self.assertEqual(shown["connection"]["lastGood"], 0)
             self.assertEqual(shown["text"], failed["text"])
