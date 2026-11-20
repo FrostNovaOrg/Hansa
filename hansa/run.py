@@ -1214,8 +1214,16 @@ def worktree_git_settings() -> list:
     return [*checkout_git_settings(),
             # nor into a submodule: what hansa's status, diff and add scan there is stopped where they run them
             # (NO_SUBMODULES, add_all), and what checks it out or updates it is stopped here
-            "-c", "submodule.recurse=false", "-c", "diff.ignoreSubmodules=all", "-c", "status.submoduleSummary=false"]
+            "-c", "submodule.recurse=false", "-c", "diff.ignoreSubmodules=all", "-c", "status.submoduleSummary=false",
+            "-c", "diff.submodule=short"]
 
+
+# Review shows Git's own patch and gitlink commit IDs. An inline submodule diff can run a
+# program configured in that repository, and checking its dirty files also enters it.
+GIT_REVIEW_CONFIG = ("-c", "diff.submodule=short", "-c", "submodule.recurse=false",
+                     "-c", "diff.ignoreSubmodules=dirty", "-c", "status.submoduleSummary=false")
+GIT_REVIEW_NO_PROGRAMS = ("--no-ext-diff", "--no-textconv")
+GIT_REVIEW_DIFF = (*GIT_REVIEW_NO_PROGRAMS, "--ignore-submodules=dirty")
 
 # Given to every git status and diff of hansa's that reads a worktree's files: git never looks into a repository
 # there (a submodule, or one a worker made), where git would run git under that repository's own config.

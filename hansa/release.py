@@ -1233,7 +1233,7 @@ CODE_TRIES = 3
 
 
 def code_key_file(desk: Desk) -> Path:
-    return desk.secrets_dir / "release-code.hmac"  # not *.key: no provider's key, so never looked for in text
+    return desk.secrets_dir / "release-code.hmac"
 
 
 def _code_key(desk: Desk) -> bytes:

@@ -3626,26 +3626,29 @@ class Desk:
         return d
 
     def keys(self) -> dict:
-        """Stored provider and channel keys, for checking text against; never shown."""
+        """Stored provider, channel and desk secrets, for checking text against."""
         out = {}
         from .alert_push import keys as push_keys
-        files = sorted(self.secrets_dir.glob("*.key")) if self.secrets_dir.is_dir() else []
-        for f in [*files, self.secrets_dir / "alert-bark.device-key"]:
+        from .release import code_key_file
+        files = [(f.stem, f) for f in sorted(self.secrets_dir.glob("*.key"))]
+        files += [("alert-bark", self.secrets_dir / "alert-bark.device-key"),
+                  ("the page", self.state_dir / "web-token"), ("release codes", code_key_file(self))]
+        for name, f in files:
             try:
                 k = f.read_text(encoding="utf-8").strip()
-            except OSError:
+            except (OSError, UnicodeError):
                 continue
             if len(k) >= 8:  # shorter strings would match ordinary text
-                out[f.stem] = k
+                out[name] = k
         out.update(push_keys(self))
         return out
 
     def keys_in(self, text: str) -> list:
-        """Names of the providers whose key appears in this text."""
+        """Names of the secrets that appear in this text."""
         return sorted(n for n, k in self.keys().items() if k in text)
 
     def redact(self, text: str) -> str:
-        for n, k in self.keys().items():
+        for n, k in sorted(self.keys().items(), key=lambda item: len(item[1]), reverse=True):
             text = text.replace(k, f"[key of {n}]")
         return text
 
