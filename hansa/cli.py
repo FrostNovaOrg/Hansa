@@ -940,9 +940,10 @@ def cmd_git(a):
                "-c", "log.showSignature=false", "-c", "grep.fallbackToNoIndex=false",
                "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
     if cmd == "diff":  # Outside a checkout Git defaults to --no-index, even with two relative paths.
-        location = subprocess.run([*git_cmd, "rev-parse", "--show-prefix"], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, errors="replace") if cwd.is_dir() else None
-        if location is None or location.returncode or location.stdout != "\n":
+        location = subprocess.run([*git_cmd, "rev-parse", "--is-inside-work-tree"], cwd=cwd, env=env,
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  errors="replace") if cwd.is_dir() else None
+        if location is None or location.returncode or location.stdout != "true\n":
             raise SystemExit(f"hansa git: no Git checkout at lane {a.lane}'s repository or worktree. Nothing was run")
     r = subprocess.run([*git_cmd, cmd, *flags, *args[1:]],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")

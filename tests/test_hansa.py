@@ -10478,6 +10478,44 @@ def save():'''))
         self.assertIn("no Git checkout", err)
         self.assertIn("Nothing was run", err)
 
+    def test_hansa_git_reads_a_lane_in_a_checkout_subfolder(self):
+        pkg = self.repo / "pkg"
+        pkg.mkdir()
+        (pkg / "readme").write_text("package first\n")
+        (self.repo / "other").write_text("sibling first\n")
+        self.git_out("add", "pkg/readme", "other")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add package")
+        self.hansa("lane", "add", "s", "--repo", str(pkg))
+        (pkg / "readme").write_text("package edited\n")
+        (self.repo / "other").write_text("sibling edited\n")
+        secret = "fixture-subfolder-untracked-secret"
+        (pkg / ".env").write_text(secret + "\n")
+
+        for args, expected in ((("diff",), self.git_out("diff", cwd=pkg) + "\n"),
+                               (("diff", "--", "readme"), self.git_out("diff", "--", "readme", cwd=pkg) + "\n"),
+                               (("show", "HEAD:pkg/readme"), "package first\n"),
+                               (("log", "-1", "--format=%s"), "Add package\n"),
+                               (("grep", "package edited"), "readme:package edited\n")):
+            with self.subTest(args=args):
+                self.assertEqual(self.hansa_git("s", *args), (0, expected, ""))
+
+        code, out, err = self.hansa_git("s", "diff", "--", "../other")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("../other is refused", err)
+        self.assertIn("Nothing was run", err)
+        self.assertEqual(self.hansa_git("s", "grep", "fixture-subfolder"), (1, "", ""))
+        for cmd, option, *args in (("diff", "--no-i", "readme", ".env"), ("diff", "--submodule=diff"),
+                                   ("show", "--submodule"), ("log", "--subm=log"),
+                                   ("grep", "--u", "fixture-subfolder"), ("grep", "--exc", "fixture-subfolder"),
+                                   ("grep", "--no-exc", "fixture-subfolder"), ("grep", "-f", "readme"),
+                                   ("grep", "--recurse-submodules", "package")):
+            with self.subTest(cmd=cmd, option=option):
+                code, out, err = self.hansa_git("s", cmd, option, *args)
+                self.assertNotIn(secret, out + err)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
+
     def test_hansa_git_disables_a_configured_blame_revision_file_and_cat_file_textconv_abbreviation(self):
         revisions = self.tmp / "revisions"
         revisions.write_text("not-a-revision\n")
