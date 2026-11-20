@@ -111,9 +111,12 @@ submodule recursion, and reports line endings only for tracked paths.
 `hansa git` also refuses options that enumerate alternate refs or dump
 every object Git can access.
 `status` and `ls-files --others` can still list untracked names. Review diffs
-from `hansa git` and `hansa diff` use Git's built-in patch output with
-submodule commit IDs. These limits protect private files beside or inside a
-checkout and apply while Git runs as the desk's account.
+from `hansa git` and `hansa diff` use Git's built-in patch output. A diff
+from the lane's repository shows changes to submodule commit IDs. In the
+lane's task worktree, `hansa git L --worktree status`, `hansa git L --worktree diff`
+and `hansa diff` ignore submodules entirely so Git never reads their checkouts
+or runs programs their config names. These limits protect private files beside
+or inside a checkout and apply while Git runs as the desk's account.
 
 Claude Code also matches these rules after a plain `xargs` and after wrappers
 such as `env`, `nice` or `timeout` (`xargs git push` is denied). Run by its

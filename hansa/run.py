@@ -29,13 +29,14 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 from . import account, after, build, installed, installed_text, pictures, session_vars, without_session
-from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, connected_providers, key_name, provider_entry, home_secrets, identity_problem,
+from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_log_lock, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, connected_providers, key_name, provider_entry, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems, old_codex_provider)
 from .desk import lane_env as checked_env
@@ -487,6 +488,8 @@ SANDBOX_PROTECTED_PATHS = (*SANDBOX_PLACEHOLDERS, ".claude")
 # Project settings may run commands when opened. Refuse worker changes to these names at any depth,
 # including on Linux where the sandbox can only protect fixed paths. Keep while workers can change them.
 PROJECT_SETTINGS_NAMES = (".claude", ".codex", ".agents")
+# The standalone Codex adapter mirrors the lane commands' project denies. Its tests compare the rules.
+NESTED_CLAUDE_SETTINGS = (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".claude/skills")
 # A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified.
 INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
                      "AskUserQuestion", "Monitor"]
@@ -548,8 +551,7 @@ SRT_TRY_SECONDS = 60
 
 
 class SrtCannotRun(RuntimeError):
-    """srt was not found, or found but could not run `true` in a sandbox: the machine's problem, not the task's.
-    str(): what srt printed (or that it is missing)."""
+    """hansa could not build the sandbox settings, find srt, or run its probe with those settings."""
 
 
 def srt_record(desk: Desk) -> dict:
@@ -1202,24 +1204,33 @@ def worktree_git_settings() -> list:
     checkout, a merge's post-merge and the like still run hooks), and no signing program for its commits and
     tags. The lane's own checkout runs its hooks as before: hansa's merge into the base relies on them."""
     return ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={no_hooks()}",
-            "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"]
+            "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false",
+            # nor into a submodule: what hansa's status, diff and add scan there is stopped where they run them
+            # (NO_SUBMODULES, add_all), and what checks it out or updates it is stopped here
+            "-c", "submodule.recurse=false", "-c", "diff.ignoreSubmodules=all", "-c", "status.submoduleSummary=false",
+            "-c", "diff.submodule=short"]
 
 
 # Review shows Git's own patch and gitlink commit IDs. An inline submodule diff can run a
 # program configured in that repository, and checking its dirty files also enters it.
 GIT_REVIEW_CONFIG = ("-c", "diff.submodule=short", "-c", "submodule.recurse=false",
                      "-c", "diff.ignoreSubmodules=dirty", "-c", "status.submoduleSummary=false")
-GIT_REVIEW_DIFF = ("--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty")
+GIT_REVIEW_NO_PROGRAMS = ("--no-ext-diff", "--no-textconv")
+GIT_REVIEW_DIFF = (*GIT_REVIEW_NO_PROGRAMS, "--ignore-submodules=dirty")
+
+# Given to every git status and diff of hansa's that reads a worktree's files: git never looks into a repository
+# there (a submodule, or one a worker made), where git would run git under that repository's own config.
+NO_SUBMODULES = "--ignore-submodules=all"
 
 
-def git(*args, cwd, env=None) -> str:
+def git(*args, cwd, env=None, stdin=None) -> str:
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
     # Hansa reads git's diagnostics and --shortstat in English, even with a caller's locale override.
     # Keep this in the child environment: workers and lane commands retain their own locale.
     e = {**without_session(os.environ), **GIT_ID, **(env or {}), "LC_ALL": "C"}
     linked = os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
     r = subprocess.run(["git", "-c", "core.quotePath=false", *(worktree_git_settings() if linked else ()), *args],
-                       cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace")
+                       cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace", input=stdin)
     if r.returncode:
         refused = account.git_refusal(r.stderr or "", cwd)
         if refused:
@@ -2554,10 +2565,10 @@ def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
             f"so the lane's next task runs normally")
 
 
-def wgit(desk: Desk, wt: Path, *args, env=None) -> str:
+def wgit(desk: Desk, wt: Path, *args, env=None, stdin=None) -> str:
     """git in a worktree, run only after its .git file is checked."""
     check_git_file(desk, wt)
-    return git(*args, cwd=wt, env=env)
+    return git(*args, cwd=wt, env=env, stdin=stdin)
 
 
 def sandbox_leftovers(desk: Desk, wt: Path) -> list:
@@ -2581,10 +2592,133 @@ def sandbox_protected(path: str) -> bool:
     return parts[0] in SANDBOX_PROTECTED_PATHS or any(p in PROJECT_SETTINGS_NAMES for p in parts)
 
 
+class RepositoryInside(SandboxPathChanged):
+    """The worktree holds a repository inside it that its commit does not hold as a submodule, or its index adds or
+    changes a submodule's commit: git, run there by hansa, would run git under that repository's config."""
+
+
+# What git takes for a .git entry: in any case, and on macOS with the characters HFS+ ignores in a name
+_HFS_IGNORED = dict.fromkeys(map(ord, "‌‍‎‏‪‫‬‭‮"
+                                      "⁪⁫⁬⁭⁮⁯﻿"))
+
+
+def _nfc(p: str) -> str:
+    return p if p.isascii() else unicodedata.normalize("NFC", p)
+
+
+def gitlinks(desk: Desk, wt: Path, *revs) -> dict:
+    """{path: {commit ids}}: the submodules the commits hold, read from their trees alone (no file of the worktree)."""
+    out = {}
+    for rev in filter(None, revs):
+        for e in wgit(desk, wt, "ls-tree", "-r", "-z", "--full-tree", rev).split("\0"):
+            if e.startswith("160000 "):
+                info, path = e.split("\t", 1)
+                out.setdefault(path, set()).add(info.split()[2])
+    return out
+
+
+def index_gitlinks(desk: Desk, wt: Path, env=None) -> dict:
+    """{path: commit id}: the submodules the index names, read from the index alone (git looks into none)."""
+    out = {}
+    for e in wgit(desk, wt, "ls-files", "--stage", "-z", env=env).split("\0"):
+        if e.startswith("160000 "):
+            info, path = e.split("\t", 1)
+            out[path] = info.split()[1]
+    return out
+
+
+def repos_inside(desk: Desk, wt: Path, places) -> list:
+    """The folders below the worktree's top that hold a .git entry (a folder, a file or a link), found by hansa's own
+    walk (lstat, no link followed, no git), but for `places` (the submodules' paths, never walked into) and those the
+    worktree ignores: git looks into none of these. Sorted, relative, with /."""
+    places = {_nfc(p) for p in places}
+    found, todo = [], [""]
+    while todo:
+        rel = todo.pop()
+        try:
+            with os.scandir(os.path.join(wt, rel)) as it:
+                entries = list(it)
+        except OSError:  # one git cannot read either
+            continue
+        for d in entries:
+            p = f"{rel}/{d.name}" if rel else d.name
+            if d.name.translate(_HFS_IGNORED).lower() == ".git":
+                if rel and _nfc(rel) not in places:
+                    found.append(rel)
+                continue  # a git folder (the top's own too) is not walked into
+            try:
+                if d.is_dir(follow_symlinks=False) and _nfc(p) not in places:
+                    todo.append(p)
+            except OSError:
+                continue
+    found = sorted(set(found))
+    ignored = set()
+    for i in range(0, len(found), 200):  # git skips an ignored folder; one it cannot match stays found
+        try:
+            ignored |= set(wgit(desk, wt, "check-ignore", "-z", "--stdin",
+                                stdin="".join(f"{p}\0" for p in found[i:i + 200])).split("\0"))
+        except GitFileChanged:
+            raise
+        except RuntimeError:  # none ignored (git says so with an error)
+            pass
+    return [p for p in found if p not in ignored]
+
+
+def _changed_gitlinks(held: dict, index: dict) -> list:
+    return sorted({p for p, c in index.items() if c not in held.get(p, ())} | {p for p in held if p not in index})
+
+
+def refuse_repos_inside(desk: Desk, wt: Path, revs) -> dict:
+    """Refuse (RepositoryInside) a worktree that holds a repository inside it, or whose index adds, changes or removes
+    a submodule, against the commits `revs` (the run's start, and a merge hansa made there). Checked before hansa's
+    git scans the worktree at a run's end; returns the submodules they hold ({path: ids})."""
+    held = gitlinks(desk, wt, *revs)
+    found = sorted({*repos_inside(desk, wt, held), *_changed_gitlinks(held, index_gitlinks(desk, wt))})
+    if found:
+        more = f" (and {len(found) - 5} more)" if len(found) > 5 else ""
+        raise RepositoryInside(f"refusing to commit: the worktree holds a repository inside it, at {', '.join(found[:5])}"
+                               f"{more}; nothing was committed. Git history is hansa's: remove them, "
+                               "then run the task again")
+    return held
+
+
+def clear_repos_inside(desk: Desk, wt: Path, rev: str) -> list:
+    """Before a run starts and when a worktree is cleaned: remove the .git entry of each repository inside the worktree
+    that commit `rev` does not hold as a submodule (hansa removes it, not git), and put back the index's submodules to
+    rev's. Returns the folders it removed one from, and the submodules put back."""
+    held = gitlinks(desk, wt, rev)
+    found = repos_inside(desk, wt, held)
+    for rel in found:
+        with os.scandir(wt / rel) as it:
+            dots = [d for d in it if d.name.translate(_HFS_IGNORED).lower() == ".git"]
+        for d in dots:
+            try:
+                if d.is_dir(follow_symlinks=False):
+                    shutil.rmtree(d.path)
+                else:
+                    os.unlink(d.path)
+            except OSError as e:
+                raise RuntimeError(f"cannot remove the repository inside the worktree at {rel}: {e.strerror or e}") \
+                    from None
+    changed = _changed_gitlinks(held, index_gitlinks(desk, wt))
+    for i in range(0, len(changed), 200):
+        wgit(desk, wt, "reset", "-q", rev, "--", *(f":(top,literal){p}" for p in changed[i:i + 200]))
+    return sorted({*found, *changed})
+
+
+def add_all(desk: Desk, wt: Path, places=(), env=None) -> None:
+    """git add -A, but for the paths `places` (the submodules', and repositories inside the worktree): git never looks
+    into them, so none changes."""
+    wgit(desk, wt, "add", "-A", *(("--", ".", *(f":(exclude,top,literal){p}" for p in places)) if places else ()),
+         env=env)
+
+
 def stage_work(desk: Desk, wt: Path, old: str, merged=()) -> list:
-    """Stage work, leave out placeholders and refuse protected changes before any commit or lane removal."""
+    """Stage work, leave out placeholders and refuse protected changes before any commit or lane removal. A repository
+    inside the worktree is refused before git scans it (RepositoryInside), and the submodules are never staged."""
+    held = refuse_repos_inside(desk, wt, (old, *merged))
     left = sandbox_leftovers(desk, wt)  # untracked until the add
-    wgit(desk, wt, "add", "-A")
+    add_all(desk, wt, held)
     # A worker's git add may already have staged the sandbox's empty placeholders. Inspect the index,
     # not the disk: skip-worktree can hide an entry whose blob was put there with update-index.
     held = set(wgit(desk, wt, "ls-tree", "-r", "--name-only", "-z", old).split("\0"))
@@ -3109,6 +3243,40 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp:
     }}
 
 
+def project_write_deny(wt: Path) -> list:
+    """Keep a lane command from changing settings a later worker would load, including ignored files.
+    Linux srt binds literal paths (including absent top-level names) and drops globs. Find existing nested
+    settings on disk there. A new nested name has no bind. Stubbing every name in every ordinary directory
+    would prevent a build from removing those directories and still miss directories made during the command."""
+    wt = Path(wt)
+    names = (*PROJECT_SETTINGS_NAMES, ".mcp.json")
+    fixed = list(names)
+    if account.LINUX:
+        folders = [wt]
+        while folders:
+            folder = folders.pop()
+            try:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if entry.name in names:
+                            if entry.is_symlink():  # bwrap pins the target, leaving the link itself replaceable
+                                raise SrtCannotRun(f"cannot protect project settings link {entry.path} on Linux: "
+                                                   "the sandbox binds the link's target")
+                            fixed.append(Path(entry.path).relative_to(wt))
+                        elif (folder != wt or entry.name != ".git") and entry.is_dir(follow_symlinks=False):
+                            folders.append(Path(entry.path))
+            except OSError as e:
+                raise SrtCannotRun(f"cannot check for project settings in {e.filename}: {e.strerror}") from e
+
+    roots = full_paths([wt])
+    paths = full_paths(Path(root) / name for root in roots for name in fixed)
+    for path in paths:
+        why = pattern_path_problem(path, "the project settings path", "project settings")
+        if why:
+            raise SrtCannotRun(why)
+    return paths + [f"{root}/**/{name}" for root in roots for name in (*names, *NESTED_CLAUDE_SETTINGS)]
+
+
 def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str,
                  own: str = "") -> dict:
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
@@ -3121,7 +3289,7 @@ def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str
     mine = [wt, tmp, *([own] if own and own != tmp else [])]
     return {"network": network, "filesystem": {"allowWrite": full_paths(mine) + fs["allowWrite"],
                                                "denyRead": fs["denyRead"], "allowRead": fs["allowRead"],
-                                               "denyWrite": fs["denyWrite"]}}
+                                               "denyWrite": [*fs["denyWrite"], *project_write_deny(wt)]}}
 
 
 def run_tmp(desk: Desk, name: str) -> tuple:
@@ -3161,8 +3329,8 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
     desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), *dict.fromkeys([tmp, own])],
                                 "run_folders": [*(m.get("run_folders") or []), *dict.fromkeys([tmp, own])]})
-    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, own=own))
     try:
+        write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, own=own))
         srt = try_srt(desk, f, tmp, wt)
     except SrtCannotRun:
         for x in (tmp, own):
@@ -4118,9 +4286,12 @@ def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> di
     except GitFileChanged as e:  # changed since the last task ended: this one does not start, the next one can
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     try:  # every git call of this preparation: an error of git's holds the lane, it does not fail the task
+        removed = clear_repos_inside(desk, wt, "HEAD")  # what git would look into: never set aside, nor left
+        if removed:
+            desk.event("repository_inside_removed", task=tid, worktree=str(wt), paths=removed[:20])
         if merge_in_progress(desk, wt):  # a merge left half done cannot be set aside
             wgit(desk, wt, "merge", "--abort")
-        if not wgit(desk, wt, "status", "--porcelain"):
+        if not wgit(desk, wt, "status", "--porcelain", NO_SUBMODULES):
             return {}
         before = last_task_in(desk, wt, tid)
         if (before or {}).get("state") == "blocked":  # what a blocked run left is never kept under a ref (block)
@@ -4155,11 +4326,13 @@ def last_task_in(desk: Desk, wt: Path, tid: str) -> dict | None:
 
 def snapshot_tree(desk: Desk, wt: Path, head: str) -> str:
     """The tree of everything in the worktree, as git add -A would stage it on `head`, made with an index of its own:
-    the worktree's index is neither read nor written, so a locked one does not stop it."""
+    the worktree's index is neither read nor written, so a locked one does not stop it. The submodules `head` holds stay
+    as it has them, and a repository inside the worktree is left out."""
+    held = gitlinks(desk, wt, head)
     with tempfile.TemporaryDirectory(prefix="hansa-index-") as t:
         env = {"GIT_INDEX_FILE": os.path.join(t, "index")}
         wgit(desk, wt, "read-tree", head, env=env)
-        wgit(desk, wt, "add", "-A", env=env)
+        add_all(desk, wt, [*held, *repos_inside(desk, wt, held)], env=env)
         return wgit(desk, wt, "write-tree", env=env)
 
 
@@ -4181,6 +4354,7 @@ def kept_under(desk: Desk, wt: Path, ref: str) -> bool:
 
 def clean_worktree(desk: Desk, wt: Path, head: str) -> None:
     wgit(desk, wt, "reset", "--hard", head)
+    clear_repos_inside(desk, wt, head)  # git clean leaves a repository inside the worktree
     wgit(desk, wt, "clean", "-fd")
 
 
@@ -4190,7 +4364,7 @@ def keep_work(desk: Desk, wt: Path, tid: str) -> dict:
     kept_error with git's words; {} when the worktree holds nothing."""
     ref = f"refs/hansa/kept/{tid}"
     try:
-        if not wgit(desk, wt, "status", "--porcelain"):
+        if not wgit(desk, wt, "status", "--porcelain", NO_SUBMODULES):
             return {}
         head = wgit(desk, wt, "rev-parse", "HEAD")
         keep_aside(desk, wt, head, ref, f"hansa: {tid}'s work, which hansa could not commit")
@@ -4221,7 +4395,8 @@ def merge_in_progress(desk: Desk, wt: Path) -> bool:
 def conflicted_files(run) -> list:
     """The files a failed merge left unmerged; run: git in the checkout where it failed."""
     try:
-        return [f for f in run("diff", "--name-only", "--diff-filter=U", "-z").split("\0") if f]
+        # read from the index alone: a diff of the worktree would look into its submodules
+        return list(dict.fromkeys(e.split("\t", 1)[1] for e in run("ls-files", "--unmerged", "-z").split("\0") if e))
     except GitFileChanged:
         raise
     except RuntimeError:
@@ -4333,6 +4508,9 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict):
             name, k = f"{branch}-try{n}-{k}", k + 1
         wgit(desk, wt, "branch", "-m", branch, name)
     wgit(desk, wt, "checkout", "-q", "-B", branch, start)
+    removed = clear_repos_inside(desk, wt, "HEAD")  # git's checkout leaves a submodule start does not hold
+    if removed:
+        desk.event("repository_inside_removed", task=tid, worktree=str(wt), paths=removed[:20])
     if updating:
         desk.update(tid, update_conflicts=update_branch(
             desk, wt, tid, lane.get("base") or "main", base,
@@ -5427,7 +5605,9 @@ def _save_changes(desk: Desk, wt: Path, start: str, out: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="hansa-index-") as t:
         env = {"GIT_INDEX_FILE": os.path.join(t, "index")}
         wgit(desk, wt, "read-tree", start, env=env)
-        new = [f for f in wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", env=env).split("\0") if f]
+        inside = repos_inside(desk, wt, gitlinks(desk, wt, start))  # left out: git would look into them
+        new = [f for f in wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", env=env).split("\0") if f
+               and not any(f.rstrip("/") == p or f.startswith(p + "/") for p in inside)]
         for i in range(0, len(new), 200):  # intent-to-add only: git stores none of their content
             wgit(desk, wt, "add", "--intent-to-add", "--", *(f":(literal){f}" for f in new[i:i + 200]), env=env)
         check_git_file(desk, wt)
@@ -5435,7 +5615,7 @@ def _save_changes(desk: Desk, wt: Path, start: str, out: Path) -> None:
         with open(out, "wb") as f:
             os.fchmod(f.fileno(), 0o600)
             r = subprocess.run(["git", "-c", "core.quotePath=false", *worktree_git_settings(), "diff", "--binary",
-                                "--no-ext-diff", "--no-textconv", start], cwd=str(wt), env=e, stdout=f,
+                                "--no-ext-diff", "--no-textconv", NO_SUBMODULES, start], cwd=str(wt), env=e, stdout=f,
                                stderr=subprocess.PIPE, text=False)
         if r.returncode:
             raise RuntimeError(f"git diff failed: {r.stderr.decode('utf-8', 'replace').strip()[:300]}")
@@ -5537,8 +5717,7 @@ def _quiet_left_running_events(desk: Desk, tid: str) -> None:
         fh = open(desk.events_path, "r+b")
     except OSError:
         return
-    with fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    with fh, event_log_lock(desk.events_path, fh):
         found, at = [], 0
         for line in iter(fh.readline, b""):
             if b'"left_running_stopped"' in line and tid.encode() in line:
@@ -5590,6 +5769,7 @@ def _clear_run_git(desk: Desk, wt: Path, tid: str, origin: str, keep: str, made=
             own |= set(wgit(desk, wt, "rev-list", entry[0].replace("refs/stash", "stash"), "--not", origin).split())
             wgit(desk, wt, "stash", "drop", "-q", entry[0].replace("refs/stash", "stash"))
     wgit(desk, wt, "checkout", "-q", "-f", "--detach", origin)
+    clear_repos_inside(desk, wt, origin)
     wgit(desk, wt, "clean", "-fdq")
     for ref in tries:
         wgit(desk, wt, "update-ref", "-d", ref)
@@ -5933,7 +6113,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         # A run may hold only the merge hansa made (retry --update).
         merged = check_no_operation(
             desk, wt, meta.get("base", "") if meta.get("update") and meta.get("update_conflicts") else "")
-        if wgit(desk, wt, "status", "--porcelain") and set_up and not setup:  # a setup's leftovers are nobody's work
+        if set_up and not setup:  # before git scans the worktree; against the run's start: a commit of its own
+            # cannot bring a submodule in either
+            refuse_repos_inside(desk, wt, ((meta.get("run_start") or {}).get("commit") or head, merged))
+        if wgit(desk, wt, "status", "--porcelain", NO_SUBMODULES) and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 ref = f"refs/hansa/scratch/{tid}"
                 try:
@@ -7291,14 +7474,13 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
         token, args, tmps = f"hansa-try-{lane_name}-{uuid.uuid4().hex[:8]}", [], []
         steps = {"setup": lane.get("setup", ""),
                  **({"merge_check": merge_command(lane)} if t.get("merge") else {"check": lane.get("check", "")})}
-        for step, command in steps.items():
-            if command:
-                tmp, own = run_tmp(desk, step)
-                tmps += dict.fromkeys([tmp, own])
-                write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp, own=own))
-                args += [step, in_sandbox(desk, lane, command), str(d / f"{step}-sandbox.json"), tmp, own]
-        env = {**base_env(), "TERM": "dumb"}
         try:  # srt first, with the first step's settings (as in_srt): when it cannot run, nothing runs
+            for step, command in steps.items():
+                if command:
+                    tmp, own = run_tmp(desk, step)
+                    tmps += dict.fromkeys([tmp, own])
+                    write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp, own=own))
+                    args += [step, in_sandbox(desk, lane, command), str(d / f"{step}-sandbox.json"), tmp, own]
             srt = try_srt(desk, args[2], args[3], wt) if args else srt_bin()
         except SrtCannotRun as e:
             for x in tmps:
@@ -7307,6 +7489,7 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
             end_try(desk, lane_name, {"ok": False, "could_not_run": True, "steps": {}, "onto": tip,
                                       "note": desk.redact(f"could not run: {e}")[:600]})
             return None
+        env = {**base_env(), "TERM": "dumb"}
         memory = oom_begin(t)
         t = {**t, "phase": "running", "launch": token, "onto": tip, "worktree": str(wt), "started": now(), **memory,
              "tmp": tmps, **steps}
@@ -7362,6 +7545,7 @@ def finish_try(desk: Desk, lane_name: str) -> dict:
     wt, clean = Path(t.get("worktree") or desk.worktrees_dir / lane_name), False
     try:
         wgit(desk, wt, "reset", "-q", "--hard", t.get("onto") or "HEAD")
+        clear_repos_inside(desk, wt, "HEAD")
         wgit(desk, wt, "clean", "-fdq")
         clean = True
     except GitFileChanged as e:

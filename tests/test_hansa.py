@@ -1217,7 +1217,7 @@ class FailedWriteTest(unittest.TestCase):
         task, raw = self.desk.tasks_dir / "t0001", self.desk.raw_dir("t0001")
         task.mkdir()
         brief = self.desk.lanes_dir / "a" / "brief.md"
-        common = {"desk": self.desk, "tid": "t0001", "lane": "a", "a": types.SimpleNamespace(name="a", host="localhost"),
+        common = {"desk": self.desk, "tid": "t0001", "lane": "a", "a": types.SimpleNamespace(name="a", host="localhost"), "host": "localhost",
                   "port": 8765, "d": task, "raw": raw, "argv": ["worker", "--prompt", "text"],
                   "brief": brief, "aside": brief.with_name("brief-before.md"), "text": "new text\n", "old": "old text\n",
                   "note": "follow-up note", "report": "a report", "new": "new card\n", "dst": self.root / "CLAUDE.md",
@@ -3116,9 +3116,6 @@ class UpTest(unittest.TestCase):
         self.assertNotIn("--port", up.serve_command(self.desk, {}))
         occupied.clear()  # even the original default is free again; the saved port wins
         self.assertEqual(self.fake_serve(bind)[1], [8767])
-        occupied.add(8767)
-        self.assertEqual(self.fake_serve(bind)[1], [8767, 8768])
-        self.assertEqual(cli.web_port(self.desk), 8768)
 
     def test_up_replays_legacy_default_port_automatically(self):
         from hansa import up
@@ -3152,12 +3149,9 @@ class UpTest(unittest.TestCase):
         bind.assert_called_once()
         self.assertEqual(bind.call_args.args[1:], ("127.0.0.1", 8765))
 
-    def test_serve_says_when_it_moves_from_the_default_or_saved_port(self):
-        for first in (8765, 9123):
+    def test_serve_says_when_it_moves_from_the_default_before_any_port_was_recorded(self):
+        for first in (8765,):
             with self.subTest(first=first):
-                if first != 8765:
-                    (self.desk.state_dir / "web-port").write_text(str(first))
-
                 def bind(desk, host, port):
                     if port == first:
                         raise OSError(errno.EADDRINUSE, "taken")
@@ -3189,9 +3183,92 @@ class UpTest(unittest.TestCase):
         refused.assert_called_once()
         (self.desk.state_dir / "web-port").write_text("65535")
         bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
-        with self.assertRaisesRegex(SystemExit, "port 65535: taken"):
-            self.fake_serve(bind)
+        said, _ = self.fake_serve(bind)
+        self.assertIn("port 65535, where it was served last time, is held by something else", said)
         bind.assert_called_once()
+
+    def test_serve_with_its_recorded_port_held_runs_tasks_without_the_page_and_says_so(self):
+        from hansa import alert, up
+        write_json(self.desk.settings_path, {"alert": {"command": "cat >/dev/null"}})
+        (self.desk.state_dir / "web-port").write_text("9123")
+        (self.desk.state_dir / "web-host").write_text("127.0.0.1")
+
+        def bind(desk, host, port):
+            raise OSError(errno.EADDRINUSE, "taken")
+
+        said, tried = self.fake_serve(bind)
+        self.assertEqual(tried, [9123])  # not the next port: whatever holds 9123 would get the page's key
+        self.assertIn("tasks run, but the web page did not start: port 9123", said)
+        self.assertIn("held by something else", said)
+        self.assertIn("hansa serve --port N", said)
+        self.assertEqual(len([x for x in said.splitlines() if "9123" in x]), 1)
+        self.assertEqual(cli.web_port(self.desk), 9123)  # the record stays
+        self.assertTrue((self.desk.state_dir / "serve-start.json").exists())  # hansa up starts it so again
+        # hansa status: the same sentence while this server runs
+        me = {"state": "up", "pid": os.getpid(), "answers": True}
+        page = views.page_text(views.page_of(self.desk, me))
+        self.assertIn("not served", page)
+        self.assertIn("port 9123, where it was served last time, is held by something else", page)
+        self.assertIn("hansa serve --port N", page)
+        self.assertNotIn("held by", views.page_text(views.page_of(self.desk, self.gone)))
+        # the principal's alert, once for the start
+        held = [x for x in alert.queued(self.desk) if x["kind"] == "page_held"]
+        self.assertEqual(len(held), 1)
+        self.assertIn("port 9123", held[0]["text"])
+        self.assertEqual(held[0]["level"], "urgent")
+        # hansa web prints no address with the key, which would go to whatever holds 9123
+        with unittest.mock.patch.object(cli, "server_state", return_value=me), \
+                unittest.mock.patch.object(cli.os, "read", return_value=b""), \
+                self.assertRaises(SystemExit) as e:
+            printed = self.say("web")
+        self.assertIn("nothing was printed", str(e.exception.code))
+        self.assertNotIn(self.desk.web_token(), str(e.exception.code))
+        # hansa up says it too
+        write_json(self.desk.state_dir / "web-held", {"port": 9123, "pid": 123})
+        self.record()
+        child = types.SimpleNamespace(poll=lambda: None)
+        with unittest.mock.patch.object(up, "program", return_value=""), \
+                unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running, self.running]), \
+                unittest.mock.patch.object(up.subprocess, "Popen", return_value=child), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            main(["--desk", str(self.desk.root), "up"])
+        self.assertIn("server started (pid 123) and runs tasks, but the web page did not start: port 9123",
+                      out.getvalue())
+        # --port N on purpose: as before, and the page's record moves with it
+        said, tried = self.fake_serve(lambda desk, host, port: types.SimpleNamespace(server_address=(host, port)),
+                                      "--port", "9200")
+        self.assertEqual(tried, [9200])
+        self.assertIn("web page on 127.0.0.1:9200", said)
+        self.assertEqual(cli.web_port(self.desk), 9200)
+        self.assertFalse((self.desk.state_dir / "web-held").exists())
+
+    def test_serve_refuses_a_host_beyond_this_machine_unless_the_principal_says_outside(self):
+        from hansa import web
+        for host in ("0.0.0.0", "::", "192.168.1.5", "example.com", ""):
+            with self.subTest(host=host):
+                bind = unittest.mock.Mock()
+                with self.assertRaises(SystemExit) as e:
+                    self.fake_serve(bind, "--host", host)
+                said = str(e.exception.code)
+                self.assertEqual(len(said.splitlines()), 1, said)
+                self.assertIn("not this machine's own address", said)
+                self.assertIn(f"--host outside:{host}", said)
+                bind.assert_not_called()
+                self.assertFalse((self.desk.state_dir / "serve-start.json").exists())
+        for host in ("127.0.0.1", "127.0.0.2", "localhost", "::1"):
+            with self.subTest(host=host):
+                said, tried = self.fake_serve(
+                    lambda desk, h, port: types.SimpleNamespace(server_address=(h, port)), "--host", host)
+                self.assertIn(f"web page on {host}:", said)
+                self.assertTrue(web.loopback(host))
+        bound = []
+        said, tried = self.fake_serve(
+            lambda desk, h, port: bound.append(h) or types.SimpleNamespace(server_address=(h, port)),
+            "--host", "outside:0.0.0.0")
+        self.assertEqual(bound, ["0.0.0.0"])
+        self.assertEqual((self.desk.state_dir / "web-host").read_text(), "0.0.0.0")
+        rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+        self.assertEqual(rec["options"]["host"], "outside:0.0.0.0")  # hansa up starts it so again
 
     def test_a_serve_that_cannot_bind_keeps_the_saved_start_and_says_why_in_one_line(self):
         self.record()  # the last start that served the page
@@ -3205,7 +3282,7 @@ class UpTest(unittest.TestCase):
                  "0-65535. Nothing was started or recorded"),
                 (OSError(errno.EINVAL, "Invalid argument."), ("--port", "80"), "127.0.0.1", 80,
                  "Invalid argument. Nothing was started or recorded"),
-                (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "lcalhost"), "lcalhost",
+                (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "outside:lcalhost"), "lcalhost",
                  8765, "Name or service not known. Nothing was started or recorded")):
             with self.subTest(error=error):
                 bind = unittest.mock.Mock(side_effect=error)
@@ -6217,6 +6294,17 @@ class DeskTest(unittest.TestCase):
             return [c for c in calls if tried(c)]
         calls = [c for c in calls if not tried(c)]
         return [c for c in calls if tries or c["argv"][-2:] != ["--", "true"]]
+
+    def assert_lane_project_denies(self, call):
+        wt = Path(call["cwd"])
+        fs = call["settings"]["filesystem"]
+        with self.subTest(settings=call["argv"][1]):
+            for name in (".claude", ".codex", ".agents", ".mcp.json"):
+                self.assertIn(str(wt / name), fs["denyWrite"])
+                self.assertIn(f"{wt}/**/{name}", fs["denyWrite"])
+                self.assertTrue(self.read_open(fs, wt / name), name)
+            self.assertTrue(may_write(call["settings"], wt / "ok.txt"))
+            self.assertTrue(may_write(call["settings"], Path(call["tmpdir"]) / "ok.txt"))
 
     def commands_tmp(self, call, allow) -> str:
         """The TMPDIR a lane's command saw after the prelude, given a stand-in srt call: srt's (the run's folder),
@@ -9533,7 +9621,7 @@ def save():'''))
     def test_status_and_explain_say_where_the_web_page_is(self):
         st = views.status(self.desk)
         self.assertEqual(st["page"], {"host": "127.0.0.1", "port": 8765, "up": False, "stuck": False, "answers": True,
-                                      "served": False})
+                                      "served": False, "held": None})
         says = ("web page: not served now, since hansa serve is not running; it serves it at http://127.0.0.1:8765/ "
                 "(the default)")
         self.assertIn(says, views.status_text(st))
@@ -12250,11 +12338,32 @@ def save():'''))
         return self.git_out("rev-parse", "HEAD")
 
     def test_word_scan_gitlink_row_1_task_merges_but_forbidden_entry_name_is_refused(self):
+        from hansa import run
         self.forbid(r"re:\bAI\b")
-        tid = self.done_with(env={"FAKE_GITLINK": "vendor/lib"})
+        # a task cannot add a submodule (a repository inside the worktree): it fails and nothing is committed
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_GITLINK": "vendor/lib"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add a dependency"))
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at vendor/lib;", m["error"])
+        self.assertEqual(m["head"], "")
+        # one the base holds already (a commit made there directly): a task that leaves it as it is merges
+        (self.repo / "vendor/lib").mkdir(parents=True)
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{self.git_out('rev-parse', 'HEAD')},vendor/lib",
+           cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add dependency", cwd=self.repo)
+        tid = self.done_with(env={})
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
         self.assertTrue(self.git_out("ls-tree", "main", "vendor/lib").startswith("160000 commit "))
-        tid = self.done_with(env={"FAKE_GITLINK": "vendor/AI"})
+        # the merge's scan still sees a submodule entry's name, in a commit hansa recorded for a task (one recorded
+        # before tasks were refused a submodule, say)
+        tid = self.done_with(env={})
+        wt = Path(self.desk.meta(tid)["worktree"])
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{self.git_out('rev-parse', 'HEAD')},vendor/AI",
+           cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add AI", cwd=wt)
+        self.desk.update(tid, head=self.git_out("rev-parse", "HEAD", cwd=wt))
         self.assertIn("file name: vendor/AI", self.refused("merge", tid))
 
     def test_word_scan_gitlink_row_2_release_is_asked_even_without_the_submodule_object(self):
@@ -17382,6 +17491,8 @@ def save():'''))
         self.assertIn("merge check: echo the heavy build\n  exit 0", said)
         self.assertNotIn("light check", said)
         self.assertEqual([self.ran(c) for c in self.srt_calls()], ["echo set up", "echo the heavy build"])
+        for call in self.srt_calls():
+            self.assert_lane_project_denies(call)
         [tried] = self.events("lane_tried")
         self.assertEqual((tried["ok"], tried["merge_check"]["exit"], "check" in tried), (True, 0, False))
         self.assertTrue(self.events("lane_try_queued")[-1]["merge_check"])
@@ -19208,8 +19319,14 @@ def save():'''))
         self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
                                           "deniedDomains": [], "allowLocalBinding": True})
         worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
-        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"])  # the same lists as the worker's
-        self.assertEqual(got["filesystem"]["denyWrite"], worker["denyWrite"])
+        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"])
+        wt = m["worktree"]
+        self.assertEqual(got["filesystem"]["denyWrite"], [
+            *worker["denyWrite"], f"{wt}/.claude", f"{wt}/.codex", f"{wt}/.agents", f"{wt}/.mcp.json",
+            f"{wt}/**/.claude", f"{wt}/**/.codex", f"{wt}/**/.agents", f"{wt}/**/.mcp.json",
+            f"{wt}/**/.claude/settings.json", f"{wt}/**/.claude/settings.local.json",
+            f"{wt}/**/.claude/hooks", f"{wt}/**/.claude/skills",
+        ])
         self.assertIn(str(self.desk.secrets_dir), got["filesystem"]["denyRead"])
         self.assertIn(str(Path.home() / ".ssh"), got["filesystem"]["denyRead"])
         self.assertIn(str(Path(m["worktree"]) / ".git"), got["filesystem"]["denyWrite"])
@@ -28369,7 +28486,7 @@ def save():'''))
                 finally:
                     os.umask(old)
 
-    def test_init_warns_and_preserves_existing_folder_modes_under_a_group_umask(self):
+    def test_init_makes_an_existing_desk_folder_private_and_keeps_its_parent_under_a_group_umask(self):
         old = os.umask(0o002)
         try:
             for mode in (0o775, 0o777, 0o755):
@@ -28386,16 +28503,133 @@ def save():'''))
                         main(["init", str(root), "--repo", str(self.repo)])
                     self.assertIn("desk ready", said.getvalue())
                     self.assertTrue(desk.settings_path.is_file())
-                    for folder in folders:
-                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), mode, folder)
-                    if mode & 0o022:
-                        self.assertIn("warning:", err.getvalue())
-                        self.assertIn(f"others may write in {desk.root}", err.getvalue())
-                        self.assertIn(f"chmod go-w {shlex.quote(str(desk.root))}", err.getvalue())
-                    else:
-                        self.assertNotIn("chmod go-w", err.getvalue())
+                    self.assertEqual(stat.S_IMODE(root.parent.stat().st_mode), mode)  # not hansa's to change
+                    self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                    for f in ("settings.json", "events.jsonl", "CLAUDE.md"):
+                        self.assertEqual(stat.S_IMODE((root / f).stat().st_mode), 0o600, f)
+                    self.assertNotIn("others may", err.getvalue())
         finally:
             os.umask(old)
+
+    def test_serve_start_makes_the_desk_and_its_own_files_private_but_not_the_worktrees(self):
+        desk = self.desk
+        (desk.state_dir / "web-port").write_text("1\n")
+        wt_file = desk.worktrees_dir / "a" / "kept.txt"
+        wt_file.parent.mkdir(parents=True)
+        wt_file.write_text("x")
+        for p, mode in ((desk.root, 0o755), (desk.settings_path, 0o644), (desk.events_path, 0o644),
+                        (desk.state_dir, 0o755), (desk.state_dir / "web-port", 0o644), (wt_file, 0o644)):
+            p.chmod(mode)
+        with unittest.mock.patch.object(cli, "hold_server_lock", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+            main(["--desk", str(desk.root), "serve"])  # stops at the server lock: after the desk was made private
+        self.assertNotIn("other accounts", err.getvalue())
+        for p, mode in ((desk.root, 0o700), (desk.settings_path, 0o600), (desk.events_path, 0o600),
+                        (desk.state_dir, 0o700), (desk.state_dir / "web-port", 0o600), (wt_file, 0o644)):
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), mode, p)
+
+    def test_a_desk_folder_of_another_account_is_said_once_and_by_status(self):
+        from hansa.desk import desk_privacy
+        with unittest.mock.patch.object(account, "uid", return_value=os.getuid() + 4242):
+            said = desk_privacy(self.desk, fix=True)
+            self.assertIn(f"{self.desk.root} belongs to another account", said)
+            line = views.status_text(views.status(self.desk))
+        self.assertIn("belongs to another account", line)
+        self.assertEqual(desk_privacy(self.desk, fix=True), "")
+
+    def test_a_volume_that_keeps_no_modes_is_said_and_the_desk_goes_on(self):
+        from hansa.desk import desk_privacy
+        self.desk.root.chmod(0o755)
+        with unittest.mock.patch("os.chmod"):  # as on a volume that keeps no modes
+            said = desk_privacy(self.desk, fix=True)
+        self.assertIn("does not keep file modes", said)
+        self.assertIn("hansa goes on", said)
+        self.assertIn("open to other accounts (mode 0755)", views.status_text(views.status(self.desk)))
+        self.assertEqual(desk_privacy(self.desk, fix=True), "")
+        self.assertNotIn("other accounts", views.status_text(views.status(self.desk)))
+
+    def test_event_writes_lock_a_file_in_the_state_folder_and_a_held_log_does_not_stall_them(self):
+        import hansa.desk as hdesk
+        self.desk.event("first")
+        lock = self.desk.state_dir / "events.lock"
+        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+        with unittest.mock.patch.object(hdesk, "_old_lock_held_long", set()), open(self.desk.events_path, "rb") as other:
+            fcntl.flock(other, fcntl.LOCK_SH)  # another account that opened the log read-only, and holds it
+            done = threading.Event()
+            t = threading.Thread(target=lambda: (self.desk.event("second"), self.desk.event("third"), done.set()),
+                                 daemon=True)
+            t.start()
+            self.assertTrue(done.wait(20), "event writes waited on a lock held on events.jsonl")
+        kinds = [json.loads(x)["event"] for x in self.desk.events_path.read_text().splitlines()]
+        self.assertEqual(kinds[-3:], ["first", "second", "third"])
+
+    def test_an_older_hansa_writing_under_the_old_lock_is_waited_for(self):
+        import hansa.desk as hdesk
+        self.desk.event("first")
+        released = []
+        with unittest.mock.patch.object(hdesk, "_old_lock_held_long", set()):
+            old = open(self.desk.events_path, "a+b")
+            fcntl.flock(old, fcntl.LOCK_EX)  # an older hansa process, mid-line
+
+            def release():
+                time.sleep(0.2)
+                old.write(b'{"event": "older"}\n')
+                old.flush()
+                released.append(time.monotonic())
+                fcntl.flock(old, fcntl.LOCK_UN)
+                old.close()
+            t = threading.Thread(target=release, daemon=True)
+            t.start()
+            self.desk.event("newer")
+            wrote = time.monotonic()
+            t.join(10)
+        self.assertTrue(released and wrote >= released[0])
+        kinds = [json.loads(x)["event"] for x in self.desk.events_path.read_text().splitlines()]
+        self.assertEqual(kinds[-2:], ["older", "newer"])
+
+    def test_a_desk_found_by_walking_up_that_another_account_owns_is_not_taken(self):
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(self.desk.tasks_dir)
+        root, owner = self.desk.root, account.owner
+        theirs = lambda p: os.getuid() + 4242 if Path(os.path.realpath(p)) == root else owner(p)  # noqa: E731
+        self.assertEqual(Desk.find().root, root)
+        with unittest.mock.patch.object(account, "owner", theirs):
+            with self.assertRaises(SystemExit) as said:
+                Desk.find()
+            self.assertIn(f"desk at {root} belongs to another account", str(said.exception))
+            self.assertIn("--desk", str(said.exception))
+            self.assertEqual(Desk.find(str(root)).root, root)  # named with --desk: as before
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertIsNone(Desk.find(optional=True))
+            with unittest.mock.patch.object(account, "uid", return_value=0):  # root, for the desk's account
+                self.assertEqual(Desk.find().root, root)
+
+    def test_the_page_key_file_is_made_0600_or_refused_when_another_account_owns_it(self):
+        f = self.desk.state_dir / "web-token"
+        token = self.desk.web_token()
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        f.chmod(0o644)
+        self.assertEqual(self.desk.web_token(), token)
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        with unittest.mock.patch.object(account, "uid", return_value=os.getuid() + 4242), \
+                self.assertRaises(SystemExit) as said:
+            self.desk.web_token()
+        self.assertIn("key file", str(said.exception))
+        self.assertIn("does not serve the page", str(said.exception))
+
+    def test_the_accounts_list_of_desks_and_its_lock_are_0600(self):
+        from hansa.desk import desks_file
+        listed = desks_file()
+        listed.parent.mkdir(parents=True, exist_ok=True)
+        listed.write_text("[]\n")
+        listed.chmod(0o644)
+        listed.with_suffix(".lock").write_text("")
+        listed.with_suffix(".lock").chmod(0o644)
+        self.assertEqual(up.list_desk(self.desk), "")
+        for p in (listed, listed.with_suffix(".lock")):
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600, p)
+        self.assertEqual([x["desk"] for x in json.loads(listed.read_text())], [str(self.desk.root)])
 
     def test_mod_makes_every_missing_parent_private_even_when_a_start_was_recorded_first(self):
         old = os.umask(0o002)
@@ -32540,6 +32774,7 @@ def save():'''))
             self.assertNotIn("LANE_VAR", c["env"])
             self.assertNotEqual(c["env"].get("TMPDIR"), "/tmp")
             if c["argv"][-2:] != ["--", "true"]:
+                self.assert_lane_project_denies(c)
                 self.assertTrue(c["argv"][-1].startswith(f"exec /usr/bin/env {shlex.quote('LANE_VAR=' + value)} "
                                                          "FAKE_HELLO=c.txt /bin/sh -c "), c["argv"])
         self.assertTrue(envs)
@@ -34468,6 +34703,147 @@ def save():'''))
         self.assertEqual(m["state"], "done", m)
         self.assertFalse(m.get("held"))
 
+    def test_lane_srt_settings_keep_project_files_readable_and_other_writes_open(self):
+        from hansa import run
+        cache = self.tmp / "build-cache"
+        (cache / ".codex").mkdir(parents=True)
+        lane = {**self.desk.settings()["lanes"]["a"], "write": [str(cache)]}
+        p = self.desk.settings()["providers"]["claude"]
+        nested = self.repo / "ignored" / ".hidden" / "deep"
+        nested.mkdir(parents=True)
+        (self.repo / ".gitignore").write_text("/ignored/\n")
+        (nested / ".agents").mkdir()
+        (nested / ".mcp.json").write_text("{}")
+        (nested / ".codex").mkdir()
+        (nested / ".claude").mkdir()
+        settings = nested / ".claude" / "settings.local.json"
+        settings.write_text("{}")
+        link = self.tmp / "checkout"
+        link.symlink_to(self.repo)
+        tmp = self.tmp / "command"
+        tmp.mkdir()
+        (self.repo / "ordinary").symlink_to(cache)
+        for linux in (False, True):
+            with self.subTest(linux=linux), unittest.mock.patch.object(account, "LINUX", linux):
+                box = run.srt_settings(self.desk, lane, "claude", p, link, str(tmp))
+                fs = box["filesystem"]
+                for wt in (link, self.repo.resolve()):
+                    for name in (".claude", ".codex", ".agents", ".mcp.json"):
+                        self.assertIn(str(wt / name), fs["denyWrite"])  # even if absent
+                        self.assertIn(f"{wt}/**/{name}", fs["denyWrite"])
+                        if linux:
+                            self.assertIn(str(wt / nested.relative_to(self.repo) / name), fs["denyWrite"])
+                self.assertTrue(self.read_open(fs, settings))
+                for folder in (nested, tmp, cache):
+                    self.assertTrue(may_write(box, folder / "ok.txt"), folder)
+                self.assertFalse(any(entry.startswith(f"{cache}/") for entry in fs["denyWrite"]))
+                self.assertFalse(any(os.path.lexists(link / name) for name in (".claude", ".agents", ".codex")))
+
+    def test_linux_project_denies_refuse_a_replaceable_settings_link(self):
+        from hansa import run
+        (self.repo / "sub").mkdir()
+        for path, target in ((self.repo / ".claude", "sub"), (self.repo / "sub" / ".mcp.json", "missing")):
+            with self.subTest(path=path), unittest.mock.patch.object(account, "LINUX", True):
+                path.symlink_to(target)
+                with self.assertRaises(run.SrtCannotRun) as held:
+                    run.project_write_deny(self.repo)
+                self.assertIn(str(path), str(held.exception))
+                self.assertEqual(os.readlink(path), target)
+                path.unlink()
+
+    def test_linux_project_denies_require_a_readable_directory_listing(self):
+        from hansa import run
+        folder = self.repo / "unreadable"
+        folder.mkdir(mode=0o000)
+        self.addCleanup(folder.chmod, 0o700)
+        if os.access(folder, os.R_OK):
+            self.skipTest("this account can list mode-000 directories")
+        with unittest.mock.patch.object(account, "LINUX", True), self.assertRaises(run.SrtCannotRun) as held:
+            run.project_write_deny(self.repo)
+        self.assertIn(str(folder), str(held.exception))
+
+    def test_linux_lane_try_stops_if_a_project_deny_would_be_read_as_a_glob(self):
+        from hansa import run
+        config = self.repo / "[app]" / ".agents" / "settings"
+        config.parent.mkdir(parents=True)
+        config.write_text("original")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "settings", cwd=self.repo)
+        lane = {**self.desk.settings()["lanes"]["a"], "setup": "true"}
+        run.write_try(self.desk, "a", {"phase": "queued"})
+        with unittest.mock.patch.object(account, "LINUX", True):
+            run.start_try(self.desk, "a", lane)
+        result = run.read_try(self.desk, "a")
+        self.assertTrue(result["could_not_run"], result)
+        self.assertIn("[app]/.agents", result["note"])
+        self.assertEqual(self.srt_calls(tries=True), [])
+        self.assertEqual(list((self.desk.state_dir / run.RUN_TMP_DIR).glob("hansa-setup-*")), [])
+
+    def test_real_lane_srt_refuses_project_changes_and_allows_ordinary_writes(self):
+        from hansa import run
+        path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep)
+                               if d and (Path(d) / "srt").resolve() != (self.tmp / "bin" / "srt").resolve())
+        srt = shutil.which("srt", path=path)
+        if not srt:
+            skip_in_sandbox(self, "srt is not installed", *NEED_SRT)
+        cache = self.tmp / "build-cache"
+        cache.mkdir()
+        lane = {**self.desk.settings()["lanes"]["a"], "write": [str(cache)]}
+        p = self.desk.settings()["providers"]["claude"]
+        wt, _ = run.prepare(self.desk, "a", lane, self.desk.meta(self.desk.new_task("Check the sandbox")))
+        tmp, own = map(Path, run.run_tmp(self.desk, "check"))
+        for directory in {tmp, own}:
+            self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        f = tmp / "sandbox.json"
+        env = {**os.environ, "PATH": path, "TMPDIR": str(tmp), "CLAUDE_CODE_TMPDIR": str(tmp)}
+
+        def invoke(*args):
+            return subprocess.run([srt, "--settings", str(f), "--", *args], cwd=wt, env=env,
+                                  capture_output=True, text=True, timeout=120)
+
+        write_json(f, {"filesystem": {"allowWrite": run.full_paths([tmp]), "denyRead": [], "denyWrite": []},
+                       "network": {"allowedDomains": [], "deniedDomains": []}})
+        probe = invoke("/usr/bin/true")
+        if probe.returncode:
+            skip_in_sandbox(self, f"no sandbox can be applied here: {(probe.stderr or probe.stdout)[:200]}", *NEED_SRT)
+        nested = wt / "src" / "sub" / ".agents"
+        nested.mkdir(parents=True)
+        (nested / "entry").write_text("original")
+        conf = wt / ".claude"
+        conf.mkdir(exist_ok=True)
+        (conf / "settings.local.json").write_text("{}")
+        (wt / ".mcp.json").write_text("{}")
+        write_json(f, run.srt_settings(self.desk, lane, "claude", p, wt, str(tmp), own=str(own)))
+        # Each refused operation has a writable parent in the fixture. A redirection on ':' runs in a
+        # subshell since the shell may exit on a special builtin's redirection error.
+        command = """
+            set -e
+            test "$(cat .claude/settings.local.json)" = '{}'
+            test "$(cat src/sub/.agents/entry)" = original
+            : > ok.txt
+            : > "$1/ok.txt"
+            : > "$2/ok.txt"
+            if (: > .claude/settings.local.json); then exit 11; fi
+            if mkdir -p .claude/skills/x; then exit 12; fi
+            if mkdir .codex; then exit 13; fi
+            echo replacement > replacement
+            if mv -f replacement src/sub/.agents/entry; then exit 14; fi
+            if rm .mcp.json; then exit 15; fi
+        """
+        if not account.LINUX:  # Seatbelt checks the name even in a directory made by this command.
+            command += """
+                mkdir -p new/sub
+                if mkdir -p new/sub/.claude/skills/x; then exit 16; fi
+            """
+        result = invoke("/bin/sh", "-c", command, "lane-check", str(own), str(cache))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for directory in (wt, cache, own):
+            self.assertTrue((directory / "ok.txt").is_file(), directory)
+        self.assertEqual((conf / "settings.local.json").read_text(), "{}")
+        self.assertFalse((conf / "skills" / "x").exists())
+        self.assertEqual((nested / "entry").read_text(), "original")
+        self.assertEqual((wt / ".mcp.json").read_text(), "{}")
+
     def test_the_real_sandbox_starts_with_the_settings_hansa_gives_and_keeps_what_it_should(self):
         # srt itself (installed on GitHub's macOS machines in a run started by hand, with HANSA_TESTS_NEED_SRT=1);
         # elsewhere it skips
@@ -34665,6 +35041,262 @@ def save():'''))
         (own / "config.worktree").write_text("")
         sh("git", "checkout", "-q", f"task/{m['id']}", cwd=wt)
         self.assertEqual(run.prepare(self.desk, "a", lane, self.desk.meta(tid))[0], wt)  # put right: it works again
+
+    def plant_repository(self, wt, form, kind, marker, at="nest"):
+        """A repository inside the worktree at `at` whose own config names a command that makes `marker` when git looks
+        into it: kind "filter" (a content filter its .gitattributes names) or "fsmonitor". form: "folder" (a .git
+        folder), "file" (a one-line .git file naming a git folder kept under another name in the worktree), "link" (a
+        .git link to such a folder) or "index" (a .git folder the worktree's index names, as a worker's git add
+        would). Its file is changed since its commit, so git would look into it again."""
+        nest = wt / at
+        nest.mkdir(parents=True, exist_ok=True)
+        if form in ("folder", "index"):
+            sh("git", "init", "-q", cwd=nest)
+        else:
+            kept = wt / f"{at.replace('/', '-')}-kept"
+            sh("git", "init", "-q", f"--separate-git-dir={kept}", cwd=nest)
+            if form == "link":
+                (nest / ".git").unlink()
+                (nest / ".git").symlink_to(kept)
+        if kind == "filter":
+            (nest / ".gitattributes").write_text("* filter=mark\n")
+            sh("git", "config", "filter.mark.clean", f"touch {marker}; cat", cwd=nest)
+        else:
+            sh("git", "config", "core.fsmonitor", f"touch {marker}", cwd=nest)
+        (nest / "f.txt").write_text("one\n")
+        sh("git", "add", "-A", cwd=nest)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "n", cwd=nest)
+        (nest / "f.txt").write_text("two\n")
+        marker.unlink(missing_ok=True)  # the commit above ran it: from now on only hansa's git could
+        if form == "index":
+            sh("git", "update-index", "--add", "--cacheinfo",
+               f"160000,{sh_out('git', 'rev-parse', 'HEAD', cwd=nest)},{at}", cwd=wt)
+
+    def started_run(self, title="Add a file"):
+        """A task whose run has started in lane a's worktree, as finish finds it when its worker ends: (id, worktree,
+        the commit it started from)."""
+        from hansa import run
+        tid = self.desk.new_task(title)
+        wt = run.prepare(self.desk, "a", self.desk.settings()["lanes"]["a"], self.desk.meta(tid))[0]
+        base = self.git_out("rev-parse", "main")
+        self.desk.update(tid, state="running", lane="a", provider="claude", worktree=str(wt), session_id="sid-x",
+                         model_asked="sonnet", branch=f"task/{tid}", base=base)
+        return tid, wt, base
+
+    def test_a_repository_inside_the_worktree_is_refused_at_a_runs_end_and_removed_before_the_next(self):
+        # hansa's git runs outside the sandbox: git looks into a repository inside the worktree under that one's
+        # config, whose filter or file monitor is a command. None runs; nothing is committed; the next run removes it
+        from hansa import run
+        for form in ("folder", "file", "link", "index"):
+            for kind in ("filter", "fsmonitor"):
+                with self.subTest(form=form, kind=kind):
+                    marker = self.tmp / f"ran-{form}-{kind}"
+                    tid, wt, base = self.started_run()
+                    self.assertFalse(os.path.lexists(wt / "nest" / ".git"))  # the last one's was removed
+                    self.plant_repository(wt, form, kind, marker, at="deep/nest")
+                    (wt / "work.txt").write_text("work\n")
+                    m = run.finish(self.desk, tid, 0)
+                    self.assertFalse(marker.exists(), "hansa's git ran a command the worktree's repository names")
+                    self.assertEqual(m["state"], "failed", m)
+                    self.assertIn("repository inside", m["error"])
+                    self.assertIn("deep/nest", m["error"])
+                    self.assertIn("remove", m["error"])
+                    self.assertEqual(m["head"], "")
+                    self.assertEqual(self.git_out("rev-parse", f"task/{tid}"), base)  # nothing committed
+                    tid, wt, base = self.started_run("The next one")
+                    self.assertFalse(os.path.lexists(wt / "deep" / "nest" / ".git"))
+                    self.assertFalse(marker.exists())
+                    self.assertNotIn("160000", sh_out("git", "ls-files", "--stage", cwd=wt))
+                    self.assertTrue(any(e["event"] == "repository_inside_removed" and e["paths"] == ["deep/nest"]
+                                        for e in map(json.loads, self.desk.events_path.read_text().splitlines())))
+        # up to 5 are named, and how many more
+        tid, wt, base = self.started_run()
+        for i in range(7):
+            self.plant_repository(wt, "folder", "filter", self.tmp / "ran-many", at=f"many{i}")
+        m = run.finish(self.desk, tid, 0)
+        self.assertIn("many0, many1, many2, many3, many4 (and 2 more)", m["error"])
+        self.assertFalse((self.tmp / "ran-many").exists())
+        # a submodule the run's own commit brought in is refused as well: checked against where the run started
+        tid, wt, base = self.started_run()
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{base},vendor/lib", cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add a dependency", cwd=wt)
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at vendor/lib;", m["error"])
+        self.assertEqual(m["head"], "")
+
+    def test_hansas_git_calls_never_look_into_a_repository_inside_the_worktree(self):
+        from hansa import run
+        marker = self.tmp / "ran"
+        # stage_work (a lane's removal with --keep stages with it too): refused before git scans the worktree
+        tid, wt, base = self.started_run()
+        self.plant_repository(wt, "folder", "filter", marker)
+        with self.assertRaisesRegex(run.RepositoryInside, "repository inside it, at nest;"):
+            run.stage_work(self.desk, wt, base)
+        self.assertFalse(marker.exists())
+        self.assertNotIn("nest", sh_out("git", "ls-files", cwd=wt))
+        # snapshot_tree, keep_work: what they keep leaves the repository out, and the cleaned worktree holds none
+        for form in ("folder", "index"):
+            with self.subTest(form=form):
+                tid, wt, base = self.started_run()
+                self.plant_repository(wt, form, "filter", marker)
+                (wt / "work.txt").write_text("work\n")
+                self.assertNotIn("nest", sh_out("git", "ls-tree", "--name-only", run.snapshot_tree(self.desk, wt, base),
+                                                cwd=wt))
+                kept = run.keep_work(self.desk, wt, tid)
+                self.assertEqual(kept, {"kept_ref": f"refs/hansa/kept/{tid}"})
+                self.assertEqual(sh_out("git", "ls-tree", "--name-only", kept["kept_ref"], cwd=wt).split(),
+                                 ["README.md", "work.txt"])
+                self.assertFalse(os.path.lexists(wt / "nest"))  # removed with the rest
+                self.assertFalse(marker.exists())
+        # _save_changes (a blocked run's patch): without the repository
+        tid, wt, base = self.started_run()
+        self.plant_repository(wt, "folder", "filter", marker)
+        (wt / "work.txt").write_text("work\n")
+        out = self.tmp / "changes.patch"
+        run._save_changes(self.desk, wt, base, out)
+        self.assertFalse(marker.exists())
+        self.assertIn("work.txt", out.read_text())
+        self.assertNotIn("nest", out.read_text())
+
+    def test_hansas_git_never_looks_into_a_submodule_and_a_task_cannot_change_one(self):
+        from hansa import run
+        sub = self.tmp / "sub"
+        sub.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=sub)
+        (sub / "f.txt").write_text("one\n")
+        sh("git", "add", "-A", cwd=sub)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "s", cwd=sub)
+        first = sh_out("git", "rev-parse", "HEAD", cwd=sub)
+        sh("git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a submodule", cwd=self.repo)
+        marker = self.tmp / "ran"
+        # not populated: the run's work is committed as before
+        tid, wt, base = self.started_run()
+        (wt / "work.txt").write_text("work\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["files"], ["work.txt"], m)
+        # populated, with a filter in its config and a changed file: never looked into, its commit unchanged
+        tid, wt, base = self.started_run()
+        sh("git", "-c", "protocol.file.allow=always", "clone", "-q", str(sub), ".", cwd=wt / "sub")
+        (wt / "sub" / ".gitattributes").write_text("* filter=mark\n")
+        sh("git", "config", "filter.mark.clean", f"touch {marker}; cat", cwd=wt / "sub")
+        (wt / "sub" / "f.txt").write_text("two\n")
+        (wt / "work.txt").write_text("more\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertFalse(marker.exists())
+        self.assertEqual(m["files"], ["work.txt"], m)
+        self.assertEqual(sh_out("git", "rev-parse", f"{m['head']}:sub", cwd=wt), first)
+        # nor when .gitmodules asks git to look (a protected path: that run fails for it)
+        tid, wt, base = self.started_run()
+        (wt / "sub" / "f.txt").write_text("again\n")
+        sh("git", "config", "-f", ".gitmodules", "submodule.sub.ignore", "none", cwd=wt)
+        self.hansa("git", "a", "--worktree", "status")  # the coordinator's git there neither
+        self.hansa("git", "a", "--worktree", "diff")
+        self.assertFalse(marker.exists())
+        m = run.finish(self.desk, tid, 0)
+        self.assertIn("protected paths: .gitmodules", m["error"])
+        self.assertFalse(marker.exists())
+        # the next run starts with it as it is: a submodule's own repository is not removed, and still not looked into
+        tid, wt, base = self.started_run()
+        self.assertTrue((wt / "sub" / ".git").exists())
+        self.assertFalse(marker.exists())
+        # a task that changes the submodule's commit is refused
+        (wt / "sub" / "f.txt").write_text("three\n")
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "t", cwd=wt / "sub")
+        marker.unlink(missing_ok=True)
+        sh("git", "update-index", "--cacheinfo", f"160000,{sh_out('git', 'rev-parse', 'HEAD', cwd=wt / 'sub')},sub",
+           cwd=wt)
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at sub;", m["error"])
+        self.assertFalse(marker.exists())
+        tid, wt, base = self.started_run()  # put back to the commit's
+        self.assertEqual(sh_out("git", "rev-parse", ":sub", cwd=wt), first)
+
+    def test_hansa_git_worktree_skips_a_repository_inside_it_and_commit_review_shows_gitlinks(self):
+        tid, wt, _ = self.started_run()
+        filter_ran, diff_ran = self.tmp / "filter-ran", self.tmp / "diff-ran"
+        self.plant_repository(wt, "index", "filter", filter_ran, at="module")
+        module = wt / "module"
+        before = self.git_out("rev-parse", "HEAD", cwd=module)
+        (wt / ".gitmodules").write_text('[submodule "module"]\n\tpath = module\n\turl = ./module\n')
+        self.git_out("add", ".gitmodules", cwd=wt)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add module", cwd=wt)
+        base = self.git_out("rev-parse", "HEAD", cwd=wt)
+
+        driver = self.tmp / "diff-driver"
+        driver.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(diff_ran))}\n")
+        driver.chmod(0o755)
+        (module / ".gitattributes").write_text("*.txt filter=mark diff=mark\n")
+        self.git_out("config", "diff.mark.command", str(driver), cwd=module)
+        self.git_out("add", ".gitattributes", "f.txt", cwd=module)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "update module", cwd=module)
+        after = self.git_out("rev-parse", "HEAD", cwd=module)
+        self.git_out("update-index", "--cacheinfo", f"160000,{after},module", cwd=wt)
+        (wt / "README.md").write_text("committed review change\n")
+        self.git_out("add", "README.md", cwd=wt)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "update gitlink", cwd=wt)
+        head = self.git_out("rev-parse", "HEAD", cwd=wt)
+        self.desk.update(tid, base=base, head=head)
+
+        # Move the checkout's HEAD and dirty its files so both a gitlink change and a dirty check are possible.
+        self.git_out("update-ref", "--no-deref", "HEAD", before, cwd=module)
+        (module / "f.txt").write_text("six\n")  # same size so Git checks the clean filter
+        (wt / "README.md").write_text("local review change\n")
+        self.git_out("config", "diff.submodule", "diff")
+        self.git_out("config", "status.submoduleSummary", "true")
+
+        # Plain Git inside the nested repository can run both configured programs.
+        filter_ran.unlink(missing_ok=True)
+        self.git_out("status", "--short", cwd=module)
+        self.assertTrue(filter_ran.exists())
+        self.git_out("diff", "HEAD", cwd=module)
+        self.assertTrue(diff_ran.exists())
+        filter_ran.unlink()
+        diff_ran.unlink()
+
+        for cmd, args, expected in (("status", ("--short",), " M README.md"), ("diff", (), "+local review change")):
+            with self.subTest(cmd=cmd):
+                code, out, err = self.hansa_git("a", "--worktree", cmd, *args)
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn(expected, out)
+                self.assertNotIn("module", out)
+                self.assertFalse(filter_ran.exists())
+                self.assertFalse(diff_ran.exists())
+                code, out, err = self.hansa_git("a", "--worktree", cmd, "--ignore-submodules=dirty")
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("would read a submodule", err)
+
+        out = self.hansa("diff", tid)
+        self.assertIn("+committed review change", out)
+        self.assertNotIn("Subproject commit", out)
+        code, out, err = self.hansa_git("a", "diff", base, head)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"-Subproject commit {before}", out)
+        self.assertIn(f"+Subproject commit {after}", out)
+        self.assertNotIn("f.txt", out)
+        self.assertFalse(filter_ran.exists())
+        self.assertFalse(diff_ran.exists())
+
+    def test_a_repository_inside_an_ignored_folder_is_left_alone(self):
+        # git with hansa's options does not look into an ignored folder: a build's or node_modules' repositories stay
+        from hansa import run
+        (self.repo / ".gitignore").write_text("build/\n")
+        sh("git", "add", ".gitignore", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "ignore", cwd=self.repo)
+        marker = self.tmp / "ran"
+        tid, wt, base = self.started_run()
+        for kind in ("filter", "fsmonitor"):
+            self.plant_repository(wt, "folder", kind, marker, at=f"build/{kind}")
+        (wt / "work.txt").write_text("work\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["files"], ["work.txt"], m)
+        self.assertFalse(marker.exists())
+        tid, wt, base = self.started_run()
+        self.assertTrue((wt / "build" / "filter" / ".git").is_dir())
+        self.assertTrue((wt / "build" / "fsmonitor" / ".git").is_dir())
+        self.assertFalse(marker.exists())
 
     def test_a_branch_ref_that_leads_to_another_ref_does_not_lead_hansas_commit_onto_it(self):
         # commit hansa's end-of-session commit onto the base, while HEAD still names the session's branch
@@ -42470,6 +43102,35 @@ def save():'''))
             httpd.shutdown()
             httpd.server_close()
 
+    def test_a_page_bound_beyond_this_machine_counts_every_request_from_outside_and_changes_nothing(self):
+        skip_unless_ports(self)
+        from hansa import web
+        self.assertFalse(web.loopback("0.0.0.0"))
+        self.assertTrue(web.loopback("::1"))
+        s = json.loads(self.desk.settings_path.read_text())
+        s["settings_from_outside"] = True  # not even the principal's switch opens it
+        self.desk.settings_path.write_text(json.dumps(s))
+        self.assertIs(self.desk.settings().get("settings_from_outside"), True)
+        # bound on loopback here (the test's sandbox), as if on a wider address
+        with unittest.mock.patch.object(web, "loopback", return_value=False):
+            httpd = start_web(self.desk, "127.0.0.1", 0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "Host": "127.0.0.1"}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/settings", headers=auth)) as r:
+                self.assertTrue(json.load(r)["from_outside"])  # whatever its Host says
+            for path in ("/api/pause", "/api/settings"):
+                with urllib.request.urlopen(urllib.request.Request(
+                        f"{base}{path}", data=b"{}", method="POST", headers={**auth, "X-Hansa": "1",
+                                                                            "Content-Type": "application/json"})) as r:
+                    said = json.load(r)
+                self.assertEqual((said["ok"], said["code"]), (False, "page_read_only"))
+                self.assertIn("only shows", said["problems"][0])
+            self.assertFalse(self.desk.paused())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_merge_wait_page_test_reports_a_skip_without_node(self):
         # Without node the page assertion must be a visible skip, before starting a server or task.
         with unittest.mock.patch("shutil.which", return_value=None):
@@ -42879,6 +43540,41 @@ def save():'''))
                 self.assertIs(reply["from_outside"], True)
                 self.assertIs(reply["settings"]["settings_from_outside"], False)
 
+    def test_browser_headers_keep_a_request_with_rewritten_host_outside(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        settings = {"settings": {**self.desk.settings(), "cool_minutes": 31}}
+        for headers in ({"Origin": "https://desk.example", "Sec-Fetch-Site": "same-origin"},
+                        {"origin": "https://localhost.desk.example"},
+                        {"Origin": "https://localhost@desk.example"},
+                        {"Origin": "null"}, {"Origin": "http://[::1]desk.example"},
+                        {"sec-fetch-site": "cross-site"},
+                        {"Origin": "http://localhost:8765", "Sec-Fetch-Site": "cross-site"}):
+            with self.subTest(headers=headers):
+                before = self.settings_and_keys()
+                code, reply, _ = self.web_request("/api/settings", headers={**auth, **headers})
+                self.assertEqual(code, 200)
+                self.assertIs(reply["from_outside"], True)
+                self.assert_settings_refused_from_outside(*self.settings_post("/api/settings", settings, headers)[:2])
+                self.assertEqual(self.settings_and_keys(), before)
+
+    def test_local_browser_headers_leave_settings_writable(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for i, headers in enumerate((
+            {"Sec-Fetch-Site": "none"}, {"Sec-Fetch-Site": "same-origin"},
+            {"Origin": "http://localhost:8765"},
+            {"Origin": "http://LoCaLhOsT:8765", "Sec-Fetch-Site": "same-origin"},
+            {"Host": "[::1]:8765", "Origin": "http://[::1]:8765", "Sec-Fetch-Site": "same-origin"},
+            {"Origin": "http://127.0.0.2:8765", "Sec-Fetch-Site": "none"},
+        )):
+            with self.subTest(headers=headers):
+                code, reply, _ = self.web_request("/api/settings", headers={**auth, **headers})
+                self.assertEqual(code, 200)
+                self.assertIs(reply["from_outside"], False)
+                settings = {"settings": {**self.desk.settings(), "cool_minutes": 40 + i}}
+                code, reply, _ = self.settings_post("/api/settings", settings, headers)
+                self.assertEqual((code, reply["ok"]), (200, True), reply)
+                self.assertEqual(self.desk.settings()["cool_minutes"], 40 + i)
+
     def test_settings_switch_lets_outside_requests_change_settings_and_keys(self):
         s = self.desk.settings()
         before = len(self.history_entries()) if (self.desk.state_dir / "settings-history.jsonl").exists() else 0
@@ -43049,7 +43745,8 @@ def save():'''))
             return Wire(wire.output.getvalue())
 
         request = f"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n".encode()
-        wire = exchange(request + request)
+        zero_length = request.replace(b"\r\n\r\n", b"\r\nContent-Length: 0\r\nContent-Length: 00 \t\r\n\r\n")
+        wire = exchange(zero_length + request)
         for _ in range(2):
             response = http.client.HTTPResponse(wire)
             response.begin()
@@ -43068,8 +43765,9 @@ def save():'''))
             self.assertEqual(response.status, code)
             self.assertEqual(bool(response.read()), code == 200)
         post = (f"POST /api/pause HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n"
-                "X-Hansa: 1\r\nContent-Length: 2\r\n\r\n{}").encode()
+                "X-Hansa: 1\r\nContent-Length: 2\r\nContent-Length: 02\r\nExpect: 100-continue\r\n\r\n{}").encode()
         wire = exchange(post + request)
+        self.assertEqual(wire.input.read(len(b"HTTP/1.1 100 Continue\r\n\r\n")), b"HTTP/1.1 100 Continue\r\n\r\n")
         for _ in range(2):
             response = http.client.HTTPResponse(wire)
             response.begin()
@@ -43079,6 +43777,7 @@ def save():'''))
         # Refusing a POST before reading its body must close, rather than interpret that body as a request.
         cases = [("", 403)] + [(f"Authorization: Bearer {token}\r\nX-Hansa: 1\r\n" + framing, 400)
                               for framing in ("Content-Length: -1\r\n", "Content-Length: invalid\r\n",
+                                              f"Content-Length: {1 << 64}\r\n",
                                               "Transfer-Encoding: chunked\r\n")]
         for extra, code in cases:
             wire = exchange(("POST /api/pause HTTP/1.1\r\nHost: localhost\r\n" + extra + "\r\n{}").encode() + request)
@@ -43088,6 +43787,64 @@ def save():'''))
             self.assertEqual(response.getheader("Connection"), "close")
             response.read()
             self.assertEqual(wire.input.read(), b"")
+
+    def assert_web_closes_with_one_response(self, httpd, method, framing, body, code, *, problem=None):
+        request = (f"{method} /missing HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n"
+                   f"{framing}\r\n").encode("ascii") + body
+        with socket.create_connection(httpd.server_address, timeout=10) as sock, sock.makefile("rb") as wire:
+            sock.sendall(request)
+            reply = wire.read()  # EOF must come from the server without a shutdown from the client.
+        headers, _, data = reply.partition(b"\r\n\r\n")
+        self.assertEqual(reply.count(b"HTTP/1.1 "), 1)
+        self.assertEqual(headers.split(b"\r\n", 1)[0].split()[:2], [b"HTTP/1.1", str(code).encode()])
+        self.assertIn(b"\r\nConnection: close", headers)
+        if method == "HEAD":
+            self.assertEqual(data, b"")
+        elif problem:
+            self.assertIn(problem, json.loads(data)["problems"][0])
+
+    def test_web_closes_get_and_head_with_a_body(self):
+        skip_unless_ports(self)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        following = b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        for method in ("GET", "HEAD"):
+            for framing, body in ((f"Content-Length: {len(following)}\r\n", following),
+                                  ("Transfer-Encoding: chunked\r\n", b"%x\r\n%s\r\n0\r\n\r\n" % (len(following), following)),
+                                  ("Transfer-Encoding:\r\n", following),
+                                  (f"Content-Length: {len(following)}\r\nExpect: 100-continue\r\n", following)):
+                with self.subTest(method=method, framing=framing):
+                    self.assert_web_closes_with_one_response(httpd, method, framing, body, 400,
+                                                             problem="request body is not allowed")
+
+    def test_web_closes_ambiguous_framing_before_dispatch(self):
+        skip_unless_ports(self)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        following = b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        for method in ("GET", "HEAD", "POST", "OPTIONS", "PUT"):
+            for framing in ("Content-Length: 0\r\nTransfer-Encoding: chunked\r\n",
+                            "Content-Length: 0\r\nTransfer-Encoding:\r\n",
+                            "Content-Length: +0\r\n", "Content-Length: 0, 0\r\n",
+                            "Content-Length:\r\n", "Content-Length: 0\r\nContent-Length: 1\r\n",
+                            "Content-Length : 0\r\n", "Content-Length: +0\r\nExpect: 100-continue\r\n"):
+                with self.subTest(method=method, framing=framing):
+                    self.assert_web_closes_with_one_response(httpd, method, framing, following, 400,
+                                                             problem="nonnegative Content-Length")
+
+    def test_web_unsupported_methods_with_a_body_close(self):
+        skip_unless_ports(self)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        following = b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        for method in ("HEAD", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"):
+            with self.subTest(method=method):
+                framing, body = ("Content-Length: 0\r\n", b"") if method == "HEAD" else (
+                    f"Content-Length: {len(following)}\r\n", following)
+                self.assert_web_closes_with_one_response(httpd, method, framing, body, 501)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_page_tunnel_polls_back_off_revalidate_and_recover_in_both_languages(self):
@@ -44885,6 +45642,19 @@ def save():'''))
         self.assertEqual(outside.inspect(f"git push {loop} main", self.repo),
                          {"outside": [], "outside_folders": []})
 
+    def test_release_push_branch_detection_requires_one_push_of_the_base(self):
+        from hansa import outside
+        for command, base in (
+                ("git push public main;other:preview", "main;other"),
+                ("git push public main\ngit push mirror main", "main"),
+                ("git push public '$HANSA_RELEASE_COMMIT:preview'", "main"),
+                ("git push --all public", "main"),
+                ("git push public topic:preview", "main")):
+            with self.subTest(command=command):
+                self.assertIsNone(outside.push_branch(command, base))
+        self.assertEqual(outside.push_branch('git push --repo public "$HANSA_RELEASE_COMMIT:refs/heads/preview"', "main"),
+                         ("public", "preview"))
+
     def test_release_posted_line_already_omits_commit_subjects(self):
         # The posted completion line already gives no commit subjects; leave that path unchanged.
         from hansa import release
@@ -44990,10 +45760,10 @@ def save():'''))
         told = self.hansa("explain", "lane", "a")
         self.assertIn("release target default: sh ./deploy.sh", told)
         self.assertIn("last release of default: #1 lane a target default at " + sha[:10], told)
-        # the next one shows only what came since
+        # A repeat script release checks the commits since that target last ran.
         self.commit_in_repo("b.txt", "b\n")
         with self.in_session(p, sock):
-            self.assertIn("1 commit(s) since release #1", self.hansa("release", "a"))
+            self.assertIn("1 outgoing commit(s) checked", self.hansa("release", "a"))
         self.assertEqual([c["subject"] for c in release.get(self.desk, 2)["commits"]], ["Add b.txt"])
 
     def test_the_page_answers_a_release_through_its_own_address(self):
@@ -47419,13 +48189,17 @@ def save():'''))
                 c = DeskTest(self._testMethodName)
                 c.setUp()
                 try:
-                    c.with_targets(prod="true")
+                    command = "git push origin main"
+                    c.with_targets(prod=command)
                     initial = c.git_out("rev-parse", "HEAD")
                     if row not in (6, 13, 14):
                         # These rows have a previous release; the others test an empty outgoing boundary.
+                        if row != 5:  # its pull below sets up the remote
+                            c.add_release_remote("origin")
+                            c.git_out("push", "-q", "origin", "main")
                         release._write(c.desk, [{"id": 1, "lane": "a", "target": "prod", "state": "done",
                                                 "repo": str(c.repo.resolve()), "base": "main", "commit": initial,
-                                                "command": "true", "count": 0, "commits": []}])
+                                                "command": command, "count": 0, "commits": []}])
                     expected = []
                     if row in (1, 2, 7, 8, 9, 12):
                         subject = "Direct checkout correction"
@@ -47633,7 +48407,7 @@ def save():'''))
                             gone = c.commit_in_repo("gone.txt", "gone\n", "Discarded last release")
                             release._write(c.desk, [{"id": 1, "lane": "a", "target": "prod", "state": "done",
                                                     "repo": str(c.repo.resolve()), "base": "main", "commit": gone,
-                                                    "command": "true", "count": 1, "commits": []}])
+                                                    "command": command, "count": 1, "commits": []}])
                             c.git_out("reset", "--hard", initial)
                             c.git_out("reflog", "expire", "--expire=now", "--all")
                             c.git_out("prune", "--expire", "now")
@@ -48439,6 +49213,294 @@ def save():'''))
         r = release.get(self.desk, r["id"])
         self.assertEqual((r["state"], [h["where"] for h in r["hits"]]), ("forbidden", ["release command"]))
 
+    def add_release_remote(self, name):
+        path = self.tmp / f"{name}.git"
+        self.git_out("init", "--bare", "-q", "-b", "main", str(path))
+        self.git_out("remote", "add", name, str(path))
+        return path
+
+    def test_repeat_release_counts_and_scans_commits_sent_to_the_mirror_only(self):
+        from hansa import release
+        self.add_release_remote("mirror")
+        self.add_release_remote("public")
+        self.with_targets(mirror="git push mirror main", public=("git push public main", {"after": "mirror"}))
+        self.tick_targets("mirror", "public")
+        d = Dispatcher(self.desk)
+        for rid, target in enumerate(("mirror", "public"), 1):
+            self.hansa("release", "a", target)
+            self.assertEqual(self.settle_release(d, rid)["state"], "done")
+        initial = self.git_out("rev-parse", "HEAD")
+        landing = self.commit_in_repo("screen.txt", "page update\n")
+        task = self.desk.new_task("Show the updated page", lane="a")
+        self.desk.update(task, state="merged", merged=now(), merge_commit=landing,
+                         pictures=[{"name": "screen.png", "kind": "png", "bytes": 10, "run": 1}])
+        head = self.commit_in_repo("notice.txt", "private falcon\n")
+        self.hansa("release", "a", "mirror")
+        self.assertEqual(self.settle_release(d, 3)["state"], "done")
+        self.assertEqual(self.git_out("rev-parse", "mirror/main", "public/main").splitlines(), [head, initial])
+
+        asked = self.hansa("release", "a", "public")
+        self.assertIn("2 commit(s) since release #2", asked)
+        self.assertIn("2 file(s) changed", asked)
+        self.assertIn("2 outgoing commit(s) checked", asked)
+        row = next(row for row in views.status(self.desk)["releases"] if row["id"] == 4)
+        self.assertEqual((row["id"], row["count"], row["checked"], row["files_count"]), (4, 2, 2, 2))
+        self.assertEqual([c["sha"] for c in row["commits"]], [head, landing])
+        self.assertEqual(row["files"], ["notice.txt", "screen.txt"])
+        self.assertEqual([c["sha"] for c in row["direct"]], [head])
+        self.assertEqual(row["picture_tasks_count"], 1)
+        self.assertEqual([t["id"] for t in row["picture_tasks"]], [task])
+        self.hansa("release", "--stop", "4")
+
+        self.assertTrue(self.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+        self.assertIn(head[:10], self.refused("release", "a", "public"))
+        asked = self.hansa("release", "a", "public", "--direct", "Explain the correction")
+        self.assertIn("direct commits require the principal's yes", asked)
+        self.assertEqual(release.get(self.desk, 5)["state"], "waiting")
+        self.forbid("falcon")
+        refused = self.refused("release", "a", "public", "--direct", "Explain the correction")
+        self.assertIn(f"{head[:10]} notice.txt: private falcon", refused)
+        r = release.get(self.desk, 6)
+        self.assertEqual((r["state"], r["checked"], r["since"]), ("forbidden", 2, initial))
+        self.assertEqual([(h["commit"], h["where"]) for h in r["hits"]], [(head, "notice.txt")])
+
+        # A scan when starting an approved request uses the same target range.
+        self.assertTrue(release.answer(self.desk, 5, True, commit=head, command=r["command"])["ok"])
+        self.assertIsNone(release.start(self.desk, 5))
+        self.assertEqual(release.get(self.desk, 5)["hits"], r["hits"])
+        self.assertEqual(self.git_out("rev-parse", "public/main"), initial)
+
+    def test_changed_release_command_counts_for_its_new_remote_or_branch(self):
+        from hansa import release
+        for remote, branch in (("mirror", "main"), ("public", "preview")):
+            with self.subTest(remote=remote, branch=branch):
+                c = DeskTest(self._testMethodName)
+                c.setUp()
+                try:
+                    c.add_release_remote("mirror")
+                    c.add_release_remote("public")
+                    c.git_out("push", "-q", remote, f"main:refs/heads/{branch}")
+                    head = c.commit_in_repo("change.txt", "new destination\n")
+                    c.with_targets(ship="git push public main")
+                    c.tick_targets("ship")
+                    c.hansa("release", "a", "ship")
+                    c.assertEqual(c.settle_release(Dispatcher(c.desk), 1)["state"], "done")
+                    c.hansa("lane", "target", "a", "ship", f"git push --repo={remote} main:refs/heads/{branch}")
+                    asked = c.hansa("release", "a", "ship")
+                    c.assertNotIn("Nothing new", asked)
+                    c.assertIn(f"1 commit(s) going to {remote}:{branch}", asked)
+                    c.assertIn("1 outgoing commit(s) checked", asked)
+                    r = release.get(c.desk, 2)
+                    c.assertEqual((r["since_release"], r["since"], r["count"], r["checked"]), (None, "", 1, 1))
+                    c.assertEqual([commit["sha"] for commit in r["commits"]], [head])
+                    c.assertEqual([commit["sha"] for commit in r["direct"]], [head])
+                    c.assertEqual(r["files"], ["change.txt"])
+                finally:
+                    c.doCleanups()
+
+    def test_script_release_asked_again_at_the_same_commit_has_nothing_new(self):
+        from hansa import release
+        head = self.commit_in_repo("publish.sh", "echo released\n")
+        self.with_targets(ship="sh ./publish.sh")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+
+        asked = self.hansa("release", "a", "ship")
+        self.assertIn("Nothing new", asked.splitlines()[0])
+        self.assertIn("same commit as release #1", asked)
+        r = release.get(self.desk, 2)
+        self.assertEqual((r["since"], r["since_release"]), (head, 1))
+        self.assertEqual((r["count"], r["files_count"], r["direct_count"], r["checked"]), (0, 0, 0, 0))
+        self.assertEqual(r["commits"], [])
+
+    def test_push_by_address_after_merge_does_not_hold_direct_commits_already_sent(self):
+        from hansa import release
+        destination = self.tmp / "delivery.git"
+        self.git_out("init", "--bare", "-q", "-b", "main", str(destination))
+        self.recorded_after_merge(time.time() - 120, "first-landing.txt")
+        direct = self.commit_in_repo("fix.txt", "direct fix\n")
+        command = f"git push {shlex.quote(str(destination))} main"
+        self.hansa("lane", "target", "a", "ship", command, "--after-merge", "1")
+        self.assertTrue(self.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship", "--direct", "Send the fix")
+        first = release.get(self.desk, 1)
+        self.assertEqual(first["state"], "waiting")
+        self.assertIn(direct, [c["sha"] for c in first["direct"]])
+        self.assertTrue(release.answer(self.desk, 1, True, commit=direct, command=first["command"])["ok"])
+        d = Dispatcher(self.desk)
+        first = self.settle_release(d, 1)
+        self.assertEqual(first["state"], "done")
+        self.assertEqual(self.git_out("rev-parse", "main", cwd=destination), direct)
+
+        landed_at = first["asked"] + 1
+        head = self.recorded_after_merge(landed_at)
+        with unittest.mock.patch.object(release, "now", return_value=landed_at + 120):
+            [pending] = views.status(self.desk)["after_merge_waiting"]
+            self.assertIn("starts when the server next looks", pending["what"])
+            d.tick()
+            r = self.settle_release(d, 2)
+        self.assertEqual((r["state"], r["since"], r["count"], r["checked"], r["direct_count"]),
+                         ("done", direct, 1, 1, 0))
+        self.assertTrue(r["after_merge"])
+        self.assertEqual([c["sha"] for c in r["commits"]], [head])
+        self.assertEqual(self.git_out("rev-parse", "main", cwd=destination), head)
+
+    def test_repeat_script_release_counts_and_scans_a_mirror_only_commit(self):
+        from hansa import release
+        self.add_release_remote("mirror")
+        self.add_release_remote("public")
+        first = self.commit_in_repo("publish.sh", "git push public main\n")
+        self.with_targets(ship="sh ./publish.sh")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.tick_targets()
+
+        head = self.commit_in_repo("note.txt", "private falcon\n")
+        self.git_out("push", "-q", "mirror", "main")
+        self.assertEqual(self.git_out("rev-parse", "mirror/main"), head)
+        self.assertIn("1 commit(s) since release #1", self.hansa("release", "a", "ship"))
+        requested = release.get(self.desk, 2)
+        self.assertEqual((requested["since"], requested["since_release"]), (first, 1))
+        self.assertEqual((requested["count"], requested["checked"], requested["files_count"]), (1, 1, 1))
+        self.assertEqual([c["sha"] for c in requested["commits"]], [head])
+        self.assertEqual([c["sha"] for c in requested["direct"]], [head])
+        self.assertEqual(requested["files"], ["note.txt"])
+        self.assertNotIn("remote_counts", requested)
+
+        self.forbid("falcon")
+        self.assertIn(f"{head[:10]} note.txt: private falcon", self.refused("release", "a", "ship"))
+        r = release.get(self.desk, 3)
+        self.assertEqual((r["state"], r["count"], r["checked"]), ("forbidden", 1, 1))
+        self.assertEqual([(h["commit"], h["where"]) for h in r["hits"]], [(head, "note.txt")])
+
+        # Approval-time scanning uses the same range after the forbidden list changes.
+        self.assertTrue(release.answer(self.desk, 2, True, commit=head, command=requested["command"])["ok"])
+        self.assertEqual(self.settle_release(d, 2)["state"], "forbidden")
+        self.assertEqual(release.get(self.desk, 2)["hits"], r["hits"])
+        self.assertEqual(self.git_out("rev-parse", "public/main"), first)
+
+    def test_changed_script_release_uses_the_same_range_as_a_first_release(self):
+        from hansa import release
+        self.add_release_remote("mirror")
+        self.add_release_remote("public")
+        self.git_out("push", "-q", "public", "main")
+        script = self.commit_in_repo("publish.sh", 'git push "$1" main\n')
+        head = self.commit_in_repo("note.txt", "private falcon\n")
+        self.with_targets(ship="sh ./publish.sh mirror")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertEqual(self.git_out("rev-parse", "mirror/main"), head)
+
+        command = "sh ./publish.sh public"
+        self.with_targets(ship=command, new=command)
+        self.forbid("falcon")
+        for rid, target, previous in ((2, "ship", 1), (3, "new", None)):
+            with self.subTest(target=target):
+                said = self.refused("release", "a", target)
+                self.assertIn(f"{head[:10]} note.txt: private falcon", said)
+                self.assertNotIn("Nothing new", said)
+                r = release.get(self.desk, rid)
+                self.assertEqual(r.get("previous_release"), previous)
+                self.assertEqual((r["since"], r["since_release"]), ("", None))
+                self.assertEqual((r["state"], r["count"], r["checked"], r["remote_counts"]),
+                                 ("forbidden", 2, 2, {"mirror": 0, "public": 2}))
+                self.assertEqual([c["sha"] for c in r["commits"]], [head, script])
+
+    def test_repeat_release_excludes_commits_fetched_from_its_destination_branch(self):
+        from hansa import release
+        public = self.add_release_remote("public")
+        self.add_release_remote("mirror")
+        self.hansa("lane", "target", "a", "ship", 'git push public "$HANSA_RELEASE_COMMIT:refs/heads/main"', "--fixed")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        head = self.commit_in_repo("note.txt", "already public falcon\n")
+        other = self.tmp / "other-checkout"
+        self.git_out("clone", "-q", str(self.repo), str(other))
+        self.git_out("push", "-q", str(public), "main", cwd=other)
+        self.forbid("falcon")
+        self.assertIn(f"{head[:10]} note.txt: already public falcon", self.refused("release", "a", "ship"))
+        self.git_out("fetch", "-q", "public")
+        self.assertEqual(self.git_out("rev-parse", "public/main"), head)
+        self.assertIn("0 outgoing commit(s) checked", self.hansa("release", "a", "ship"))
+        r = release.get(self.desk, 3)
+        self.assertEqual((r["count"], r["checked"], r["files_count"], r["direct_count"]), (0, 0, 0, 0))
+
+    def test_release_checks_commits_when_the_tracking_ref_is_for_another_destination(self):
+        from hansa import release
+        self.add_release_remote("public")
+        mirror = self.add_release_remote("mirror")
+        self.git_out("push", "-q", "mirror", "main")
+        self.with_targets(ship="git push public main")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        head = self.commit_in_repo("note.txt", "private falcon\n")
+        self.forbid("falcon")
+        self.git_out("push", "-q", "public", "main:refs/heads/preview")
+        self.git_out("config", "--replace-all", "remote.public.fetch", "+refs/heads/preview:refs/remotes/public/main")
+        self.git_out("fetch", "-q", "public")
+        self.assertEqual(self.git_out("rev-parse", "public/main"), head)
+        self.assertIn("note.txt: private falcon", self.refused("release", "a", "ship"))
+
+        self.git_out("config", "--replace-all", "remote.public.fetch", "+refs/heads/*:refs/remotes/public/*")
+        self.git_out("push", "-q", "public", "main")
+        self.git_out("remote", "set-url", "--push", "public", str(mirror))
+        self.git_out("fetch", "-q", "public")
+        self.assertEqual(self.git_out("rev-parse", "public/main"), head)
+        self.assertNotEqual(self.git_out("rev-parse", "mirror/main"), head)
+        self.assertIn("note.txt: private falcon", self.refused("release", "a", "ship"))
+        self.assertEqual([release.get(self.desk, rid)["checked"] for rid in (2, 3)], [1, 1])
+
+    def test_legacy_approved_release_is_rescanned_for_its_changed_push_command(self):
+        from hansa import release
+        self.add_release_remote("mirror")
+        self.add_release_remote("public")
+        self.git_out("push", "-q", "public", "main")
+        head = self.commit_in_repo("note.txt", "private falcon\n")
+        self.with_targets(ship="git push mirror main")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.with_targets(ship="git push public main")
+        self.hansa("release", "a", "ship")
+        r = release.change(self.desk, 2, lambda _: {"previous_release": None, "push_destination": None,
+            "since": head, "since_release": 1, "count": 0, "checked": 0, "scanned": "old-scan"})
+        self.assertTrue(release.answer(self.desk, 2, True, commit=head, command=r["command"])["ok"])
+        self.forbid("falcon")
+        process = release.start(self.desk, 2)
+        if process is not None:
+            process.wait(timeout=30)
+            release.finish(self.desk, 2)
+        self.assertIsNone(process)
+        r = release.get(self.desk, 2)
+        self.assertEqual((r["state"], r["checked"], r["hits"][0]["where"]), ("forbidden", 1, "note.txt"))
+
+    def test_release_direct_commit_pointer_uses_the_destination_range(self):
+        from hansa import release
+        self.add_release_remote("public")
+        self.with_targets(ship="git push public main")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        tip = self.commit_in_repo("already.txt", "published separately\n", "Published separately")
+        self.git_out("push", "-q", "public", "main")
+        for i in range(11):
+            tip = self.changelog_commit(f"New work {i}", tip)
+        self.git_out("update-ref", "refs/heads/main", tip)
+        self.git_out("reset", "--hard", tip)
+        asked = self.hansa("release", "a", "ship")
+        pointer = next(line.split(": ", 1)[1] for line in asked.splitlines() if "git" in line and "log --oneline" in line)
+        shown = subprocess.check_output(shlex.split(pointer), text=True)
+        self.assertEqual(len(shown.splitlines()), 11)
+        self.assertIn("New work 0", shown)
+        self.assertNotIn("Published separately", shown)
+
     def test_first_release_with_multiple_remotes_counts_and_scans_what_any_remote_lacks(self):
         from hansa import release
         for fixed in (False, True):
@@ -48451,11 +49513,10 @@ def save():'''))
                         first = c.commit_in_repo("b.txt", "private falcon\n")
                         head = c.commit_in_repo("c.txt", "clean\n")
                         for remote in ("mirror", "public"):
-                            c.git_out("remote", "add", remote, str(c.tmp / remote))
-                        c.git_out("update-ref", "refs/remotes/mirror/main", head)
+                            c.add_release_remote(remote)
+                        c.git_out("push", "-q", "mirror", "main")
                         if public_at != "empty":
-                            c.git_out("update-ref", "refs/remotes/public/main",
-                                      initial if public_at == "initial" else head)
+                            c.git_out("push", "-q", "public", f"{initial if public_at == 'initial' else head}:refs/heads/main")
                         c.hansa("lane", "target", "a", "public", "git push public HEAD:main",
                                 *(["--fixed"] if fixed else []))
                         expected = {initial, first, head} if public_at == "empty" else (
@@ -48484,7 +49545,7 @@ def save():'''))
 
     def test_first_release_remote_ranges_preserve_single_remote_and_previous_release_rules(self):
         from hansa import release
-        self.with_release("true")
+        self.with_release("git push mirror main")
         initial = self.git_out("rev-parse", "HEAD")
         first = self.commit_in_repo("b.txt", "clean\n")
         head = self.commit_in_repo("c.txt", "clean too\n")
@@ -48493,15 +49554,16 @@ def save():'''))
             with self.subTest(remotes=remotes):
                 for remote in remotes:
                     if remote not in self.git_out("remote").splitlines():
-                        self.git_out("remote", "add", remote, str(self.tmp / remote))
+                        self.add_release_remote(remote)
                 if remotes:
-                    self.git_out("update-ref", "refs/remotes/mirror/main", first)
+                    self.git_out("push", "-q", "mirror", f"{first}:refs/heads/main")
                 self.hansa("release", "a")
                 r = release.releases(self.desk)[-1]
                 self.assertEqual({x["sha"] for x in r["commits"]}, expected)
                 self.assertEqual((r["count"], r["checked"]), (len(expected),) * 2)
-        # A finished release keeps the existing range, even with an empty second remote.
-        release.change(self.desk, r["id"], lambda _: {"state": "done", "ended": now()})
+        # The repeat push leaves out the commits mirror received even with public still empty.
+        self.assertTrue(release.answer(self.desk, r["id"], True, commit=head, command=r["command"])["ok"])
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
         fresh = self.commit_in_repo("d.txt", "new\n")
         told = self.hansa("release", "a")
         r2 = release.releases(self.desk)[-1]
@@ -56912,6 +57974,7 @@ else if (ask === "task-steps")'''))
             for part in ("one remote or none", "on no remote-tracking branch", "two or more remotes",
                          "first release", "missing from at least one remote", "each remote",
                          "no tracking branches", "whole history", "--fixed",
+                         "after the target's last released commit", "changed command with an unknown destination",
                          "in the release or watch command line"):
                 self.assertIn(part, shown)
 
@@ -56960,7 +58023,9 @@ else if (ask === "task-steps")'''))
     def test_release_reply_starts_with_same_commit_notice(self):
         from hansa import alert, release
         sent = self.alert_fake()
-        self.with_targets(public="true", preview="true")
+        self.add_release_remote("public")
+        self.add_release_remote("preview")
+        self.with_targets(public="git push public main", preview="git push preview main")
         self.tick_targets("public")
         said = self.hansa("release", "a", "public")
         self.assertNotIn("Nothing new", said)
@@ -56987,7 +58052,8 @@ else if (ask === "task-steps")'''))
 
     def test_release_same_commit_refusal_does_not_claim_it_will_run_again(self):
         from hansa import release
-        self.with_targets(public="echo zebra")
+        self.add_release_remote("zebra")
+        self.with_targets(public="git push zebra main")
         self.tick_targets("public")
         self.hansa("release", "a", "public")
         self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
@@ -57000,7 +58066,7 @@ else if (ask === "task-steps")'''))
                 self.assertNotIn("asked to run again", said)
                 self.assertIn("0 commit(s) since release #1", said)
                 self.assertIn("refused", said)
-                self.assertIn("release command: echo zebra", said)
+                self.assertIn("release command: git push zebra main", said)
                 r = release.releases(self.desk)[-1]
                 self.assertEqual((r["state"], r["since"], r["since_release"]), ("forbidden", r["commit"], 1))
                 self.assertEqual([h["where"] for h in r["hits"]], ["release command"])
@@ -57847,11 +58913,12 @@ else:
         self.assertIn("#1 lane a target default at", self.hansa("release"))
         self.assertIn("default: echo x", self.hansa("explain", "lane", "a"))
         self.assertIn("default: echo x", self.hansa("lane", "target", "a"))
-        # a request recorded before targets had names is the unnamed target's last release
+        # A successful request recorded before targets had names still sets the starting commit.
         release.change(self.desk, 1, lambda x: {"target": None})
         self.commit_in_repo("b.txt", "b\n")
         self.hansa("release", "a")
-        self.assertEqual((release.get(self.desk, 2)["since_release"], release.get(self.desk, 2)["count"]), (1, 1))
+        request = release.get(self.desk, 2)
+        self.assertEqual((request["previous_release"], request["since_release"], request["count"]), (1, 1, 1))
         # the entry is left as it was saved
         self.assertEqual(self.desk.settings()["releases_without_asking"][0].get("release"), f"echo x >> {out}")
 
@@ -58195,7 +59262,9 @@ else:
 
     def test_each_target_counts_what_goes_out_from_its_own_last_release(self):
         from hansa import release
-        self.with_targets(test="true", push="true")
+        self.add_release_remote("preview")
+        self.add_release_remote("public")
+        self.with_targets(test="git push preview main", push="git push public main")
         self.tick_targets("test", "push")
         d = Dispatcher(self.desk)
         self.hansa("release", "a", "test")
@@ -58209,7 +59278,7 @@ else:
         self.assertEqual(self.settle_release(d, 2)["state"], "done")
         # the push never went out: all of it goes out by the push
         told = self.hansa("release", "a", "push")
-        self.assertIn("2 commit(s) on no remote-tracking branch (no release of it went out before)", told)
+        self.assertIn("2 commit(s) missing from at least one remote", told)
         p3 = release.get(self.desk, 3)
         self.assertEqual((p3["since_release"], p3["since"], p3["count"]), (None, "", 2))
         self.assertEqual(p3["files"], ["README.md", "b.txt"])
@@ -59236,6 +60305,8 @@ else:
                 with self.subTest(language=language, event=kind, fields=fields):
                     check(alert_kind, lambda: self.desk.event(kind, **fields), en, zh,
                           "active" if alert_kind == "ask" else "urgent", language)
+            check("page_held", lambda: alert.page_held(self.desk, 9123), "port 9123, where it was served last time, "
+                  "is held by something else", "端口 9123 被别的程序占用", "urgent", language)
             write_json(self.desk.state_dir / "heartbeat", time.time() - alert.STUCK_ALERT - 60)
             check("server_stuck", lambda: alert.stuck_check(self.desk, 0), "hansa serve has finished no round",
                   "分钟没跑完一轮", "urgent", language)

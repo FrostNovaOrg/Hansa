@@ -9,6 +9,7 @@ import pwd
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -121,6 +122,28 @@ def record_tmux() -> dict:
     return {"server": tmux_server(socket), "session": session}
 
 
+def _private_lock(listed: Path):
+    """The lock of the account's list of desks, made 0600 (and brought to it when it was not)."""
+    lock = listed.with_suffix(".lock")
+    held = os.fdopen(os.open(lock, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a")
+    try:
+        if stat.S_IMODE(os.fstat(held.fileno()).st_mode) & 0o077:
+            os.fchmod(held.fileno(), 0o600)
+    except OSError:
+        pass
+    return held
+
+
+def write_private(listed: Path, entries) -> None:
+    """The account's list of desks, written 0600 whatever its mode was (write_json keeps the mode it finds)."""
+    if listed.is_symlink():
+        listed.unlink()  # write_json would replace the link itself, with the mode of a new file
+    os.close(os.open(listed, os.O_WRONLY | os.O_CREAT, 0o600))
+    if stat.S_IMODE(listed.stat().st_mode) & 0o077:
+        os.chmod(listed, 0o600)
+    write_json(listed, entries)
+
+
 def list_desk(desk: Desk, at=None) -> str:
     """Add or update this desk's entry on the account's list of desks, as each hansa serve start does. Returns
     what kept it from being written, worded for the caller to report, or '' when it was written."""
@@ -128,14 +151,14 @@ def list_desk(desk: Desk, at=None) -> str:
     try:
         listed.parent.mkdir(parents=True, exist_ok=True)
         # Different desks may start together. Lock the stable inode, replace just the JSON.
-        with open(listed.with_suffix(".lock"), "a") as held:
+        with _private_lock(listed) as held:
             fcntl.flock(held, fcntl.LOCK_EX)
             entries, problem = _desks_entries()
             if problem:  # rewriting it would drop the other desks and let runs start with nothing of them hidden
                 return f"left the account's list of desks as it is: {problem}"
             entries = [x for x in entries if isinstance(x, dict) and x.get("desk") != str(desk.root)]
             entries.append({"desk": str(desk.root), "hansa": hansa_command(), "at": now() if at is None else at})
-            write_json(listed, entries)
+            write_private(listed, entries)
     except OSError as e:
         return f"could not update account's desk list: {e}"
     return ""
@@ -156,7 +179,7 @@ def forget_desk(folder) -> tuple:
     try:
         listed.parent.mkdir(parents=True, exist_ok=True)
         # The same lock list_desk takes, so a start and a forget one after the other leave one list, not two.
-        with open(listed.with_suffix(".lock"), "a") as held:
+        with _private_lock(listed) as held:
             fcntl.flock(held, fcntl.LOCK_EX)
             entries, problem = _desks_entries()
             if problem:  # rewriting it would drop the other desks, and hansa cannot tell whether root is listed
@@ -169,7 +192,7 @@ def forget_desk(folder) -> tuple:
             if state["state"] != "gone":
                 return None, (f"the server for {found[0]['desk']} is running; stop it first (press x on its row in "
                               "the hansa menu), then run hansa desks --forget again. Nothing was changed")
-            write_json(listed, [x for x in entries
+            write_private(listed, [x for x in entries
                                 if not (isinstance(x, dict) and isinstance(x.get("desk"), str)
                                         and _same_desk(x["desk"], root))])
             return str(root), ""
@@ -317,8 +340,13 @@ def server_up(desk: Desk) -> bool:
             # The pulse follows binding the page and recording its port. A held lock alone is too early
             # to report success: the page may fail to bind and the server immediately exit.
             if st["state"] != "gone" and st.get("answers"):
-                port = (desk.state_dir / "web-port").read_text().strip()
-                print(f"server started (pid {st['pid']}), page on port {port}")
+                from .views import held_port, page_held_text
+                held = held_port(desk, st)
+                if held:  # it started without its page rather than on another port
+                    print(f"server started (pid {st['pid']}) and runs tasks, but {page_held_text(held)}")
+                else:
+                    port = (desk.state_dir / "web-port").read_text().strip()
+                    print(f"server started (pid {st['pid']}), page on port {port}")
                 print("watch: " + (watch or shlex.join(["tail", "-f", str(log)])))
                 return True
             if (child is not None and child.poll() is not None) or time.monotonic() >= end:

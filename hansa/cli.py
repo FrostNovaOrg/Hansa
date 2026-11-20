@@ -21,11 +21,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from . import account, after, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
-from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entry, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entry, SettingsError, desk_privacy, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
-from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF, GIT_REVIEW_NO_PROGRAMS, NO_SUBMODULES,
+                  HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -561,8 +562,9 @@ def cmd_init(a):
         if not ln.get("check") and not ln.get("merge_check"):
             print(_no_check(s, a.lane, ln, ln["base"]))
     keep_desk_out(desk)
-    if desk.root.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        print(f"warning: others may write in {desk.root}; run chmod go-w {shlex.quote(str(desk.root))}", file=sys.stderr)
+    private = desk_privacy(desk, fix=True)  # the desk's folder this account's alone (0700), in a folder that existed too
+    if private:
+        print(f"warning: {private}", file=sys.stderr)
     problem = up.list_desk(desk)
     if problem:
         print(desk.redact(f"hansa init: the desk was made; {problem}; its first server start "
@@ -796,7 +798,10 @@ GIT_LIST_FLAGS = {  # what branch and tag take when they only list; the rest cre
     "tag": {"-l", "--list", "-n", "--color", "--no-color", "--column", "--no-column", "-i", "--ignore-case",
             "--omit-empty"}}
 GIT_PATCH_READS = ("diff", "show", "log")
+GIT_NO_PROGRAMS = {**dict.fromkeys(GIT_PATCH_READS, GIT_REVIEW_NO_PROGRAMS),
+                   "blame": ("--no-textconv",), "grep": ("--no-textconv",)}
 GIT_SUBMODULE_STATUS = (*GIT_PATCH_READS, "status")
+GIT_WORKTREE_STATUS = ("status", "diff")
 GIT_OUTSIDE = "it reads files outside the lane's repository"
 GIT_FILE_INPUT = "it reads a file outside the lane's repository"
 GIT_SUBMODULE_INPUT = "it would read a submodule's repository"
@@ -820,7 +825,7 @@ GIT_FILE_FLAGS = {"grep": ("f", "[eABCm]"), "blame": ("S", "[LCM]"), "ls-files":
 GIT_LIST_VALUES = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
 
 
-def git_refused(args: list) -> str:
+def git_refused(args: list, worktree: bool = False) -> str:
     """Why hansa git will not run `git ARGS`; '' when it will."""
     if not args:
         return "name a git command, such as hansa git LANE log --oneline -5"
@@ -857,8 +862,10 @@ def git_refused(args: list) -> str:
             if (short and any(flag in short_flags for flag in "ok") or
                     name.startswith(("--o", "--k")) and any(full.startswith(name) for full in ("--others", "--killed"))):
                 other = x
+        # In worktree status and diff, even 'dirty' would let Git read a submodule's HEAD.
         if cmd in GIT_SUBMODULE_STATUS and (
-                name.startswith("--ignore-") and "--ignore-submodules".startswith(name) and value in ("none", "untracked")
+                name.startswith("--ignore-") and "--ignore-submodules".startswith(name) and
+                (value in ("none", "untracked") or value == "dirty" and worktree and cmd in GIT_WORKTREE_STATUS)
                 or name.startswith("--no-ignore-") and "--no-ignore-submodules".startswith(name)):
             return f"{x} is refused: {GIT_SUBMODULE_INPUT}"
         for full, shortest, cmds, why in GIT_REFUSED_PREFIX:
@@ -896,7 +903,7 @@ def git_refused(args: list) -> str:
 
 
 def cmd_git(a):
-    from .run import GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF, check_git_file
+    from .run import check_git_file
     desk = Desk.find(a.desk)
     args, where = list(a.args), a.worktree
     while args and args[0] == "--worktree":
@@ -904,7 +911,7 @@ def cmd_git(a):
     ln = desk.settings()["lanes"].get(a.lane)
     if not ln:
         raise SystemExit(f"hansa: no lane {a.lane}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
-    why = git_refused(args)
+    why = git_refused(args, where)
     if why:
         raise SystemExit(desk.redact(f"hansa git: {why}. Nothing was run"))
     for tid in dict.fromkeys(re.findall(r"(?<![\w.-])task/(t\d+)(?![\w])", " ".join(args))):
@@ -931,10 +938,16 @@ def cmd_git(a):
     # The signature programs become hansa's stand-in, which reads its input and fails: not false, which can end
     # before git has written the signed text to it, and git then dies of SIGPIPE
     cmd = args[0]
-    flags = GIT_REVIEW_DIFF if cmd in GIT_PATCH_READS else {
-        "blame": ("--no-textconv", "--no-ignore-revs-file"), "grep": ("--no-textconv",),
-        "status": ("--ignore-submodules=dirty",),
-    }.get(cmd, ())
+    flags = GIT_NO_PROGRAMS.get(cmd, ())
+    # Worktree status and diff must never run Git under a nested repository's own config.
+    if where and cmd in GIT_WORKTREE_STATUS:
+        flags += (NO_SUBMODULES,)
+    elif cmd in GIT_PATCH_READS:
+        flags = GIT_REVIEW_DIFF
+    elif cmd == "status":
+        flags += ("--ignore-submodules=dirty",)
+    elif cmd == "blame":
+        flags += ("--no-ignore-revs-file",)
     no_sig = str(NO_SIGNATURE)
     git_cmd = ["git", "--no-pager", *GIT_REVIEW_CONFIG, "-c", "core.quotePath=false", "-c", "core.fsmonitor=false",
                "-c", "log.showSignature=false", "-c", "grep.fallbackToNoIndex=false",
@@ -1952,13 +1965,21 @@ def cmd_release(a):
     r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
                     session=notify.session_here(), target=target, direct=a.direct)
     who = release.what(r)
+    count = f"{r['count']} commit(s)"
+    if r.get("since_release"):
+        count += f" since release #{r['since_release']}"
+    elif r.get("push_destination"):
+        count += f" going to {r['push_destination']}"
+    elif r.get("remote_counts"):
+        remotes = ", ".join(f"{n} not on remote {remote}" for remote, n in r["remote_counts"].items())
+        count += f" missing from at least one remote ({remotes}"
+        count += ")" if r.get("previous_release") else "; no release of it went out before)"
+    else:
+        count += " on no remote-tracking branch"
+        if not r.get("previous_release"):
+            count += " (no release of it went out before)"
     head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}"
-            + (f" by target {r['target']}" if r.get("target") else "") + ", "
-            + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
-               f"{r['count']} commit(s) missing from at least one remote ("
-               + ", ".join(f"{count} not on remote {remote}" for remote, count in r["remote_counts"].items())
-               + "; no release of it went out before)" if r.get("remote_counts") else
-               f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
+            + (f" by target {r['target']}" if r.get("target") else "") + f", {count}"
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
     details = "".join("\n" + x for x in [*release.outside.lines(r), *release.direct_lines(r)])
@@ -2248,12 +2269,32 @@ def hold_server_lock(desk: Desk):
     return f
 
 
+OUTSIDE_WORD = "outside:"  # --host outside:ADDRESS: the principal means an address beyond this machine
+
+
+def serve_host(given: str) -> str:
+    """The address hansa serve binds the page on: this machine's own, or another one the principal names with
+    outside: before it, where the page only shows (web.start_web). Refuses any other."""
+    from .web import loopback
+    host = given.removeprefix(OUTSIDE_WORD)
+    if host != given or loopback(host):
+        return host
+    raise SystemExit(f"hansa: hansa serve did not start: {given or 'an empty address'} is not this machine's own "
+                     f"address, and beyond it the page's key travels unencrypted, so keep the default (127.0.0.1) and "
+                     f"open the page through an SSH tunnel, or if you mean it, give --host {OUTSIDE_WORD}{given} and "
+                     f"the page there will only show, changing nothing")
+
+
 def cmd_serve(a):
     from .web import start_web
+    host = serve_host(a.host)
     desk = Desk.find(a.desk)
     moved = desk_paths_problem(desk, run_homes(), lane_repos(desk.settings()))
     if moved:  # every run it would start would be refused: say it once, here
         raise SystemExit(f"hansa: hansa serve did not start, as no run may start: {moved}")
+    private = desk_privacy(desk, fix=True)  # the desk's folder 0700, hansa's own files at its top and in .hansa/ 0600
+    if private:  # never a reason not to start: hansa status keeps saying it
+        print(f"hansa serve: {private}", file=sys.stderr, flush=True)
     held = hold_server_lock(desk)  # kept open while this server runs
     if not held:
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
@@ -2269,37 +2310,52 @@ def cmd_serve(a):
     except OSError as e:
         print(f"hansa serve: the desk's card could not be brought up to date ({e.strerror or e})", file=sys.stderr,
               flush=True)
-    port = first_port = a.port if a.port is not None else web_port(desk)
-    port_note = ""
+    recorded = views.recorded_port(desk)
+    port = first_port = a.port if a.port is not None else recorded or up.DEFAULTS["port"]
+    port_note, held_at = "", None
     while True:
         try:
-            port = start_web(desk, a.host, port).server_address[1]
+            port = start_web(desk, host, port).server_address[1]
             break
         except (OSError, OverflowError) as e:  # OverflowError: a port past 65535
             in_use = isinstance(e, OSError) and e.errno == errno.EADDRINUSE
+            if in_use and a.port is None and recorded is not None:
+                # not elsewhere: a link, bookmark or proxy kept for this port would hand the key to whatever holds it
+                held_at = port
+                break
             if in_use and a.port is None and port < 65535:
                 port += 1
                 port_note = f" ({first_port} was taken)"
                 continue
-            said = f"hansa: hansa serve could not serve the page on host {a.host}, port {port}: " \
+            said = f"hansa: hansa serve could not serve the page on host {host}, port {port}: " \
                    f"{(e.strerror if isinstance(e, OSError) else '') or e}".rstrip(".")
             raise SystemExit(said + ("; perhaps another desk's hansa serve holds that port. Start this desk's server "
                                      "on a free port with hansa serve --port N (hansa web then finds it)" if in_use else
                                      ". Nothing was started or recorded: hansa up starts the server as before"))
-    # how hansa up brings this server back, and this account's list of desks: only a start that bound the page
+    # how hansa up brings this server back, and this account's list of desks: only a start that bound the page or
+    # found its recorded port held (it runs tasks without the page)
     up.record_start(desk, a)
 
     def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stopped)
-    write_text(desk.state_dir / "web-port", str(port))  # what hansa web opens
-    write_text(desk.state_dir / "web-host", a.host)  # with it, where hansa status says the page is
+    if held_at is None:
+        views.page_held_file(desk).unlink(missing_ok=True)
+        write_text(desk.state_dir / "web-port", str(port))  # what hansa web opens
+        write_text(desk.state_dir / "web-host", host)  # with it, where hansa status says the page is
+    else:  # what hansa status, hansa up and hansa web say while this server runs without its page
+        write_json(views.page_held_file(desk), {"port": held_at, "pid": os.getpid()})
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
     alert.start_thread(desk)  # the principal's alert channels, sent from here only (hansa/alert.py)
-    desk.event("server_started", port=port)
-    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port}{port_note} "
-          "(run `hansa web` for the address)", flush=True)
+    if held_at is None:
+        desk.event("server_started", port=port)
+        print(f"hansa serve: desk {desk.root}; web page on {host}:{port}{port_note} "
+              "(run `hansa web` for the address)", flush=True)
+    else:
+        desk.event("server_started", port=None, page_held=held_at)
+        alert.page_held(desk, held_at)
+        print(f"hansa serve: desk {desk.root}; tasks run, but {views.page_held_text(held_at)}", flush=True)
     if dropped:
         print(f"hansa serve: {serve_session_text(dropped)}", file=sys.stderr, flush=True)
     srt = try_srt_at_start(desk)  # on this server's PATH, which runs the lanes' setups and checks
@@ -2378,6 +2434,9 @@ def cmd_web(a):
                          f"{shlex.quote(str(me))} --desk {shlex.quote(str(desk.root))} web; on this machine, hansa web. "
                          + see_more("session-identity"))
     # The key goes after #: a browser sends the fragment to no server, so no proxy on the way records it.
+    held = None if a.port else views.held_port(desk, server_state(desk))
+    if held:  # the address would hand the key to whatever holds that port
+        raise SystemExit(f"hansa: nothing was printed, as {views.page_held_text(held)}, then run hansa web again")
     print(f"Open http://127.0.0.1:{a.port or web_port(desk)}/#t={desk.web_token()}", flush=True)
     if server_state(desk)["state"] == "gone":
         print("hansa serve is not running, so the page will not open until it is: start it with "
@@ -3195,7 +3254,7 @@ def _worktree_state(desk: Desk, wt: Path, repos: list) -> dict:
         check_git_file(desk, wt, repo)  # no git through a .git file hansa did not see git write
         left = set(sandbox_leftovers(desk, wt))
         try:
-            changed = wgit(desk, wt, "diff", "--name-only", "-z", "HEAD").split("\0")
+            changed = wgit(desk, wt, "diff", "--name-only", "--ignore-submodules=all", "-z", "HEAD").split("\0")
         except RuntimeError:  # no commit at HEAD: everything is uncommitted
             changed = wgit(desk, wt, "ls-files", "-z").split("\0")
         untracked = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
@@ -4249,10 +4308,13 @@ def main(argv=None):
                      "one of its named release targets (hansa lane target L NAME \"...\"); TARGET is needed when "
                      "the lane has more than one; name the target before a one-word note that could be a target "
                      "name (hansa release L TARGET hotfix). "
-                     "hansa records the commit, the target and its command, the note, the commits that go out (with "
-                     "one remote or none: on no remote-tracking branch and not in that target's last release; the "
-                     "whole history when there is no remote-tracking branch) and the files they change. For a "
-                     "target's first release with two or more remotes, including a --fixed target, every base "
+                     "hansa records the commit, the target and its command, the note, the commits that go out and "
+                     "the files they change. When the command still matches, the range starts after the target's "
+                     "last released commit. After a target's first release, a push to a known branch also leaves "
+                     "out commits in its tracking branch. A changed command with an unknown destination uses the "
+                     "same range as a first release. In that range, with one remote or none the commits "
+                     "are those on no remote-tracking branch (the whole history when there is none). With two or "
+                     "more remotes, including for a --fixed target, every base "
                      "commit missing from at least one remote's tracking branches is counted, shown, scanned and "
                      "checked for direct commits; the heading gives each remote's missing count, and a remote with "
                      "no tracking branches lacks the whole history. A word "
@@ -4699,9 +4761,11 @@ def main(argv=None):
     p.add_argument("--all", action="store_true", help="outside a desk: start every listed desk without the menu")
     p.epilog = see_more("bringing-up")
     p = add("serve", cmd_serve, "run the dispatcher and the web page in the foreground (what hansa up starts)")
-    p.add_argument("--host", default=up.DEFAULTS["host"])
-    p.add_argument("--port", type=int, help="the web page's port; fails if taken. Default: last served port or 8765, "
-                   "then the next free port if taken")
+    p.add_argument("--host", default=up.DEFAULTS["host"], help="this machine's own address (default 127.0.0.1); "
+                   "another one only as outside:ADDRESS, where the page only shows")
+    p.add_argument("--port", type=int, help="the web page's port; fails if taken. Default: the port it was last "
+                   "served on, where a port held by something else starts the server without the page; before "
+                   "any, 8765 or the next free port")
     p.add_argument("--every", type=float, default=up.DEFAULTS["every"], help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
     p.description += (", then wait on its input, which holds an ssh tunnel to the page open, until that input ends "
