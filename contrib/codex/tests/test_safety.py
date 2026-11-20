@@ -70,6 +70,8 @@ class Runs(Scratch):
     def test_another_code_is_not_a_stop(self):
         run, code = self.run_worker("error_code_other.jsonl")
         self.assertEqual(code, 1)
+        self.assertIn("400 Bad Request", run["result"])
+        self.assertNotIn("Reading the scanner", run["result"])
         self.assertNotIn("stop_reason", run)
         self.assertFalse(hansa_run.safety_stopped(run))
 
@@ -81,7 +83,7 @@ class Runs(Scratch):
         self.assertTrue(hansa_run.safety_stopped(run))
 
     def test_a_reroute_is_a_stop_and_nothing_after_it_is_used(self):
-        # all of it written at once: the lines after the item, and Codex's last message (-o), are not read
+        # all of it written at once: the lines after the reroute include another message and usage
         run = self.stopped("safety_rerouted.jsonl")
         self.assertEqual(run["result"], "Codex: the provider's safety check stopped the run (the request was moved "
                                         "to another model; hansa-codex-shim stopped Codex)")

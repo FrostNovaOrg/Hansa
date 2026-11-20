@@ -86,7 +86,7 @@ srt --settings <tmp>/srt.json -- /bin/sh -c '<CODEX_CA_CERTIFICATE>; <source the
     -c analytics.enabled=false -c approval_policy="never" -c approvals_reviewer="user" \
     -c check_for_update_on_startup=false -c web_search="disabled" --disable apps ... --disable hooks \
     --disable memories --disable external_agent_memory_import \
-    -s danger-full-access -o <tmp>/last-message.txt -
+    -s danger-full-access -
 ```
 
 The task goes in on stdin, as hansa gives it. Why each part:

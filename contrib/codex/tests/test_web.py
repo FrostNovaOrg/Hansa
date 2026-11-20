@@ -9,7 +9,7 @@ class MemoryFeatures(unittest.TestCase):
         for conf in ({}, {"HANSA_CODEX_DISABLE": "plugins"}, {"HANSA_CODEX_DISABLE": ""}):
             for no_repo in (False, True):
                 with self.subTest(conf=conf, no_repo=no_repo):
-                    argv = shim.codex_argv("codex", "/work", "model", "high", "", "/last",
+                    argv = shim.codex_argv("codex", "/work", "model", "high", "",
                                            *shim.web_options(conf), no_repo=no_repo)
                     options = list(zip(argv, argv[1:]))
                     for feature in ("memories", "external_agent_memory_import"):

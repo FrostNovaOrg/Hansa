@@ -42,6 +42,7 @@ DEFAULT_MODEL = "gpt-6.1-sol"
 DEFAULT_EFFORT = "high"
 EFFORT_VALUES = ("low", "medium", "high", "xhigh", "max")  # the values hansa passes with --effort
 DEFAULT_MAX_TURNS = 300  # hansa always gives --max-turns; its own default
+MAX_REPORT_CHARS = 40_000 - 1  # hansa/views.py's REPORT_CHARS includes the final newline
 SETTINGS = ("HANSA_CODEX_BIN", "HANSA_CODEX_HOME", "HANSA_CODEX_MODEL", "HANSA_CODEX_EFFORT", "HANSA_CODEX_LOGS",
             "HANSA_CODEX_SRT", "HANSA_REAL_CLAUDE", "HANSA_CODEX_CA_FILE", "HANSA_CODEX_WEB_SEARCH",
             "HANSA_CODEX_DISABLE")
@@ -576,7 +577,7 @@ def toml_string(s: str) -> str:
                          for c in s) + '"'
 
 
-def codex_argv(codex: str, wt: str, model: str, effort: str, system: str, last: str,
+def codex_argv(codex: str, wt: str, model: str, effort: str, system: str,
                web_search: str = WEB_SEARCH_VALUES[0], disable=DEFAULT_DISABLE, zsh_prefix: str = "",
                no_repo: bool = False, commands_env=None) -> list:
     """codex exec's command line; `no_repo` (a check, whose folder is no git repository): --skip-git-repo-check.
@@ -592,7 +593,7 @@ def codex_argv(codex: str, wt: str, model: str, effort: str, system: str, last: 
             "-c", "check_for_update_on_startup=false",
             "-c", f"web_search={toml_string(web_search)}",
             *(x for f in (*disable, *FIXED_DISABLE) for x in ("--disable", f)),
-            "-s", "danger-full-access", "-o", last, "-"]
+            "-s", "danger-full-access", "-"]
 
 
 # ---- processes ---------------------------------------------------------------------------------------------
@@ -869,6 +870,9 @@ def error_info(ev, depth: int = 0):
 
 
 def answer(subtype: str, result: str, sid: str, turns: int = 0, model: str = "", usage=None, **extra) -> dict:
+    if len(result) > MAX_REPORT_CHARS:
+        note = "\n\n[Report truncated.]"
+        result = result[:MAX_REPORT_CHARS - len(note)] + note
     u = {model: usage} if usage else {}
     return {"type": "result", "subtype": subtype, "is_error": subtype != "success", "result": result,
             "num_turns": turns, "session_id": sid, "usage": u, "modelUsage": u, "total_cost_usd": 0,
@@ -1064,7 +1068,6 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         files.callback(shutil.rmtree, mine, ignore_errors=True)
     except OSError as e:
         return failed(str(e))
-    last = os.path.join(mine, "last-message.txt")
     lane_env = ""
     # hansa's lane env and prelude, which the sandbox may not read where it is (a check has none)
     if env.get("CLAUDE_ENV_FILE") and not check:
@@ -1089,7 +1092,7 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         cenv["TMPDIR"] = mine  # its only writable place
     zsh_prefix = cenv[ZSH_PREFIX] = os.path.join(mine, "zsh")  # in TMPDIR, which srt lets the run write
     command = [srt, "--settings", str(sfile), "--", "/bin/sh", "-c", INNER, "hansa-codex", lane_env, home, ca,
-               *codex_argv(codex, wt, model, effort, a.get("--append-system-prompt") or "", last, *web,
+               *codex_argv(codex, wt, model, effort, a.get("--append-system-prompt") or "", *web,
                           zsh_prefix=zsh_prefix, no_repo=check,
                           commands_env={k: cenv[k] for k in COMMAND_VARS if cenv.get(k) and not check})]
 
@@ -1226,10 +1229,6 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
     if rerouted:
         shutil.rmtree(mine, ignore_errors=True)
         return emit(rerouted_answer(extra))
-    try:
-        report = Path(last).read_text(encoding="utf-8").strip() or said
-    except OSError:
-        report = said
     shutil.rmtree(mine, ignore_errors=True)
     warnings = list(dict.fromkeys(warnings))
     warned = "".join(f"\n\nCodex warned: {one_line(w)}" for w in warnings)
@@ -1243,6 +1242,7 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         sys.stderr.write(f"hansa-codex-shim: the run was killed by {sig.name} (exit {code}); no answer\n")
         return 128 + sig
     if failure is None and done and code == 0:
+        report = said.strip() or said
         return emit(answer("success", report + warned, sid, len(seen), model, usage, **extra))
     # the final error: turn.failed's, else the last error event that is not a retry, else codex's stderr (a failure
     # before the start is there alone), else what the last retry said

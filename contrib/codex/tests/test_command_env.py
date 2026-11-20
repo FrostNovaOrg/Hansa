@@ -25,5 +25,5 @@ class CommandEnv(Scratch):
                           if any(a.startswith(f"shell_environment_policy.set.{k}=") for k in GIVEN)])
 
     def test_the_command_line_sets_each_as_toml(self):
-        argv = shim.codex_argv("codex", "/work", "m", "high", "", "/last", commands_env={"HANSA_PICTURES_DIR": 'a "b"'})
+        argv = shim.codex_argv("codex", "/work", "m", "high", "", commands_env={"HANSA_PICTURES_DIR": 'a "b"'})
         self.assertIn('shell_environment_policy.set.HANSA_PICTURES_DIR="a \\"b\\""', argv)
