@@ -1,6 +1,5 @@
 """A worker run on the Codex provider: the codex command, and an answer hansa reads as it reads Claude's."""
 import json
-import os
 
 from .codexkit import Scratch, hansa_run, shim
 
@@ -28,7 +27,6 @@ class CodexRun(Scratch):
         called = self.codex_called()
         argv = called["argv"]
         system = "You are a worker on task t1.\nSay \"done\" when done; C:\\path stays."
-        out = argv[argv.index("-o") + 1]
         prefix = called["env"]["TMPPREFIX"]
         self.assertEqual(argv, ["exec", "--json", "--ignore-user-config", "--ignore-rules", "--ephemeral",
                                 "--strict-config", "-C", str(self.wt), "-m", shim.DEFAULT_MODEL,
@@ -42,17 +40,15 @@ class CodexRun(Scratch):
                                 "--disable", "browser_use", "--disable", "computer_use",
                                 "--disable", "image_generation", "--disable", "multi_agent", "--disable", "hooks",
                                 "--disable", "memories", "--disable", "external_agent_memory_import",
-                                "-s", "danger-full-access", "-o", out, "-"])
+                                "-s", "danger-full-access", "-"])
         # the value is a TOML basic string; these escapes read the same in JSON
         self.assertEqual(json.loads(argv[argv.index("-c", 12) + 1].split("=", 1)[1]), system)
-        self.assertTrue(out.startswith(str(self.tmp) + "/"), "the last message is written in the run's temporary folder")
         self.assertEqual(called["stdin"], "Add hello.txt.\n")
         self.assertEqual(called["cwd"], str(self.wt))
         self.assertEqual(called["env"]["CODEX_HOME"], str(self.home))
         self.assertEqual(called["env"]["FROM_LANE_ENV"], "lane value", "the lane's env, as Claude's commands get it")
         for k in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "HANSA_CODEX_BIN", "CLAUDE_ENV_FILE"):
             self.assertIsNone(called["env"][k], k)
-        self.assertFalse(os.path.exists(out), "the run's own files are removed")
 
     def ran_model(self, run):
         """The model codex was given (-m), and the one the answer's usage is under."""

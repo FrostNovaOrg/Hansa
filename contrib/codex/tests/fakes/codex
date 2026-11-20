@@ -11,6 +11,8 @@ FAKE_CODEX_NONBLOCK: set O_NONBLOCK on stdout and write as Rust's print does: EA
 FAKE_CODEX_BIG: after the first line, a command's item.completed line of about this many bytes.
 FAKE_CODEX_SPLIT: write each line in two parts, this many seconds apart. FAKE_CODEX_NO_LAST_NEWLINE: the last
 line without its newline.
+FAKE_CODEX_OLD_REPORT: leave a symlink, directory, fifo, empty file, large file, or invalid UTF-8 at the former path.
+FAKE_CODEX_REPORT_TARGET supplies the symlink's target.
 FAKE_CODEX_KILL: after the line FAKE_CODEX_KILL_AT (0 first, default 2), start a child (its pid in the record's
 "children"), then kill itself with this signal number.
 `codex login status`: as FAKE_CODEX_STATUS says: "in" (logged in, exit 0), "out" (not logged in, exit 1), "hang"
@@ -25,6 +27,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 argv = sys.argv[1:]
 if argv[:2] == ["login", "status"]:
@@ -138,7 +141,26 @@ for n, line in enumerate(lines):
     time.sleep(delay)
 if os.environ.get("FAKE_CODEX_HANG_AFTER"):
     hang()
-if "-o" in argv and last:
+old_report = os.environ.get("FAKE_CODEX_OLD_REPORT")
+if old_report:
+    path = Path(os.environ["TMPPREFIX"]).with_name("last-message.txt")
+    if old_report == "symlink":
+        path.symlink_to(os.environ["FAKE_CODEX_REPORT_TARGET"])
+    elif old_report == "directory":
+        path.mkdir()
+    elif old_report == "fifo":
+        os.mkfifo(path)
+    elif old_report == "empty":
+        path.touch()
+    elif old_report == "large":
+        with path.open("wb") as f:
+            f.write(b"old report data\n")
+            f.truncate(2 * 1024 * 1024)
+    elif old_report == "invalid UTF-8":
+        path.write_bytes(b"\xff\xfe")
+    else:
+        raise ValueError(old_report)
+elif "-o" in argv and last:
     with open(argv[argv.index("-o") + 1], "w") as f:
         f.write(last)
 if os.environ.get("FAKE_CODEX_DONE"):
