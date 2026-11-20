@@ -172,17 +172,20 @@ conversation, but for two cases: a follow-up may go on in the conversation of th
 verification of the same task in the earlier verification's ([A repeated verification](tasks.md#a-repeated-verification)).
 
 Hansa gives each Claude Code worker an explicit list of built-in tools with `--tools`.
-The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit` and sandboxed
-`Bash`. Bench commands run through Bash.
+The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit`, sandboxed
+`Bash`, a checklist of its own (`TodoWrite`) and local subagents (`Agent`). Bench commands
+run through Bash.
 
-**Workers have no built-in checklist on Claude Code 2.1.329 with its default task tools.**
+**Workers keep their checklist with `TodoWrite`, not the task tools, on Claude Code 2.1.329.**
 `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` normally use the current session's
 list. Claude Code can select a shared list through `CLAUDE_CODE_TASK_LIST_ID`, and in
 team mode `TaskUpdate` can send an assignment to a teammate. Hansa starts workers
 without inherited list or team variables. Claude Code can still apply those variables
 from settings after launch, and managed settings take precedence over hansa's command-line
-settings. Hansa therefore denies all four tools. Workers can use `TodoWrite` on releases
-that offer it.
+settings. Hansa therefore denies all four tools, and starts Claude Code workers with
+`CLAUDE_CODE_ENABLE_TASKS=0`, so that Claude Code offers `TodoWrite` in their place: its
+list is kept in the session's memory, takes no list name, and cannot be pointed at another
+session's.
 
 Workers can watch a running command with `Monitor` and stop a job with `TaskStop`
 (`KillShell` in older versions). Hansa also allows `TaskOutput` and its older name
@@ -194,9 +197,18 @@ govern its WebSocket form.
 The lane can also grant `WebSearch` and site-specific `WebFetch`. A lane permission can approve
 the use of an available tool. Adding another built-in name to the lane cannot enable that tool.
 Hansa denies the known session, team, scheduling, project and connector tools by name.
-Claude Code's `Agent` can deliver a prompt to a teammate or start a cloud session, so workers
-also forgo ordinary subagents. `Skill` can fork an agent and `ToolSearch` can reconnect to
-MCP servers. Workers can read project skill instructions with `Read`.
+Claude Code's `Agent` can also deliver a prompt to a teammate or start a cloud session, so a
+hook lets a worker's launch through only with `prompt`, `description`, `subagent_type`,
+`model`, `effort` and `run_in_background`, and only for a subagent type whose definition holds
+no more than `name`, `description`, `tools`, `disallowedTools`, `model`, `effort`, `color` and
+`maxTurns`. Anything else (a name, a team, isolation, a field hansa does not know yet) is refused
+before anything is sent, as is every launch when the hook cannot run. A subagent has no tool
+its worker lacks: the worker's list, its denies and this hook hold inside it too. A repository
+that sets `disableAllHooks` does not turn the hook off, but the principal's managed settings
+(`disableAllHooks`, `allowManagedHooksOnly`) do, and then every form of `Agent` is open. The hook
+can go once Claude Code can be told to start local subagents only.
+`Skill` can fork an agent and `ToolSearch` can reconnect to MCP servers. Workers can read
+project skill instructions with `Read`.
 Verifications, follow-ups, resumes and wrap-ups use the same list, including when a saved
 command predates an upgrade. Newly introduced built-ins stay outside the list.
 `hansa ping` uses an empty list.
