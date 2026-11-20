@@ -3114,6 +3114,13 @@ class UpTest(unittest.TestCase):
         write_json(self.desk.state_dir / "serve-start.json", rec)
         return rec
 
+    def list_hansa(self, command):
+        """Put this desk on the account's list of desks with this hansa, as that installation's serve start would
+        (up.list_desk): hansa up starts a recorded hansa only when it is this one or one on that list."""
+        from hansa.desk import desks_file
+        desks_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(desks_file(), [{"desk": str(self.desk.root), "hansa": str(command), "at": 1}])
+
     def fake_serve(self, bind, *args):
         from hansa import web
         dispatcher = types.SimpleNamespace(tick=unittest.mock.Mock(side_effect=KeyboardInterrupt))
@@ -3540,6 +3547,7 @@ class UpTest(unittest.TestCase):
 
     def test_up_tmux_restores_command_location_clean_environment_and_pane_logging(self):
         from hansa import up
+        self.list_hansa("/opt/old hansa/bin/hansa")  # the installation that recorded the start, on the list
         rec = self.record(hansa="/opt/old hansa/bin/hansa", env={"PATH": "/saved/bin:/usr/bin:/bin", "LANG": "C",
                          "HANSA_CLAUDE": "/saved/adapter", "LC_TIME": "C", "CLAUDE_CODE_SESSION_ID": "stale",
                          "ANTHROPIC_API_KEY": "stale-key"},
@@ -3652,6 +3660,144 @@ class UpTest(unittest.TestCase):
         spawned.assert_not_called()
         ran.assert_not_called()
 
+    def test_up_starts_a_recorded_program_only_when_it_is_hansa_or_claude(self):
+        from hansa import up
+        marker = self.tmp / "ran"
+        other = self.tmp / "notes-x" / "bin" / "hansa"  # named hansa, written where a session writes
+        other.parent.mkdir(parents=True)
+        other.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n")
+        other.chmod(0o755)
+        claude = self.tmp / "bin" / "claude"
+        claude.parent.mkdir()
+        claude.write_text("#!/bin/sh\nexit 0\n")
+        claude.chmod(0o755)
+        os.environ["HANSA_CLAUDE"] = str(claude)
+        mine = {"PATH": os.environ["PATH"], "HANSA_CLAUDE": str(claude)}
+        notify_rec = {"kind": "notify", "argv": ["claude"], "folder": str(self.desk.root), "env": mine,
+                      "hansa": up.hansa_command()}
+        cases = {
+            "serve's hansa": ({"hansa": str(other), "env": mine}, None, "the hansa it names"),
+            "serve's claude": ({"env": {**mine, "HANSA_CLAUDE": str(other)}}, None, "the claude its environment names"),
+            "session's hansa": (None, {**notify_rec, "hansa": str(other)}, "the hansa it names"),
+            "session's claude": (None, {**notify_rec, "env": {**mine, "HANSA_CLAUDE": sys.executable}},
+                                 "the claude its environment names"),
+            "session's words": (None, {**notify_rec, "argv": [str(other), "-c", "x"]}, "its session's words name"),
+            # a folder inside a desk, where a session or a worker writes, in the saved variables
+            "serve's PATH": ({"env": {**mine, "PATH": f"{self.desk.root / 'notes' / 'x' / 'bin'}:/usr/bin"}}, None,
+                             "its PATH names"),
+            "serve's relative PATH": ({"env": {**mine, "PATH": "bin:/usr/bin"}}, None, "its PATH names bin"),
+            "serve's tmux": ({"env": {**mine, "HANSA_TMUX": str(self.desk.root / "notes" / "tmux")}}, None,
+                             "its HANSA_TMUX names"),
+            "session's claude settings": (None, {**notify_rec, "env": {**mine, "CLAUDE_CONFIG_DIR": str(
+                self.desk.root / "notes" / "cfg")}}, "its CLAUDE_CONFIG_DIR names"),
+        }
+        for name, (serve, coordinator, said) in cases.items():
+            with self.subTest(name), unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                    unittest.mock.patch.object(up, "coordinator_up") as coordinated, \
+                    unittest.mock.patch.object(up.subprocess, "run") as ran, \
+                    unittest.mock.patch.object(up.subprocess, "Popen") as spawned:
+                (self.desk.state_dir / up.COORDINATOR_START).unlink(missing_ok=True)
+                self.record(**(serve or {}))
+                if coordinator:
+                    write_json(self.desk.state_dir / up.COORDINATOR_START, coordinator)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                    self.say("up")
+                self.assertIn(said, err.getvalue())
+                self.assertIn("hansa up started nothing", err.getvalue())
+                self.assertEqual(err.getvalue().strip().count("\n"), 0, "one sentence")
+                ran.assert_not_called()
+                spawned.assert_not_called()
+                coordinated.assert_not_called()
+                self.assertFalse(marker.exists())
+        # this installation, or one on the account's list, and the claude this hansa finds: as before
+        (self.desk.state_dir / up.COORDINATOR_START).unlink(missing_ok=True)
+        self.record(env=mine)
+        write_json(self.desk.state_dir / up.COORDINATOR_START, notify_rec)
+        self.assertEqual(up.recorded_start_problem(self.desk), "")
+        self.list_hansa(other)
+        self.record(hansa=str(other), env=mine)
+        self.assertEqual(up.recorded_start_problem(self.desk), "")
+
+    def runnable(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755)
+        return path
+
+    def up_with(self, recorded: dict) -> str:
+        """hansa up on a serve record of these saved variables, the server's start and the coordinator's left out:
+        what it said on stderr, '' when it went on to start the server."""
+        from hansa import up
+        self.record(env=recorded)
+        err = io.StringIO()
+        with unittest.mock.patch.object(up, "server_up", return_value=True) as served, \
+                unittest.mock.patch.object(up, "coordinator_up", return_value=True), contextlib.redirect_stderr(err):
+            try:
+                self.say("up")
+            except SystemExit:
+                pass
+        self.assertEqual(served.called, not err.getvalue(), err.getvalue())
+        return err.getvalue()
+
+    def test_up_starts_a_recorded_claude_at_the_standard_place_or_this_shells_from_cron_or_ssh(self):
+        standard = self.runnable(Path(os.path.expanduser("~/.local/bin/claude")))  # HOME is the test's folder
+        self.assertTrue(str(standard).startswith(str(self.tmp)))
+        bare = {"PATH": "/usr/bin:/bin"}  # cron's or ssh's PATH, without the folder claude is in
+        os.environ.pop("HANSA_CLAUDE", None)
+        other = self.runnable(self.tmp / "npm" / "claude")  # another claude this shell's PATH finds
+        for shell in ({"PATH": bare["PATH"]}, {"PATH": f"{other.parent}:/usr/bin:/bin"},
+                      {"PATH": bare["PATH"], "HANSA_CLAUDE": str(other)},
+                      {"PATH": bare["PATH"], "HANSA_CLAUDE": str(self.tmp / "gone" / "claude")}):
+            for saved in ({**bare, "HANSA_CLAUDE": str(standard)}, {"PATH": f"{standard.parent}:/usr/bin"}, bare):
+                with self.subTest(shell=shell, saved=saved), unittest.mock.patch.dict(os.environ, shell):
+                    if "HANSA_CLAUDE" not in shell:
+                        os.environ.pop("HANSA_CLAUDE", None)
+                    self.assertEqual(self.up_with(saved), "")
+        # the claude this shell finds, wherever it is, as before
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{other.parent}:/usr/bin:/bin"}):
+            self.assertEqual(self.up_with({"PATH": f"{other.parent}:/usr/bin"}), "")
+
+    def test_up_refuses_a_recorded_claude_elsewhere_that_this_shell_does_not_find(self):
+        elsewhere = self.runnable(self.tmp / "opt" / "claude")
+        os.environ.pop("HANSA_CLAUDE", None)
+        for saved in ({"PATH": "/usr/bin", "HANSA_CLAUDE": str(elsewhere)}, {"PATH": f"{elsewhere.parent}:/usr/bin"}):
+            with self.subTest(saved=saved), unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+                said = self.up_with(saved)
+                self.assertIn(f"the claude its environment names ({elsewhere})", said)
+                self.assertIn("set PATH or HANSA_CLAUDE in the shell that runs hansa up", said)
+                self.assertIn("this shell finds (none)", said)
+                self.assertEqual(said.strip().count("\n"), 0, "one sentence")
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{elsewhere.parent}:/usr/bin:/bin"}):  # as said: it starts
+            self.assertEqual(self.up_with({"PATH": "/usr/bin", "HANSA_CLAUDE": str(elsewhere)}), "")
+
+    def test_up_starts_a_recorded_codex_adapter_shipped_in_an_installation_and_no_copy(self):
+        from hansa import up
+        adapter_at = os.path.join("contrib", "codex", "bin", "claude-or-codex")  # in an installation
+        shipped = Path(up.__file__).absolute().parent.parent / adapter_at  # this hansa's own
+        self.assertTrue(shipped.is_file(), shipped)
+        install = self.tmp / "other hansa"  # an installation on the account's list
+        self.runnable(install / "bin" / "hansa")
+        theirs = self.runnable(install / adapter_at)
+        self.list_hansa(install / "bin" / "hansa")
+        link = self.tmp / "links" / "claude-or-codex"
+        link.parent.mkdir()
+        link.symlink_to(shipped)  # a link to the shipped file runs that file
+        os.environ.pop("HANSA_CLAUDE", None)
+        with unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            for adapter in (shipped, theirs, link):
+                with self.subTest(adapter=str(adapter)):
+                    self.assertEqual(self.up_with({"PATH": "/usr/bin", "HANSA_CLAUDE": str(adapter)}), "")
+            copy = self.tmp / "copied" / "contrib" / "codex" / "bin" / "claude-or-codex"  # same name and bytes
+            copy.parent.mkdir(parents=True)
+            shutil.copy2(shipped, copy)
+            unlisted = self.runnable(self.tmp / "unlisted" / adapter_at)  # an installation not on the list
+            for adapter in (copy, unlisted, self.runnable(self.tmp / "any" / "program")):
+                with self.subTest(adapter=str(adapter)):
+                    said = self.up_with({"PATH": "/usr/bin", "HANSA_CLAUDE": str(adapter)})
+                    self.assertIn(f"the claude its environment names ({adapter})", said)
+                    self.assertIn("nor hansa's own Codex adapter", said)
+
     def test_up_uses_account_identity(self):
         from hansa import up
         self.record(env={"PATH": os.environ["PATH"], "USER": "saved-user", "LOGNAME": "saved-name"})
@@ -3698,6 +3844,7 @@ class UpTest(unittest.TestCase):
             signal.pause()
             """))
         executable.chmod(0o755)
+        self.list_hansa(executable)
         self.record(hansa=str(executable), env={"PATH": os.environ["PATH"], "LANG": "C"})
         os.environ.update(ANTHROPIC_API_KEY="caller-key", UNRELATED="caller", CLAUDE_CODE_SESSION_ID="session")
         (self.desk.state_dir / "serve.log").write_text("previous start\n")
@@ -25905,6 +26052,11 @@ def save():'''))
                             {"pid": p.pid, "start": notify.proc_start(p.pid)}))
                         self.assertLessEqual(follower["from"], notify.log_end(self.desk))
                         self.desk.update(tid, state="done", finished=at, error="")
+                        # the stand-in session is python, not claude: its record names claude, as a real one's would,
+                        # or hansa up starts nothing (up.recorded_start_problem)
+                        rec = up.read_coordinator(self.desk)
+                        write_json(self.desk.state_dir / up.COORDINATOR_START,
+                                   {**rec, "argv": ["claude", *rec["argv"][1:]]})
                         pos = notify.log_end(self.desk)
                         self.start_server_once(command)
                         ends = [e for e in self.events("task_finished") if e.get("task") == tid]
@@ -29029,6 +29181,100 @@ def save():'''))
                 self.assertIsNone(Desk.find(optional=True))
             with unittest.mock.patch.object(account, "uid", return_value=0):  # root, for the desk's account
                 self.assertEqual(Desk.find().root, root)
+
+    def look_alike(self, folder: Path) -> Path:
+        """A folder that looks like a desk (a settings.json and tasks/, as a session may write under notes/), with a
+        tick of its own that a release goes out without asking."""
+        folder.mkdir(parents=True)
+        (folder / "tasks").mkdir()
+        s = self.desk.settings()
+        s["lanes"]["a"]["targets"] = {"t": {"command": "true", "ask": False}}
+        (folder / "settings.json").write_text(json.dumps(s))
+        return folder
+
+    def test_a_folder_inside_a_desk_is_no_desk_of_its_own_from_a_session_or_a_run(self):
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        root = self.desk.root
+        places = [self.look_alike(root / "notes" / "x"), self.look_alike(root / "worktrees" / "a" / "deep" / "x"),
+                  self.look_alike(root / ".hansa" / "other")]
+        callers = {"session": {"CLAUDECODE": "1", "CLAUDE_PID": str(os.getpid())}, "run": {"HANSA_TASK": "t0001"}}
+        for (who, env), place, how in [(c, p, h) for c in callers.items() for p in places
+                                       for h in ("cwd", "--desk", "HANSA_DESK")]:
+            if True:
+                with self.subTest(who=who, place=str(place.relative_to(root)), how=how), \
+                        unittest.mock.patch.dict(os.environ, env):
+                    os.chdir(place if how == "cwd" else here)
+                    argv = (["--desk", str(place)] if how == "--desk" else []) + ["release", "a", "t"]
+                    named = {"HANSA_DESK": str(place)} if how == "HANSA_DESK" else {}
+                    with unittest.mock.patch.dict(os.environ, named):
+                        with self.assertRaises(SystemExit) as said:
+                            main(argv)
+                        with self.assertRaises(SystemExit):  # optional finding (hansa up) refuses too
+                            Desk.find(str(place) if how == "--desk" else None, optional=True)
+                    self.assertIn(f"lies inside the desk at {root}", str(said.exception))
+                    self.assertIn("nothing was done", str(said.exception))
+                    self.assertEqual(str(said.exception).count(". "), 0, "one sentence")
+                    self.assertFalse((place / "events.jsonl").exists())
+                    self.assertFalse((place / "releases").exists())
+        # the outer desk itself, and a desk elsewhere, as before
+        other = init_desk(self.tmp / "other desk", str(self.repo), "a")
+        with unittest.mock.patch.dict(os.environ, callers["session"]):
+            os.chdir(root / "notes")
+            self.assertEqual(Desk.find().root, root)
+            self.assertEqual(Desk.find(str(root)).root, root)
+            self.assertEqual(Desk.find(str(other.root)).root, other.root)
+            os.chdir(other.root / "tasks")
+            self.assertEqual(Desk.find().root, other.root)
+
+    def test_hansa_init_and_example_make_no_desk_inside_a_desk_from_a_session_or_a_run(self):
+        for env in ({"CLAUDECODE": "1"}, {"HANSA_TASK": "t0001"}):
+            with self.subTest(env=env), unittest.mock.patch.dict(os.environ, env):
+                for argv, made in ((["init", str(self.desk.root / "notes" / "y")], self.desk.root / "notes" / "y"),
+                                   (["example", str(self.desk.root / "notes" / "z")], self.desk.root / "notes" / "z")):
+                    with self.assertRaises(SystemExit) as said:
+                        main(argv)
+                    self.assertIn(f"lies inside the desk at {self.desk.root}", str(said.exception))
+                    self.assertFalse(made.exists())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            main(["init", str(self.tmp / "beside")])  # beside the desk: as before
+        self.assertTrue(Desk(self.tmp / "beside").is_desk())
+
+    def test_a_desk_inside_a_desk_stays_usable_from_the_principals_terminal_and_root_handing_over(self):
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        place = self.look_alike(self.desk.root / "notes" / "x")
+        os.chdir(place)
+        self.assertEqual(Desk.find().root, place)  # no session's variables, no run: as before
+        self.assertEqual(Desk.find(str(place)).root, place)
+        with unittest.mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), \
+                unittest.mock.patch.object(up, "handed_from_root", return_value=True):
+            self.assertEqual(Desk.find().root, place)  # root's hansa, which asked already, hands over
+
+    def test_a_desk_in_a_lanes_repository_and_a_checks_desks_in_hansa_tmp_are_taken_from_a_run(self):
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        holder = init_desk(self.tmp / "repo" / "desk", str(self.repo), "a")  # a desk inside a lane's repository
+        # what a lane's check running hansa's own tests makes on Linux: its TMPDIR in the desk's .hansa/tmp
+        tests_tmp = self.desk.state_dir / RUN_TMP_DIR / "hansa-check-x" / "tmpabc"
+        made = init_desk(tests_tmp / "desk", str(self.repo), "a")
+        inner = self.look_alike(made.root / "notes" / "x")  # inside that one's notes/: no desk
+        for env in ({"HANSA_TASK": "t0001"}, {"CLAUDECODE": "1"}):
+            with self.subTest(env=env), unittest.mock.patch.dict(os.environ, env):
+                self.assertEqual(Desk.find(str(holder.root)).root, holder.root)
+                self.assertEqual(Desk.find(str(made.root)).root, made.root)
+                os.chdir(made.tasks_dir)
+                self.assertEqual(Desk.find().root, made.root)
+                with self.assertRaises(SystemExit) as said:
+                    Desk.find(str(inner))
+                self.assertIn(f"lies inside the desk at {made.root}", str(said.exception))
+                # no switch of the caller's moves a look-alike there: TMPDIR naming it changes nothing
+                with unittest.mock.patch.dict(os.environ, {"TMPDIR": str(self.desk.root / "notes")}):
+                    lone = self.desk.root / "notes" / "lone"
+                    if not lone.exists():
+                        self.look_alike(lone)
+                    with self.assertRaises(SystemExit):
+                        Desk.find(str(lone))
 
     def test_the_page_key_file_is_made_0600_or_refused_when_another_account_owns_it(self):
         f = self.desk.state_dir / "web-token"

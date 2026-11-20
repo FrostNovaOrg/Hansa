@@ -52,7 +52,13 @@ other hidden desks and other providers' homes. These checks prevent saving a pro
 A desk may still reach Codex the old way: `hansa serve` started with `HANSA_CLAUDE` pointing at the adapter, a
 `compatible` provider with the address `http://codex.invalid` and a made-up key, and the adapter's settings in
 `contrib/codex/codex.env`. That keeps working, as the adapter's README describes; there the principal keeps the
-Codex home on the list of folders workers may not read. `hansa explain provider NAME` and the provider's card on
+Codex home on the list of folders workers may not read. `hansa up` starts such a desk again, from a shell without
+`HANSA_CLAUDE` too, when that variable names the adapter shipped with hansa: `contrib/codex/bin/claude-or-codex`
+inside the running hansa or inside an installation on the account's list of desks (a link to it counts; a copy
+elsewhere does not). For an adapter copied somewhere else, `hansa up` starts nothing and says so: point
+`HANSA_CLAUDE` at the shipped adapter and start `hansa serve` again, or, better, change the provider to the kind
+Codex (below), whose own setting names the program, so `hansa serve` needs no `HANSA_CLAUDE`
+([what hansa up starts](desk.md#starting-the-server-and-the-coordinator-again)). `hansa explain provider NAME` and the provider's card on
 the page say that such a provider can be changed.
 
 ## Upgrading
