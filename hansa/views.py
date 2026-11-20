@@ -1117,6 +1117,7 @@ def status(desk: Desk) -> dict:
                                                                         r.get("name") or ""))
                   for r in followers] if hearing else [],
         "coordinator_start": "" if hearing else up.coordinator_line(desk),  # what hansa up does about the session
+        "old_rules": up.old_rules_line(desk),  # the desk's session settings are an older hansa's
         "start_words": up.unasked_line(desk),  # the recorded start switches permission questions off
         "card_note": up.card_note(desk),  # the recorded session's folder does not load the card (the desk's CLAUDE.md)
         "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
@@ -1360,6 +1361,7 @@ def status_text(st: dict) -> str:
         out.append(up.session_line(session))
     out += [st["coordinator_start"]] if st.get("coordinator_start") and not st.get("notifying") else []
     out += [st["start_words"]] if st.get("start_words") else []
+    out += [st["old_rules"]] if st.get("old_rules") else []
     out += st.get("turns") or []
     out += st.get("unreached") or []
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \

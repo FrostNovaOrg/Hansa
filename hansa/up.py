@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import SESSION, SESSION_PREFIXES, account, notify, session_value, without_session
 from .desk import Desk, _desks_entries, desks_file, desks_list_problem, listed_desks, now, program, read_json, write_json, write_text
-from .run import alive, proc_args, proc_cwd, proc_start, server_state
+from .run import alive, proc_args, proc_cwd, proc_start, process_table, server_state
 
 DEFAULTS = {"host": "127.0.0.1", "port": 8765, "every": 3.0}
 START_ENV = ("PATH", "LANG", "HANSA_CLAUDE", "HANSA_TMUX", "CLAUDE_CONFIG_DIR", "TMPDIR",
@@ -441,14 +441,22 @@ def turns_dir(desk: Desk) -> Path:
     return desk.state_dir / TURNS_DIR
 
 
+def hook_shape(data) -> bool:
+    """Whether a hook's input has the shape Claude Code gives every hook: the event's name, the session's id and
+    the transcript's absolute path."""
+    return isinstance(data, dict) and isinstance(data.get("hook_event_name"), str) \
+        and isinstance(data.get("session_id"), str) and bool(CONVERSATION_ID.fullmatch(data["session_id"])) \
+        and isinstance(data.get("transcript_path"), str) and os.path.isabs(data["transcript_path"])
+
+
 def turn_input(raw: str) -> dict | None:
     """Of a Stop or StopFailure hook's input, only what the record keeps: the event and the error type. None when
-    the input is not such a hook's."""
+    the input is not such a hook's, in the shape Claude Code gives it (hook_shape)."""
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
         return None
-    if not isinstance(data, dict) or data.get("hook_event_name") not in TURN_EVENTS:
+    if not hook_shape(data) or data.get("hook_event_name") not in TURN_EVENTS:
         return None
     err = data.get("error")
     return {"hook_event_name": data["hook_event_name"],
@@ -633,27 +641,78 @@ def conversation_of(desk: Desk, sid, transcript: str = "") -> dict:
 
 def conversation_input(raw: str) -> dict | None:
     """Of a coordinator's hook's input (Stop, StopFailure, or SessionStart after a /clear), the conversation it
-    names: {'id': its session id, 'transcript': its transcript's absolute path, or ''}. None when it names none."""
+    names: {'id': its session id, 'transcript': its transcript's absolute path}, and 'cleared': True for the
+    SessionStart after a /clear, the one event that gives the session a new conversation. None when it names none
+    or is not in the shape Claude Code gives (hook_shape)."""
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
         return None
-    if not isinstance(data, dict) or data.get("hook_event_name") not in (*TURN_EVENTS, "SessionStart"):
+    if not hook_shape(data) or data["hook_event_name"] not in (*TURN_EVENTS, "SessionStart") or (
+            data["hook_event_name"] == "SessionStart" and data.get("source") != "clear"):
         return None
-    sid, path = data.get("session_id"), data.get("transcript_path")
-    if not isinstance(sid, str) or not CONVERSATION_ID.fullmatch(sid):
-        return None
-    return {"id": sid, "transcript": path if isinstance(path, str) and os.path.isabs(path) else ""}
+    return {"id": data["session_id"], "transcript": data["transcript_path"],
+            **({"cleared": True} if data["hook_event_name"] == "SessionStart" else {})}
+
+
+def ancestors() -> list:
+    """The pids of this process's ancestors, its parent first, as far as this account's process list shows them
+    (only the parent when the list cannot be read). The tests give their made-up sessions through it."""
+    table, out, pid = process_table(), [], os.getppid()
+    while pid > 1 and pid not in out:
+        out.append(pid)
+        pid = (table.get(pid) or (0,))[0]
+    return out
+
+
+def handed_from_root() -> bool:
+    """Whether root's hansa runs this one as the desk's account (account.run, through runuser): on Linux, as an
+    account other than root, with a parent process root owns. A command of the account's own cannot have one."""
+    try:
+        return account.LINUX and os.getuid() != 0 and os.stat(f"/proc/{os.getppid()}").st_uid == 0
+    except OSError:
+        return False
+
+
+def session_call_problem(desk: Desk, pid, sid: str = "", recorded: bool = True) -> str:
+    """Why a hook of the coordinator's session (coordinator-turn, coordinator-cleared) may not act for the session
+    with this pid: '' when that process is an ancestor of this one (the session the hook runs in) and, when
+    recorded, the coordinator's session the desk's start record names (still running), and the input's session id,
+    when given, is the conversation that record names (when it names one). pid None: whichever of this process's
+    ancestors the record names."""
+    up_the_line = ancestors()
+    rec = read_coordinator(desk) if recorded else {}
+    mine = still_runs(rec) if recorded else None
+    if pid is None:
+        pid = mine
+    if not isinstance(pid, int) or pid <= 0 or pid not in up_the_line:
+        return "it is not run by the coordinator's session it names"
+    if recorded and mine != pid:
+        return f"process {pid} is not the coordinator's session this desk recorded"
+    conv = rec.get("conversation") if isinstance(rec.get("conversation"), dict) else {}
+    if sid and isinstance(conv.get("id"), str) and conv["id"] != sid:
+        return "its input names another conversation than the one this desk recorded for the session"
+    return ""
 
 
 def record_conversation(desk: Desk, pid: int, conv: dict) -> None:
     """Keep in the coordinator's start record the conversation its session runs now (conversation_input's), as its
-    hooks give it: at each turn's end, and after a /clear, which gives the session a new id. Only for the recorded
-    session (this pid, started when the record says), and only when it changed."""
+    hooks give it: at each turn's end its transcript, once the record names no other conversation; after a /clear,
+    which gives the session a new id, that id, when its transcript is a file in the same folder as the recorded
+    one's. Only for the recorded session (this pid, started when the record says), and only when it changed."""
     rec = read_coordinator(desk)
-    if rec.get("kind") not in ("coordinator", "notify") or still_runs(rec) != pid or rec.get("conversation") == conv:
+    if rec.get("kind") not in ("coordinator", "notify") or still_runs(rec) != pid:
         return
-    write_json(desk.state_dir / COORDINATOR_START, {**rec, "conversation": conv})
+    old = rec.get("conversation") if isinstance(rec.get("conversation"), dict) else {}
+    new = {"id": conv["id"], "transcript": conv["transcript"]}
+    if conv.get("cleared"):
+        if old.get("transcript") and (os.path.dirname(old["transcript"]) != os.path.dirname(new["transcript"])
+                                      or not os.path.isfile(new["transcript"])):
+            return
+    elif isinstance(old.get("id"), str) and old["id"] != new["id"]:
+        return  # a turn's end never moves the record to another conversation
+    if rec.get("conversation") != new:
+        write_json(desk.state_dir / COORDINATOR_START, {**rec, "conversation": new})
 
 
 def transcript_of(env: dict, sid: str) -> str:
@@ -1410,6 +1469,32 @@ def _card_note(desk: Desk) -> str:
         return ("the recorded session does not read the card, and hansa puts no copy in its folder: rules there "
                 "reach every session of the account (hansa explain notify)")
     return f"the recorded session does not read the card: add {c['line']} to its CLAUDE.md (hansa explain notify)"
+
+
+# The commands the card lists, each allowed in the coordinator's session without a question (cli.permissions)
+CARD_COMMANDS = ("status", "desks", "add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close",
+                 "notify", "wait", "pause", "resume", "explain", "lane", "hide", "concurrency", "disk-floor",
+                 "memory-floor", "cost", "ask", "release", "changelog", "notes", "gaps", "goal", "decide",
+                 "decisions", "ping", "help")
+WIDE_RULE = "Bash(hansa:*)"  # what an older hansa allowed: every hansa command, without a question
+
+
+def old_rules_line(desk: Desk) -> str:
+    """For hansa status: one line while the desk's .claude/settings.json, which a session in the desk reads, still
+    allows every hansa command without a question (WIDE_RULE, as hansa wrote it before) or lacks a rule of
+    CARD_COMMANDS; '' otherwise, when it cannot be read, or on another account's desk (root's session has its own)."""
+    if account.desk_account(desk.root):
+        return ""
+    s = read_json(desk.root / ".claude" / "settings.json", None)
+    allow = (s.get("permissions") or {}).get("allow") if isinstance(s, dict) and isinstance(s.get("permissions"), dict) \
+        else None
+    if not isinstance(allow, list):
+        return ""
+    if WIDE_RULE not in allow and all(f"Bash(hansa {c}:*)" in allow for c in CARD_COMMANDS):
+        return ""
+    return ("the coordinator's session still runs on settings from an older hansa, which let it run any hansa command "
+            "without asking you: close that session and start it again with hansa coordinator in a terminal of yours "
+            "(or hansa up, when hansa coordinator started it last), which writes the new settings")
 
 
 # claude's words that switch its permission questions off, in whole or for some tools: hansa status names them in the

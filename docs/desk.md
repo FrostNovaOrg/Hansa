@@ -1618,8 +1618,18 @@ session runs, the session's id (a UUID) and the transcript's path from the
 hook's input, in the start record (`.hansa/coordinator-start.json`,
 `conversation`), when that record is of this session (pid `N`, started when
 the record says) and the conversation changed; that is what `hansa up`
-resumes. Missing or malformed input writes nothing, and the command always
-exits 0. As root on an account's desk, root passes only the event and the
+resumes. A turn's end only fills in the transcript of the conversation the
+record names; only the `SessionStart` after a `/clear` gives it a new id, and
+only with a transcript beside the recorded one's.
+
+Both hooks act only for the session they run in: `N` must be an ancestor
+process of the command and the coordinator's session the start record names
+(`coordinator-cleared` looks for that session among its ancestors), and a
+`Stop` or `StopFailure` input must name the conversation that record names.
+Input not in the shape Claude Code gives (the event, the session's id, the
+transcript's absolute path) or any other call writes nothing and exits 1 with
+one line; other problems write nothing and exit 0. As root on an account's
+desk, root checks the ancestry and passes only the event and the
 error type to the account's hansa, which writes the turn's record; root keeps
 no start record. `hansa serve` removes, as it starts,
 the records of sessions whose process is gone (`up.sweep_turns`); it leaves

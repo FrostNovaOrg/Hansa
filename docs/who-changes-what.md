@@ -126,8 +126,9 @@ may run other commands the principal's work needs, such as installing software
 a lane needs or setting up a tool, and says in plain words what the command
 does and why. hansa's own steps that it gives no help text (the follower, the
 start `hansa up` makes, root's handoff to the desk's account) refuse a call
-from a Claude Code session's shell; the start `hansa up` makes runs only the
-claude the desk uses; and `hansa coordinator` starts only from the principal's own
+from a Claude Code session's shell, and the session's own hooks act only for
+the session they run in; the start `hansa up` makes runs only the claude the
+desk uses; and `hansa coordinator` starts only from the principal's own
 terminal. Who stopped, asked, paused or marked something is recorded as the
 coordinator for every command run in a Claude Code session, whatever
 `HANSA_ROLE` says there. It has three helpers: `scout` and `reviewer` only

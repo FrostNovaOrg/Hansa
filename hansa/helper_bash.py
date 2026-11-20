@@ -11,6 +11,12 @@ import sys
 # programs that only read, as a helper runs them (find without its actions that run or write, below)
 READERS = {"grep", "rg", "find", "ls", "cat", "head", "tail", "wc", "file", "stat", "pwd", "diff"}
 FIND_ACTIONS = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
+# options of the reading commands that run a program or write a file: refused in any spelling (--opt=value too).
+# rg: --pre runs a program on each file, --pre-glob picks the files for it, -z/--search-zip runs decompressors,
+# --hostname-bin runs a program for its links; file: -C/--compile writes a compiled magic file. A long option given
+# by the start of its name (getopt takes those) counts as the option
+RUNS_OR_WRITES = {"rg": ("--pre", "--pre-glob", "--search-zip", "--hostname-bin"), "file": ("--compile",)}
+SHORT_RUNS_OR_WRITES = {"rg": "z", "file": "C"}
 # hansa's commands that read: the words after hansa, each alone or with what may follow it
 HANSA_READERS = {"show", "diff", "git", "status", "explain", "help", "decisions", "changelog", "cost", "desks"}
 HANSA_READING_FORMS = {"goal": ("list", "show"), "gaps": ("", "--all", "show"), "lane": ("",)}
@@ -34,6 +40,14 @@ def refusal(command: str) -> str:
     if first in READERS:
         if first == "find" and FIND_ACTIONS & set(rest):
             return "find runs or writes there"
+        for w in rest:
+            if w == "--":
+                break
+            name = w.partition("=")[0]
+            if w.startswith("--") and len(name) > 3 and any(r.startswith(name) for r in RUNS_OR_WRITES.get(first, ())):
+                return f"{first} {name} runs a program or writes a file"
+            if w.startswith("-") and not w.startswith("--") and set(w[1:]) & set(SHORT_RUNS_OR_WRITES.get(first, "")):
+                return f"{first} {w} runs a program or writes a file"
         return ""
     if first != "hansa":
         return f"{first} is not one of the reading commands"

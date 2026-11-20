@@ -126,16 +126,13 @@ HOOK_COMMANDS = ("coordinator-cleared", "coordinator-turn")
 # The commands the card lists, each allowed in the coordinator's session without a question (permissions): one rule
 # each, matched from the start of the command line, so a hidden command, an unknown word or options before the
 # command (hansa --desk X ...) are asked about like any other command
-CARD_COMMANDS = ("status", "desks", "add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close",
-                 "notify", "wait", "pause", "resume", "explain", "lane", "hide", "concurrency", "disk-floor",
-                 "memory-floor", "cost", "ask", "release", "changelog", "notes", "gaps", "goal", "decide",
-                 "decisions", "ping", "help")
+CARD_COMMANDS = up.CARD_COMMANDS
 
 
 def hidden_refusal(cmd: str) -> str:
     """Why this hidden command is not run here, '' when it may be: from a Claude Code session's shell (its variables
     set), any of them but the session's own hooks."""
-    if cmd not in HIDDEN_COMMANDS or cmd in HOOK_COMMANDS or not session_vars():
+    if cmd not in HIDDEN_COMMANDS or cmd in HOOK_COMMANDS or not session_vars() or up.handed_from_root():
         return ""
     return (f"hansa: {cmd} is a step of hansa's own, run by {HIDDEN_COMMANDS[cmd]}, not a command for a Claude Code "
             "session or its helpers; nothing was run or written")
@@ -2038,7 +2035,8 @@ def cmd_coordinator_turn(a):
     """The coordinator's Stop and StopFailure hook: how its turn ended, in .hansa/coordinator-turns/<pid>.json.
     Keeps only the event and the error type of its input there; and, as its SessionStart hook after a /clear does,
     the conversation's id and transcript in the start record of the session with this pid (up.record_conversation).
-    Never fails loudly or slowly: on any problem it writes nothing and exits 0. As root on the account's desk, the
+    Only for the session it runs in (up.session_call_problem): any other call is refused in one sentence, exit 1,
+    writing nothing. Never fails slowly: on any other problem it writes nothing and exits 0. As root on the account's desk, the
     account's hansa writes the turn's record, given only those two, and no start record is kept (root keeps none).
     --forget: remove the record of this pid instead (forget_turns), reading no input."""
     if a.forget:
@@ -2053,13 +2051,27 @@ def cmd_coordinator_turn(a):
         except (Exception, SystemExit):  # noqa: BLE001 - as below
             pass
         return
+    refused = ""
     try:
         raw = sys.stdin.read(1 << 20)
+        if up.handed_from_root():  # root's hansa checked the session and hands over only the event and error
+            given = json.loads(raw) if raw.strip() else None
+            if isinstance(given, dict) and given.get("hook_event_name") in up.TURN_EVENTS and a.pid > 0:
+                up.record_turn(Desk.find(a.desk), a.pid, {k: given[k] for k in ("hook_event_name", "error")
+                                                          if isinstance(given.get(k), str)})
+            return
         given, conv = up.turn_input(raw), up.conversation_input(raw)
-        if (given is None and conv is None) or a.pid <= 0:
+        if given is None and conv is None:
+            refused = "its input is not a Stop, StopFailure or SessionStart hook's, as Claude Code gives it"
             return
         desk = Desk.find(a.desk)
         theirs = account.desk_account(desk.root)
+        # only for the session it runs in: an ancestor of this process, the one the desk recorded (root keeps no
+        # record on the account's desk), in the conversation the record names but after a /clear
+        refused = up.session_call_problem(desk, a.pid, "" if (conv or {}).get("cleared") else (conv or {}).get("id", ""),
+                                          recorded=not theirs)
+        if refused:
+            return
         if theirs:  # as the existing coordinator paths do for root (account.run)
             if given is not None:
                 account.run(theirs, ["coordinator-turn", "--pid", str(a.pid)], desk.root, input=json.dumps(given),
@@ -2071,6 +2083,10 @@ def cmd_coordinator_turn(a):
             up.record_conversation(desk, a.pid, conv)
     except (Exception, SystemExit):  # noqa: BLE001 - a hook's record is never worth a failed turn
         return
+    finally:
+        if refused:  # one sentence, exit 1: an error Claude Code shows without stopping the turn (2 would)
+            print(f"hansa: coordinator-turn wrote nothing: {refused}", file=sys.stderr)
+            raise SystemExit(1)
 
 
 def same_program(named: str, claude: str) -> bool:
@@ -2724,6 +2740,10 @@ def cmd_coordinator_cleared(a):
     """The coordinator's SessionStart hook for /clear, as the desk's owner: record the clear, then print hansa status
     into the fresh context, and one line more only when the record could not be written."""
     desk = Desk.find(a.desk)
+    # only for the session it runs in: the coordinator's session the desk recorded, an ancestor of this process
+    refused = up.session_call_problem(desk, None)
+    if refused:
+        raise SystemExit(f"hansa: coordinator-cleared recorded nothing: {refused}")
     unrecorded = plugin.record_clear(desk)
     print(views.status_text(views.status(desk)))
     if unrecorded:
