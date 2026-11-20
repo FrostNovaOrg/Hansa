@@ -488,6 +488,8 @@ SANDBOX_PROTECTED_PATHS = (*SANDBOX_PLACEHOLDERS, ".claude")
 # Project settings may run commands when opened. Refuse worker changes to these names at any depth,
 # including on Linux where the sandbox can only protect fixed paths. Keep while workers can change them.
 PROJECT_SETTINGS_NAMES = (".claude", ".codex", ".agents")
+# The standalone Codex adapter mirrors the lane commands' project denies. Its tests compare the rules.
+NESTED_CLAUDE_SETTINGS = (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".claude/skills")
 # A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified.
 INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
                      "AskUserQuestion", "Monitor"]
@@ -549,8 +551,7 @@ SRT_TRY_SECONDS = 60
 
 
 class SrtCannotRun(RuntimeError):
-    """srt was not found, or found but could not run `true` in a sandbox: the machine's problem, not the task's.
-    str(): what srt printed (or that it is missing)."""
+    """hansa could not build the sandbox settings, find srt, or run its probe with those settings."""
 
 
 def srt_record(desk: Desk) -> dict:
@@ -3234,6 +3235,40 @@ def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp:
     }}
 
 
+def project_write_deny(wt: Path) -> list:
+    """Keep a lane command from changing settings a later worker would load, including ignored files.
+    Linux srt binds literal paths (including absent top-level names) and drops globs. Find existing nested
+    settings on disk there. A new nested name has no bind. Stubbing every name in every ordinary directory
+    would prevent a build from removing those directories and still miss directories made during the command."""
+    wt = Path(wt)
+    names = (*PROJECT_SETTINGS_NAMES, ".mcp.json")
+    fixed = list(names)
+    if account.LINUX:
+        folders = [wt]
+        while folders:
+            folder = folders.pop()
+            try:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if entry.name in names:
+                            if entry.is_symlink():  # bwrap pins the target, leaving the link itself replaceable
+                                raise SrtCannotRun(f"cannot protect project settings link {entry.path} on Linux: "
+                                                   "the sandbox binds the link's target")
+                            fixed.append(Path(entry.path).relative_to(wt))
+                        elif (folder != wt or entry.name != ".git") and entry.is_dir(follow_symlinks=False):
+                            folders.append(Path(entry.path))
+            except OSError as e:
+                raise SrtCannotRun(f"cannot check for project settings in {e.filename}: {e.strerror}") from e
+
+    roots = full_paths([wt])
+    paths = full_paths(Path(root) / name for root in roots for name in fixed)
+    for path in paths:
+        why = pattern_path_problem(path, "the project settings path", "project settings")
+        if why:
+            raise SrtCannotRun(why)
+    return paths + [f"{root}/**/{name}" for root in roots for name in (*names, *NESTED_CLAUDE_SETTINGS)]
+
+
 def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str,
                  own: str = "") -> dict:
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
@@ -3246,7 +3281,7 @@ def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str
     mine = [wt, tmp, *([own] if own and own != tmp else [])]
     return {"network": network, "filesystem": {"allowWrite": full_paths(mine) + fs["allowWrite"],
                                                "denyRead": fs["denyRead"], "allowRead": fs["allowRead"],
-                                               "denyWrite": fs["denyWrite"]}}
+                                               "denyWrite": [*fs["denyWrite"], *project_write_deny(wt)]}}
 
 
 def run_tmp(desk: Desk, name: str) -> tuple:
@@ -3286,8 +3321,8 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
     f = desk.raw_dir(tid) / f"{name}-sandbox.json"
     desk.change(tid, lambda m: {"sandbox_tmp": [*m.get("sandbox_tmp", []), *dict.fromkeys([tmp, own])],
                                 "run_folders": [*(m.get("run_folders") or []), *dict.fromkeys([tmp, own])]})
-    write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, own=own))
     try:
+        write_json(f, srt_settings(desk, lane, pname, p, wt, tmp, own=own))
         srt = try_srt(desk, f, tmp, wt)
     except SrtCannotRun:
         for x in (tmp, own):
@@ -7431,14 +7466,13 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
         token, args, tmps = f"hansa-try-{lane_name}-{uuid.uuid4().hex[:8]}", [], []
         steps = {"setup": lane.get("setup", ""),
                  **({"merge_check": merge_command(lane)} if t.get("merge") else {"check": lane.get("check", "")})}
-        for step, command in steps.items():
-            if command:
-                tmp, own = run_tmp(desk, step)
-                tmps += dict.fromkeys([tmp, own])
-                write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp, own=own))
-                args += [step, in_sandbox(desk, lane, command), str(d / f"{step}-sandbox.json"), tmp, own]
-        env = {**base_env(), "TERM": "dumb"}
         try:  # srt first, with the first step's settings (as in_srt): when it cannot run, nothing runs
+            for step, command in steps.items():
+                if command:
+                    tmp, own = run_tmp(desk, step)
+                    tmps += dict.fromkeys([tmp, own])
+                    write_json(d / f"{step}-sandbox.json", srt_settings(desk, lane, pname, p, wt, tmp, own=own))
+                    args += [step, in_sandbox(desk, lane, command), str(d / f"{step}-sandbox.json"), tmp, own]
             srt = try_srt(desk, args[2], args[3], wt) if args else srt_bin()
         except SrtCannotRun as e:
             for x in tmps:
@@ -7447,6 +7481,7 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
             end_try(desk, lane_name, {"ok": False, "could_not_run": True, "steps": {}, "onto": tip,
                                       "note": desk.redact(f"could not run: {e}")[:600]})
             return None
+        env = {**base_env(), "TERM": "dumb"}
         memory = oom_begin(t)
         t = {**t, "phase": "running", "launch": token, "onto": tip, "worktree": str(wt), "started": now(), **memory,
              "tmp": tmps, **steps}
