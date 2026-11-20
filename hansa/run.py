@@ -1197,21 +1197,46 @@ def _names(d: str) -> list:
         return []
 
 
-def worktree_git_settings() -> list:
-    """What hansa runs git with in a linked worktree, whatever a setting there says: no fsmonitor (a command git
-    runs at status, diff and add), hooks from an empty folder (hansa commits and merges with --no-verify, but a
-    checkout, a merge's post-merge and the like still run hooks), and no signing program for its commits and
-    tags. The lane's own checkout runs its hooks as before: hansa's merge into the base relies on them."""
+def checkout_git_settings() -> list:
+    """What hansa runs every git command of its own with, in a worktree and in the lane's own checkout alike, whatever
+    a setting there (or a file it includes) says: no fsmonitor (a command git runs at status, diff and add), hooks
+    from an empty folder (a merge's pre-merge-commit and post-merge, a checkout's post-checkout, a commit's hooks,
+    reference-transaction, pre-auto-gc and every other: given on the command line, this also holds for the git that
+    git itself starts), and no signing program for its commits and tags. What a principal's hook did at a merge
+    belongs in the lane's setup or a release target's command."""
     return ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={no_hooks()}",
-            "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false",
+            "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"]
+
+
+def worktree_git_settings() -> list:
+    """What hansa runs git with in a linked worktree: checkout_git_settings, and git never goes into a submodule."""
+    return [*checkout_git_settings(),
             # nor into a submodule: what hansa's status, diff and add scan there is stopped where they run them
             # (NO_SUBMODULES, add_all), and what checks it out or updates it is stopped here
-            "-c", "submodule.recurse=false", "-c", "diff.ignoreSubmodules=all", "-c", "status.submoduleSummary=false"]
+            "-c", "submodule.recurse=false", "-c", "diff.ignoreSubmodules=all", "-c", "status.submoduleSummary=false",
+            "-c", "diff.submodule=short"]
 
+
+# Review shows Git's own patch and gitlink commit IDs. An inline submodule diff can run a
+# program configured in that repository, and checking its dirty files also enters it.
+GIT_REVIEW_CONFIG = ("-c", "diff.submodule=short", "-c", "submodule.recurse=false",
+                     "-c", "diff.ignoreSubmodules=dirty", "-c", "status.submoduleSummary=false")
+GIT_REVIEW_NO_PROGRAMS = ("--no-ext-diff", "--no-textconv")
+GIT_REVIEW_DIFF = (*GIT_REVIEW_NO_PROGRAMS, "--ignore-submodules=dirty")
 
 # Given to every git status and diff of hansa's that reads a worktree's files: git never looks into a repository
 # there (a submodule, or one a worker made), where git would run git under that repository's own config.
 NO_SUBMODULES = "--ignore-submodules=all"
+
+
+def is_linked(cwd) -> bool:
+    """Whether cwd is the top of a linked worktree (its .git a file)."""
+    return os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
+
+
+def git_settings(cwd) -> list:
+    """The settings hansa's own git runs with in cwd: a linked worktree's, else those of the lane's own checkout."""
+    return worktree_git_settings() if is_linked(cwd) else checkout_git_settings()
 
 
 def git(*args, cwd, env=None, stdin=None, raw=False) -> str:
@@ -1220,8 +1245,7 @@ def git(*args, cwd, env=None, stdin=None, raw=False) -> str:
     # Hansa reads git's diagnostics and --shortstat in English, even with a caller's locale override.
     # Keep this in the child environment: workers and lane commands retain their own locale.
     e = {**without_session(os.environ), **GIT_ID, **(env or {}), "LC_ALL": "C"}
-    linked = os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
-    r = subprocess.run(["git", "-c", "core.quotePath=false", *(worktree_git_settings() if linked else ()), *args],
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *git_settings(cwd), *args],
                        cwd=str(cwd), env=e, capture_output=True, input=stdin,
                        **({} if raw else {"text": True, "errors": "replace"}))
     if raw:
@@ -3484,7 +3508,8 @@ def words_text(tid: str, hits: list) -> str:
 
 def keys_in_change(desk: Desk, cwd, base: str, head: str) -> list:
     """Providers whose stored key is in a change: in its files, binary ones too, or its commit messages."""
-    r = subprocess.run(["git", "log", "-p", "-m", "--text", "--format=%B", f"{base}..{head}"], cwd=str(cwd),
+    r = subprocess.run(["git", *git_settings(cwd), "log", "-p", "-m", "--text", "--no-ext-diff", "--no-textconv",
+                        "--format=%B", f"{base}..{head}"], cwd=str(cwd),
                        capture_output=True)  # -m: what a merge commit changes itself counts too
     return desk.keys_in(r.stdout.decode("utf-8", "replace"))
 
@@ -3496,7 +3521,8 @@ def markers_in_change(cwd, base: str, head: str) -> dict:
     """Git's conflict markers a change adds, as {file: [line numbers at head]}: the lines `git diff --check`
     calls a leftover conflict marker, less a ======= (or |||||||) line outside a <<<<<<< ... >>>>>>> block,
     such as a Markdown heading's underline."""
-    r = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--check", base, head], cwd=str(cwd),
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *git_settings(cwd), "diff", "--check", "--no-ext-diff",
+                        "--no-textconv", base, head], cwd=str(cwd),
                        capture_output=True, text=True, errors="replace",
                        env={**without_session(os.environ), "LC_ALL": "C"})  # MARKER_LINE reads git's English diagnostic
     flagged = {}
@@ -3504,7 +3530,7 @@ def markers_in_change(cwd, base: str, head: str) -> dict:
         flagged.setdefault(f, []).append(int(n))
     out = {}
     for f, lines in flagged.items():
-        shown = subprocess.run(["git", "show", f"{head}:{f}"], cwd=str(cwd), capture_output=True)
+        shown = subprocess.run(["git", *git_settings(cwd), "show", f"{head}:{f}"], cwd=str(cwd), capture_output=True)
         text = shown.stdout.decode("utf-8", "replace").splitlines()
         blocks, top = [], None
         for n, x in enumerate(text, 1):
@@ -5821,7 +5847,8 @@ def _clear_run_git(desk: Desk, wt: Path, tid: str, origin: str, keep: str, made=
                 wgit(desk, wt, "update-ref", "-d", ref)
         for ref in wgit(desk, wt, "for-each-ref", "--format=%(refname)", "refs/notes").split():
             noted = [c for c in listed if subprocess.run(
-                ["git", "notes", f"--ref={ref}", "list", c], cwd=str(wt), capture_output=True).returncode == 0]
+                ["git", *git_settings(wt), "notes", f"--ref={ref}", "list", c], cwd=str(wt),
+                capture_output=True).returncode == 0]
             if not noted:
                 continue
             wgit(desk, wt, "notes", f"--ref={ref}", "remove", "--ignore-missing", *noted)
@@ -6591,7 +6618,8 @@ MERGE_MOVES = 2  # the base moved this often while its merge was being checked: 
 
 def base_moved(repo, tip: str, head: str) -> bool:
     """Whether the base (at tip) has commits the task's branch (at head) does not."""
-    r = subprocess.run(["git", "merge-base", "--is-ancestor", tip, head], cwd=str(repo), capture_output=True)
+    r = subprocess.run(["git", *git_settings(repo), "merge-base", "--is-ancestor", tip, head], cwd=str(repo),
+                       capture_output=True)
     return r.returncode != 0
 
 

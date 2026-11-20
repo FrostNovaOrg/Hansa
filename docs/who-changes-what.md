@@ -104,6 +104,20 @@ way a git command with `push` anywhere among its arguments is denied even when
 it only reads (`git log --grep push`, `git grep push`): the coordinator reads a
 repository through `hansa git`.
 
+`hansa git` reads Git history, the index and changes to tracked files in the
+checkout. `grep` refuses untracked and ignored searches, pattern files and
+submodule recursion. `ls-files` refuses file-based exclude options and
+submodule recursion, and reports line endings only for tracked paths.
+`hansa git` also refuses options that enumerate alternate refs or dump
+every object Git can access.
+`status` and `ls-files --others` can still list untracked names. Review diffs
+from `hansa git` and `hansa diff` use Git's built-in patch output. A diff
+from the lane's repository shows changes to submodule commit IDs. In the
+lane's task worktree, `hansa git L --worktree status`, `hansa git L --worktree diff`
+and `hansa diff` ignore submodules entirely so Git never reads their checkouts
+or runs programs their config names. These limits protect private files beside
+or inside a checkout and apply while Git runs as the desk's account.
+
 Claude Code also matches these rules after a plain `xargs` and after wrappers
 such as `env`, `nice` or `timeout` (`xargs git push` is denied). Run by its
 full path (`/usr/bin/git push`), through `sudo`, `command`, `python -m` or a
@@ -116,12 +130,34 @@ not already allowed.
 
 Setup, check and merge check run outside the worker, in the lane's sandbox (srt), and each change to
 them is recorded and told to the principal by the coordinator. The coordinator is not a
-worker: it runs on this machine outside any sandbox, and besides `hansa` it
-may run other commands the principal's work needs, such as installing
-software a lane needs or setting up a tool. Claude Code asks the principal
-before each one unless they have allowed it, and the coordinator says in
-plain words what the command does and why. It has three helpers: `scout`
-and `reviewer` only read; `operator` does one hands-on job on the machine
+worker: it runs on this machine outside any sandbox. Claude Code runs these
+`hansa` commands without asking (one rule each in the desk's
+`.claude/settings.json`): `status`, `show`, `diff`, `git`, `wait`, `explain`,
+`cost`, `changelog`, `decisions`, `help`, `add`, `retry`, `verify`, `cancel`,
+`close`, `merge`, `gaps`, `goal`, `decide`, `ask`, `notes`, `pause`,
+`resume`, `ping`, `release`, `concurrency`, `hide`, `bench` and `doctor`,
+with any arguments; `hansa desks` and `hansa desks --json`; `hansa lane`
+alone and `lane set`, `lane brief` and `lane try`. In auto mode its classifier
+does not look at these either, so the list holds only commands whose worst
+case stays within the coordinator's own work: hansa's others (`notify`,
+`disk-floor`, `memory-floor`, `desks --forget`, `lane add`, `lane remove`,
+`lane target`, `up`, `serve`, `web`, `coordinator`, `init`, any with options
+before the command) are asked about, or judged by auto mode, like any other
+command. The coordinator may run other commands the principal's work needs,
+such as installing software a lane needs or setting up a tool, and says in
+plain words what the command does and why. hansa's own steps that it gives no
+help text (the follower, the start `hansa up` makes, root's handoff to the
+desk's account) refuse a call from a Claude Code session's shell, and the
+session's own hooks act only for the session they run in; the start `hansa
+up` makes runs only the claude the desk uses. `hansa coordinator` from a
+Claude Code session refuses words that change the new session's permissions,
+tools or settings (`--permission-mode`, `--settings`, `--add-dir` and the
+like): those come from the principal's own terminal. Who stopped, asked, paused or marked something is recorded as the
+coordinator for every command run in a Claude Code session, whatever
+`HANSA_ROLE` says there. It has three helpers: `scout` and `reviewer` only
+read (their shell runs reading commands only: `grep`, `find`, `cat` and the
+like, and hansa's `show`, `diff`, `git`, `status`, `explain`, one at a time);
+`operator` does one hands-on job on the machine
 (installing software, setting up a tool) with the coordinator's rights, each
 command with the principal's permission. Three things stay closed by design:
 reading `secrets/` (the keys), reading or editing the files directly in the
@@ -234,6 +270,9 @@ kept when its alert held a code. The token is held in the clear in
 (Read is denied there) and the workers' sandbox; a release's code is made
 immediately before its alert command runs, kept in memory and passed through
 a pipe on standard input without a temporary input file.
+Where hansa replaces known keys in shown or recorded text, it also replaces
+the saved page token and the key used to hash release codes. It replaces
+longer keys first when one key is a prefix of another.
 The coordinator runs outside any sandbox, so a
 Bash command the principal approves could still read them; it should never be
 asked to.

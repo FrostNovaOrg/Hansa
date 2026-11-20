@@ -744,10 +744,11 @@ SURROGATE = re.compile("[\ud800-\udfff]")
 
 def post(path: str, text: str) -> None:
     """Post one message to a session's inbox: one line of JSON, then close. HANSA_NOTIFY_CAPTURE names a
-    file that gets what would be sent instead (the tests' sandbox cannot make a Unix socket)."""
+    file that gets what would be sent instead (the tests' sandbox cannot make a Unix socket), under the tests' own
+    switch (HANSA_TESTS=1) only: otherwise the message goes to the inbox."""
     text = clean(text)
     line = json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False) + "\n"
-    capture = os.environ.get("HANSA_NOTIFY_CAPTURE")
+    capture = os.environ.get("HANSA_NOTIFY_CAPTURE") if os.environ.get("HANSA_TESTS") == "1" else ""
     if capture:
         with open(capture, "a", encoding="utf-8") as f:
             f.write(json.dumps({"socket": path, "line": line}, ensure_ascii=False) + "\n")

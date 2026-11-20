@@ -281,9 +281,13 @@ use exactly that commit, never what the branch's name leads to: while the
 branch does not hold it, merge, verify and retry refuse with a line saying
 what it holds instead, and `hansa show` says so. In the lane's own checkout, a `commondir` in its `.git`
 stops every hansa git command there until it is removed by hand; hansa does
-not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
-hooks from an empty folder and commit and tag signing off, whatever a
-setting there says; in the lane's own checkout its hooks run as before.
+not remove it. hansa's own git, in a worktree and in the lane's own checkout
+(its merges, the landing of a checked merge, a fixed release's checkout), runs
+with `core.fsmonitor` off, hooks from an empty folder and commit and tag
+signing off, whatever a setting there says: the repository's git hooks never
+run there. Put what such a hook did in the lane's setup or a release target's
+command; git runs its hooks as usual in that command (a `pre-push` hook of
+`git push`, say).
 A repository inside the worktree (one a worker made, anywhere below its top,
 outside an ignored folder) is never looked into by hansa's git: at a run's end
 the task fails, nothing is committed, and its error names up to five of them to

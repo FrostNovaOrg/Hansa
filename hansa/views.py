@@ -1155,6 +1155,8 @@ def status(desk: Desk) -> dict:
                                                                         r.get("name") or ""))
                   for r in followers] if hearing else [],
         "coordinator_start": "" if hearing else up.coordinator_line(desk),  # what hansa up does about the session
+        "old_rules": up.old_rules_line(desk),  # the desk's session settings are an older hansa's
+        "start_words": up.unasked_line(desk),  # the recorded start switches permission questions off
         "card_note": up.card_note(desk),  # the recorded session's folder does not load the card (the desk's CLAUDE.md)
         "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
         "heard": notify.hears(desk),  # whether the session asking is one of them
@@ -1397,6 +1399,8 @@ def status_text(st: dict) -> str:
     if session := st.get("coordinator_session"):
         out.append(up.session_line(session))
     out += [st["coordinator_start"]] if st.get("coordinator_start") and not st.get("notifying") else []
+    out += [st["start_words"]] if st.get("start_words") else []
+    out += [st["old_rules"]] if st.get("old_rules") else []
     out += st.get("turns") or []
     out += st.get("unreached") or []
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
@@ -2867,7 +2871,7 @@ def cost_turns_text(rep: dict) -> str:
 def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool = False) -> str:
     """hansa diff: a task's changes against its base, limited to these paths when given. new: only what this
     attempt added on top of the attempt it continues from (hansa retry), without the base merged into it."""
-    from .run import git, git_first_line, wgit
+    from .run import GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF, GIT_REVIEW_NO_PROGRAMS, NO_SUBMODULES, git, git_first_line, wgit
     m = desk.meta(tid)
     # git interprets paths from the checkout where it runs, which may be another lane's repository.
     # Reject absolute paths and traversal before git so these mistakes get the same useful explanation.
@@ -2880,6 +2884,7 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
     wt = Path(m["worktree"])
     since, head, notice = m["base"], "", ""
     read = lambda *args: wgit(desk, wt, *args)
+    review_config, review_diff = (), (*GIT_REVIEW_NO_PROGRAMS, NO_SUBMODULES)
     if not wt.exists():
         lanes = desk.settings()["lanes"]
         notice = (f"hansa: {tid}'s lane {m['lane']} was removed" if m["lane"] not in lanes else
@@ -2889,6 +2894,7 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
         for name, lane in lanes.items():
             if not branch_holds(lane["repo"], m):
                 read = lambda *args: git(*args, cwd=lane["repo"])
+                review_config, review_diff = GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF
                 notice += f"; showing the diff from lane {name}'s repository {lane['repo']}\n"
                 break
         else:
@@ -2912,11 +2918,12 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
                     if m.get("update_conflicts"):
                         # Compare the resolved merge with git's recreated conflicted tree, then show
                         # work after that merge. Comparing either parent would count the base's work.
-                        parts.append(read("show", "--format=", "--remerge-diff", mode, merge, *selected))
+                        parts.append(read(*review_config, "show", *review_diff, "--format=", "--remerge-diff",
+                                          mode, merge, *selected))
                         head += f"; resolution of merge {merge[:10]} and later changes, without the base's own changes"
                     else:
                         head += f", without the base merged into it at {merge[:10]}"
-        parts.append(read("diff", mode, since, m["head"], *selected))
+        parts.append(read(*review_config, "diff", *review_diff, mode, since, m["head"], *selected))
         out = desk.redact("\n".join(x for x in parts if x))
     except (RuntimeError, OSError) as e:
         return desk.redact(f"{notice}hansa: {git_first_line(e)}; the diff is not shown")

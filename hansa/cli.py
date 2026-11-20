@@ -25,7 +25,8 @@ from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entr
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
-from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF, GIT_REVIEW_NO_PROGRAMS, NO_SUBMODULES,
+                  HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -111,6 +112,38 @@ NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
 BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-setup", "claude-code-guide")
+# hansa's hidden commands (no help text), each with who runs it. hansa itself starts the follower, the launcher and
+# the account's hansa with the session's variables taken out (hansa/__init__.py), so a call that has them comes from a
+# Claude Code session's shell (its Bash tool, a helper's, the ! prefix): refused there (hidden_refusal). The session's
+# own hooks (HOOK_COMMANDS) run with its variables too, and so are not told apart from its Bash tool by them: the
+# session's allow rules (permissions) leave those to the principal's question
+HIDDEN_COMMANDS = {"coordinator-cleared": "the coordinator's session's hook after a /clear",
+                   "coordinator-turn": "the coordinator's session's hooks as a turn ends",
+                   "coordinator-desk": "hansa coordinator as root, for the desk's own account",
+                   "notify-follow": "hansa notify on, hansa coordinator and hansa up, which start a follower",
+                   "notify-feed": "a follower",
+                   "notify-launch": "hansa up"}
+HOOK_COMMANDS = ("coordinator-cleared", "coordinator-turn")
+
+
+def hidden_refusal(cmd: str) -> str:
+    """Why this hidden command is not run here, '' when it may be: from a Claude Code session's shell (its variables
+    set), any of them but the session's own hooks."""
+    if cmd not in HIDDEN_COMMANDS or cmd in HOOK_COMMANDS or not session_vars() or up.handed_from_root():
+        return ""
+    return (f"hansa: {cmd} is a step of hansa's own, run by {HIDDEN_COMMANDS[cmd]}, not a command for a Claude Code "
+            "session or its helpers; nothing was run or written")
+
+
+def acting_role(default: str) -> str:
+    """Who ran this command, as hansa records it (who stopped a release, asked, paused, resumed or marked a note):
+    "coordinator" from a Claude Code session's shell, whatever HANSA_ROLE says there (one given on the command line
+    is the session's own word); outside one, HANSA_ROLE (a desk owner's wrapper sets it) or the default. Never
+    "page": only the page records the principal (desk.py, release.py)."""
+    if session_vars():
+        return "coordinator"
+    role = os.environ.get("HANSA_ROLE") or ""
+    return role if role and role != "page" else default
 ON_MAC = sys.platform == "darwin"
 
 
@@ -398,7 +431,9 @@ def permissions(desk: Desk) -> dict:
     # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win.
     # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
     # the short way matches only with both
-    return {"allow": ["Bash(hansa:*)", *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
+    # hansa's own commands the session runs without a question (up.allow_rules): matched from the start of the
+    # command line, so a hidden command, an unknown word or options before the command are asked about
+    return {"allow": [*up.allow_rules(), *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
             "deny": desk_read_denials(desk) + [f"Edit({g})" for g in guarded] + other_desk_rules(desk, "Edit")
             + no_publish_rules()}
 
@@ -796,18 +831,35 @@ GIT_LIST_FLAGS = {  # what branch and tag take when they only list; the rest cre
                "--omit-empty", "--no-abbrev", "--abbrev"},
     "tag": {"-l", "--list", "-n", "--color", "--no-color", "--column", "--no-column", "-i", "--ignore-case",
             "--omit-empty"}}
-GIT_NO_PROGRAMS = {"diff": ("--no-ext-diff", "--no-textconv"), "show": ("--no-ext-diff", "--no-textconv"),
-                   "log": ("--no-ext-diff", "--no-textconv"), "blame": ("--no-textconv",),
-                   "grep": ("--no-textconv",)}
-# options that read outside the repository or run gpg, by the shortest start git takes for them, and where
-GIT_REFUSED_PREFIX = (("--no-index", "--no-i", ("diff", "grep"), "it reads files outside the lane's repository"),
-                      ("--contents", "--con", ("blame",), "it reads a file outside the lane's repository"),
-                      ("--ignore-revs-file", "--ignore-revs", ("blame",), "it reads a file outside the lane's repository"),
+GIT_PATCH_READS = ("diff", "show", "log")
+GIT_NO_PROGRAMS = {**dict.fromkeys(GIT_PATCH_READS, GIT_REVIEW_NO_PROGRAMS),
+                   "blame": ("--no-textconv",), "grep": ("--no-textconv",)}
+GIT_SUBMODULE_STATUS = (*GIT_PATCH_READS, "status")
+GIT_WORKTREE_STATUS = ("status", "diff")
+GIT_OUTSIDE = "it reads files outside the lane's repository"
+GIT_FILE_INPUT = "it reads a file outside the lane's repository"
+GIT_SUBMODULE_INPUT = "it would read a submodule's repository"
+# Options that read extra files or run gpg, using the shortest starts Git can take.
+GIT_REFUSED_PREFIX = (("--no-index", "--no-i", ("diff", "grep"), GIT_OUTSIDE),
+                      ("--untracked", "--u", ("grep",), GIT_OUTSIDE),
+                      ("--exclude-standard", "--exc", ("grep",), GIT_OUTSIDE),
+                      ("--no-exclude-standard", "--no-exc", ("grep",), GIT_OUTSIDE),
+                      ("--recurse-submodules", "--rec", ("grep", "ls-files"), GIT_SUBMODULE_INPUT),
+                      ("--submodule", "--subm", GIT_PATCH_READS, GIT_SUBMODULE_INPUT),
+                      ("--contents", "--con", ("blame",), GIT_FILE_INPUT),
+                      ("--ignore-revs-file", "--ignore-revs", ("blame",), GIT_FILE_INPUT),
+                      ("--exclude-from", "--exclude-f", ("ls-files",), GIT_FILE_INPUT),
+                      ("--exclude-per-directory", "--exclude-p", ("ls-files",), GIT_FILE_INPUT),
+                      ("--alternate-refs", "--alternate", GIT_READS, "it would read refs outside the lane's repository"),
+                      ("--batch-all-objects", "--batch-a", ("cat-file",),
+                       "it would read objects outside the lane's history and index"),
                       ("--show-signature", "--show-s", ("log", "show"), "it would run gpg"))
+# An attached value consumes the remaining letters, so only examine flags before it.
+GIT_FILE_FLAGS = {"grep": ("f", "[eABCm]"), "blame": ("S", "[LCM]"), "ls-files": ("X", "x")}
 GIT_LIST_VALUES = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
 
 
-def git_refused(args: list) -> str:
+def git_refused(args: list, worktree: bool = False) -> str:
     """Why hansa git will not run `git ARGS`; '' when it will."""
     if not args:
         return "name a git command, such as hansa git LANE log --oneline -5"
@@ -819,29 +871,54 @@ def git_refused(args: list) -> str:
     if cmd not in GIT_READS:
         return (f"git {cmd} is not one hansa git runs; it runs only commands that read: {', '.join(GIT_READS)} "
                 f"(branch and tag only to list). {changes}")
-    opts = args[1:args.index("--")] if "--" in args else args[1:]
+    sep = args.index("--", 1) if "--" in args else len(args)
+    # A preceding option can consume `--` as its value. Check beyond it when it may be data.
+    opts = args[1:sep] if sep == 1 or not args[sep - 1].startswith("-") or "=" in args[sep - 1] else args[1:]
+    eol = other = ""
     for x in opts:
-        name = x.partition("=")[0]
-        if name.startswith("--") and len(name) > 3 and any(r.startswith(name) for r in GIT_REFUSED_LONG):
+        name, _, value = x.partition("=")
+        if name.startswith("--") and (len(name) > 3 or (cmd == "cat-file" and name == "--t")) and any(
+                r.startswith(name) for r in GIT_REFUSED_LONG):
             return f"{x} is refused: it would write a file or run a program"
-        if not name.startswith("--") and name.startswith("-") and (
+        short = name.startswith("-") and not name.startswith("--")
+        if short and (
                 name.startswith("-O") or (cmd == "grep" and "O" in name)
-                or (name.startswith("-o") and cmd in ("diff", "log", "show"))):
+                or (name.startswith("-o") and cmd in GIT_PATCH_READS)):
             return f"{x} is refused: it would write a file or run a program"
-        # blame -S FILE, alone or after other flags (-wS FILE); -L, -C and -M take the rest of the word as their value
-        if cmd == "blame" and not name.startswith("--") and name.startswith("-") and "S" in re.split("[LCM]", x[1:])[0]:
-            return f"{x} is refused: it reads a file outside the lane's repository"
+        if short and cmd in GIT_FILE_FLAGS:
+            flag, takes_value = GIT_FILE_FLAGS[cmd]
+            short_flags = re.split(takes_value, name[1:], maxsplit=1)[0]
+            if flag in short_flags:
+                return f"{x} is refused: {GIT_FILE_INPUT}"
+        if cmd == "ls-files":
+            if name.startswith("--eo") and "--eol".startswith(name):
+                eol = x
+            if (short and any(flag in short_flags for flag in "ok") or
+                    name.startswith(("--o", "--k")) and any(full.startswith(name) for full in ("--others", "--killed"))):
+                other = x
+        # In worktree status and diff, even 'dirty' would let Git read a submodule's HEAD.
+        if cmd in GIT_SUBMODULE_STATUS and (
+                name.startswith("--ignore-") and "--ignore-submodules".startswith(name) and
+                (value in ("none", "untracked") or value == "dirty" and worktree and cmd in GIT_WORKTREE_STATUS)
+                or name.startswith("--no-ignore-") and "--no-ignore-submodules".startswith(name)):
+            return f"{x} is refused: {GIT_SUBMODULE_INPUT}"
         for full, shortest, cmds, why in GIT_REFUSED_PREFIX:
             if cmd in cmds and name.startswith(shortest) and full.startswith(name):
                 return f"{x} is refused: {why}"
+    if eol and other:
+        return f"{eol} with {other} is refused: {GIT_OUTSIDE}"
     if cmd == "diff":  # a path outside the repository makes git diff compare any two files, as --no-index does
-        for x in args[1:]:
-            if not x.startswith("-") and (x.startswith(("/", "~")) or ".." in x.split("/")):
+        for i, x in enumerate(args[1:], 1):
+            if (i > sep or not x.startswith("-")) and (x.startswith(("/", "~")) or ".." in x.split("/")):
                 return f"{x} is refused: git diff would read files outside the lane's repository"
     if cmd in ("branch", "tag"):
+        opts = args[1:]
         listing, words, i = False, [], 0
         while i < len(opts):
             x = opts[i]
+            if x == "--":
+                words.extend(opts[i + 1:])
+                break
             name = x.partition("=")[0]
             if name in GIT_LIST_VALUES:
                 listing = True
@@ -868,9 +945,9 @@ def cmd_git(a):
     ln = desk.settings()["lanes"].get(a.lane)
     if not ln:
         raise SystemExit(f"hansa: no lane {a.lane}; lanes: {', '.join(sorted(desk.settings()['lanes'])) or 'none'}")
-    why = git_refused(args)
+    why = git_refused(args, where)
     if why:
-        raise SystemExit(f"hansa git: {why}. Nothing was run")
+        raise SystemExit(desk.redact(f"hansa git: {why}. Nothing was run"))
     for tid in dict.fromkeys(re.findall(r"(?<![\w.-])task/(t\d+)(?![\w])", " ".join(args))):
         try:
             named = desk.meta(tid)
@@ -894,15 +971,28 @@ def cmd_git(a):
     # gpg for signatures (also for a format such as %G?); a filter driver it names still runs, as the desk's account.
     # The signature programs become hansa's stand-in, which reads its input and fails: not false, which can end
     # before git has written the signed text to it, and git then dies of SIGPIPE
-    # in a worktree, git status and diff look into a repository inside it (a submodule, or one a worker made) and
-    # run git there under that one's config: never there
-    inside = ("--ignore-submodules=all",) if where and args[0] in ("status", "diff") else ()
-    args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *inside, *args[1:]]
+    cmd = args[0]
+    flags = GIT_NO_PROGRAMS.get(cmd, ())
+    # Worktree status and diff must never run Git under a nested repository's own config.
+    if where and cmd in GIT_WORKTREE_STATUS:
+        flags += (NO_SUBMODULES,)
+    elif cmd in GIT_PATCH_READS:
+        flags = GIT_REVIEW_DIFF
+    elif cmd == "status":
+        flags += ("--ignore-submodules=dirty",)
+    elif cmd == "blame":
+        flags += ("--no-ignore-revs-file",)
     no_sig = str(NO_SIGNATURE)
-    no_programs = ["-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false",
-                   "-c", "submodule.recurse=false",
-                   "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
-    r = subprocess.run(["git", "--no-pager", *no_programs, *args],
+    git_cmd = ["git", "--no-pager", *GIT_REVIEW_CONFIG, "-c", "core.quotePath=false", "-c", "core.fsmonitor=false",
+               "-c", "log.showSignature=false", "-c", "grep.fallbackToNoIndex=false",
+               "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
+    if cmd == "diff":  # Outside a repository Git defaults to --no-index, even with two relative paths.
+        location = subprocess.run([*git_cmd, "rev-parse", "--is-inside-work-tree", "--is-bare-repository"],
+                                  cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  errors="replace") if cwd.is_dir() else None
+        if location is None or location.returncode or "true" not in location.stdout.splitlines():
+            raise SystemExit(f"hansa git: no Git checkout at lane {a.lane}'s repository or worktree. Nothing was run")
+    r = subprocess.run([*git_cmd, cmd, *flags, *args[1:]],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     sys.stdout.write(desk.redact(r.stdout))
     sys.stderr.write(desk.redact(r.stderr))
@@ -913,8 +1003,9 @@ def cmd_git(a):
 def cmd_merge(a):
     desk = Desk.find(a.desk)
     # Nothing changes the task, its verification, the keys or another merge until this one is done.
-    # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
-    # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
+    # hansa's git runs none of the repository's hooks (checkout_git_settings); a program its config names that git
+    # still runs here (a merge or filter driver) and that would change the desk stops at once (HANSA_MERGING)
+    # instead of waiting for this merge forever.
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
         verification_note = (f"; verification {v['task']}: holds, with notes (report: hansa show {v['task']} --report)"
@@ -928,7 +1019,7 @@ def cmd_merge(a):
             if not steps:
                 raise SystemExit(f"hansa: lane {check_name} has no check to run again; nothing was merged")
             commands = "; then ".join(f"{s['what']} ({s['command']})" for s in steps)
-            by = os.environ.get("HANSA_ROLE", "cli")
+            by = acting_role("cli")
             desk.update(a.id, state="merging", merge_check_result=None,
                         merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by}, **sess)
             desk.event("check_rerun_queued", task=a.id, onto=tip, by=by, command=merge_command(check_lane), steps=steps)
@@ -1666,7 +1757,7 @@ def _stop_release(desk: Desk, a) -> None:
         raise SystemExit(f"hansa: --stop takes a release's number (hansa release lists them), not {a.stop!r}")
     reason = " ".join(([a.lane] if a.lane else []) + list(a.note))
     # who, as the principal's alert names them (release.STOPPED_BY): a Claude Code session on a desk is the coordinator's
-    by = os.environ.get("HANSA_ROLE") or ("coordinator" if session_vars() else "terminal")
+    by = acting_role("terminal")
     out = release.stop_release(desk, int(rid), reason, by=by)
     if not out["ok"]:
         raise SystemExit("hansa: " + "; ".join(out["problems"]) + ". Nothing was changed")
@@ -1712,12 +1803,12 @@ def _answer_by_code(desk: Desk, a) -> None:
 
 
 def cmd_pause(a):
-    Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("HANSA_ROLE", "cli"))
+    Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=acting_role("cli"))
     print("paused: no new tasks start until `hansa resume`; running tasks finish")
 
 
 def cmd_resume(a):
-    Desk.find(a.desk).resume(by=os.environ.get("HANSA_ROLE", "cli"))
+    Desk.find(a.desk).resume(by=acting_role("cli"))
     print("resumed")
 
 
@@ -1789,10 +1880,10 @@ def cmd_ask(a):
         if os.environ.get("HANSA_TASK"):  # a worker or verification: the to-dos are the coordinator's
             raise SystemExit("hansa: only the coordinator closes a to-do; a worker or verification "
                              "cannot. Say in your report that it may be done")
-        Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
+        Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=acting_role("cli"))
         print(f"to-do #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the outcome")
         return
-    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
+    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=acting_role("cli"),
                                   session=notify.session_here(), why=a.why, holds=a.holds, goal=a.goal or "")
     print(f"to-do #{n} is on the principal's list; they answer in the conversation")
 
@@ -1906,16 +1997,24 @@ def cmd_release(a):
     # On a one-target lane, a mistyped target must not become a note and release the only target.
     if note and note[0] and (note[0] in targets or len(targets) == 1 and NAME.match(note[0])):
         target = note.pop(0)
-    r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
+    r = release.ask(desk, a.lane, " ".join(note), by=acting_role("cli"),
                     session=notify.session_here(), target=target, direct=a.direct)
     who = release.what(r)
+    count = f"{r['count']} commit(s)"
+    if r.get("since_release"):
+        count += f" since release #{r['since_release']}"
+    elif r.get("push_destination"):
+        count += f" going to {r['push_destination']}"
+    elif r.get("remote_counts"):
+        remotes = ", ".join(f"{n} not on remote {remote}" for remote, n in r["remote_counts"].items())
+        count += f" missing from at least one remote ({remotes}"
+        count += ")" if r.get("previous_release") else "; no release of it went out before)"
+    else:
+        count += " on no remote-tracking branch"
+        if not r.get("previous_release"):
+            count += " (no release of it went out before)"
     head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}"
-            + (f" by target {r['target']}" if r.get("target") else "") + ", "
-            + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
-               f"{r['count']} commit(s) missing from at least one remote ("
-               + ", ".join(f"{count} not on remote {remote}" for remote, count in r["remote_counts"].items())
-               + "; no release of it went out before)" if r.get("remote_counts") else
-               f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
+            + (f" by target {r['target']}" if r.get("target") else "") + f", {count}"
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
     details = "".join("\n" + x for x in [*release.outside.lines(r), *release.direct_lines(r)])
@@ -2004,7 +2103,8 @@ def cmd_coordinator_turn(a):
     """The coordinator's Stop and StopFailure hook: how its turn ended, in .hansa/coordinator-turns/<pid>.json.
     Keeps only the event and the error type of its input there; and, as its SessionStart hook after a /clear does,
     the conversation's id and transcript in the start record of the session with this pid (up.record_conversation).
-    Never fails loudly or slowly: on any problem it writes nothing and exits 0. As root on the account's desk, the
+    Only for the session it runs in (up.session_call_problem): any other call is refused in one sentence, exit 1,
+    writing nothing. Never fails slowly: on any other problem it writes nothing and exits 0. As root on the account's desk, the
     account's hansa writes the turn's record, given only those two, and no start record is kept (root keeps none).
     --forget: remove the record of this pid instead (forget_turns), reading no input."""
     if a.forget:
@@ -2019,13 +2119,27 @@ def cmd_coordinator_turn(a):
         except (Exception, SystemExit):  # noqa: BLE001 - as below
             pass
         return
+    refused = ""
     try:
         raw = sys.stdin.read(1 << 20)
+        if up.handed_from_root():  # root's hansa checked the session and hands over only the event and error
+            given = json.loads(raw) if raw.strip() else None
+            if isinstance(given, dict) and given.get("hook_event_name") in up.TURN_EVENTS and a.pid > 0:
+                up.record_turn(Desk.find(a.desk), a.pid, {k: given[k] for k in ("hook_event_name", "error")
+                                                          if isinstance(given.get(k), str)})
+            return
         given, conv = up.turn_input(raw), up.conversation_input(raw)
-        if (given is None and conv is None) or a.pid <= 0:
+        if given is None and conv is None:
+            refused = "its input is not a Stop, StopFailure or SessionStart hook's, as Claude Code gives it"
             return
         desk = Desk.find(a.desk)
         theirs = account.desk_account(desk.root)
+        # only for the session it runs in: an ancestor of this process, the one the desk recorded (root keeps no
+        # record on the account's desk), in the conversation the record names but after a /clear
+        refused = up.session_call_problem(desk, a.pid, "" if (conv or {}).get("cleared") else (conv or {}).get("id", ""),
+                                          recorded=not theirs)
+        if refused:
+            return
         if theirs:  # as the existing coordinator paths do for root (account.run)
             if given is not None:
                 account.run(theirs, ["coordinator-turn", "--pid", str(a.pid)], desk.root, input=json.dumps(given),
@@ -2037,6 +2151,22 @@ def cmd_coordinator_turn(a):
             up.record_conversation(desk, a.pid, conv)
     except (Exception, SystemExit):  # noqa: BLE001 - a hook's record is never worth a failed turn
         return
+    finally:
+        if refused:  # one sentence, exit 1: an error Claude Code shows without stopping the turn (2 would)
+            print(f"hansa: coordinator-turn wrote nothing: {refused}", file=sys.stderr)
+            raise SystemExit(1)
+
+
+def same_program(named: str, claude: str) -> bool:
+    """Whether a session's recorded words name claude: by its name (claude, as Claude Code is run, whatever folder it
+    is in), or a path to the same file as this desk's. notify-launch runs the desk's either way."""
+    if os.path.basename(named) == "claude" or named == claude:
+        return True
+    found = named if os.sep in named else shutil.which(named)
+    try:
+        return bool(found) and os.path.samefile(found, claude)
+    except OSError:
+        return False
 
 
 def cmd_notify_launch(a):
@@ -2053,6 +2183,16 @@ def cmd_notify_launch(a):
     unsplit = rules_problem(rules) or desk_paths_problem(desk, [home, *run_homes()])
     if unsplit:  # a deny rule Claude Code would split, or one under a path it reads as a pattern, closes nothing
         raise SystemExit(f"hansa: the coordinator's session was not started: {unsplit}")
+    # only the claude this desk uses (HANSA_CLAUDE's, else the first found: the one hansa doctor reports), never the
+    # program the words name: they name it only to say it is claude, as hansa up's record keeps the session's words
+    from .desk import claude_bin
+    try:
+        claude = claude_bin()
+    except RuntimeError as e:
+        raise SystemExit(f"hansa: the coordinator's session was not started: {e}") from None
+    if not same_program(a.rest[0], claude):
+        raise SystemExit(f"hansa: notify-launch starts only the claude this desk uses ({claude}), not "
+                         f"{a.rest[0]}; nothing was started or recorded")
     # the Stop and StopFailure hooks that record how its turns end; none when its words give a --settings of their
     # own (not merged), and left out of what hansa notify on records, as the rules are
     settings = None if up.has_settings(a.rest[1:]) else json.dumps({"hooks": turn_hooks(desk, os.getpid())})
@@ -2065,7 +2205,7 @@ def cmd_notify_launch(a):
     # hansa's status line and nothing else of the mod (no idle compaction, no daily clear), for this start only;
     # preparing it never stops the session, and what it did not do is said in one line
     env = {k: v for k, v in os.environ.items() if not k.startswith("HANSA_MOD_")}
-    mod = plugin.plan(desk, a.rest[0])  # a copy only on a Claude Code new enough for the mod (plugin.MOD_NEEDS)
+    mod = plugin.plan(desk, claude)  # a copy only on a Claude Code new enough for the mod (plugin.MOD_NEEDS)
     shown = mod["on"]
     if shown:
         env.update(plugin.line_env(desk, plugin.given_effort(a.rest[1:]), desk.settings().get("alert_language"),
@@ -2073,13 +2213,15 @@ def cmd_notify_launch(a):
     for line in [plugin.left_text(mod)] + plugin.mod_lines(mod):
         if line:
             print(f"hansa: {line}", file=sys.stderr)
+    # the desk's claude runs, under the name the words give it (what the session's process shows, and notify on
+    # records again)
     argv = [a.rest[0], *(["--plugin-dir", mod["copy"]] if shown else []), *_notified(desk, a.rest),
             *(up.with_settings(words, settings) if settings else words)]
     up.forget_turns(desk, os.getpid())  # a dead session's record, whose pid this one got, is not this one's
     try:
-        os.execvpe(argv[0], argv, env)
+        os.execvpe(claude, argv, env)
     except OSError as e:
-        raise SystemExit(f"hansa: {argv[0]} did not start: {e}")
+        raise SystemExit(f"hansa: {claude} did not start: {e}")
 
 
 def cmd_notify_follow(a):
@@ -2389,6 +2531,14 @@ def cmd_web(a):
 
 def cmd_coordinator(a):
     """Start the coordinator's interactive session in the desk, on the coordinator provider."""
+    # from a Claude Code session's shell (or with HANSA_ROLE, which hansa gives the coordinator's session, or a
+    # worker's HANSA_TASK) the session's permission layer judges the start; words that would loosen or replace the
+    # new session's permission questions, tools or settings are the principal's own, from their terminal
+    word = up.session_start_word(a.rest) if session_vars() or os.environ.get("HANSA_ROLE") or \
+        os.environ.get("HANSA_TASK") else ""
+    if word:
+        raise SystemExit(f"hansa: {word} changes the new session's permissions, tools or settings, so hansa "
+                         f"coordinator takes it only from the principal's own terminal; nothing was started")
     clear, rest = _clear_daily(a.rest)
     desk = Desk.find(a.desk)
     # a run that ends by itself (-p ...): neither refused beside a running session nor recorded as the session's start
@@ -2668,9 +2818,12 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
 
 
 def helper_text(text: str, model: str) -> str:
-    """A helper's definition as the desk gets it: with the principal's helpers' model (settings helpers_model) as its
+    """A helper's definition as the desk gets it: the read-only helpers' Bash hook given its command; with the principal's helpers' model (settings helpers_model) as its
     own model field; with none, as hansa ships it, so it runs on the coordinator's model. A model the coordinator names
     for one call of the Agent tool comes before either (Claude Code's order)."""
+    # the read-only helpers' hook that holds their shell to reading commands (helper_bash.py), as this hansa runs it
+    text = text.replace('"HANSA_HELPER_BASH"', json.dumps(shlex.join(
+        [sys.executable, "-I", str(Path(__file__).with_name("helper_bash.py"))])))
     if not model:
         return text
     head, sep, rest = text.partition("\n---\n")
@@ -2694,6 +2847,10 @@ def cmd_coordinator_cleared(a):
     """The coordinator's SessionStart hook for /clear, as the desk's owner: record the clear, then print hansa status
     into the fresh context, and one line more only when the record could not be written."""
     desk = Desk.find(a.desk)
+    # only for the session it runs in: the coordinator's session the desk recorded, an ancestor of this process
+    refused = up.session_call_problem(desk, None)
+    if refused:
+        raise SystemExit(f"hansa: coordinator-cleared recorded nothing: {refused}")
     unrecorded = plugin.record_clear(desk)
     print(views.status_text(views.status(desk)))
     if unrecorded:
@@ -3838,7 +3995,7 @@ def cmd_gaps(a):
     desk = Desk.find(a.desk)
     if a.words and a.words[0] == "mark" and len(a.words) in (3, 4) and not a.all:
         _, nid, kind, *why = a.words
-        gaps.mark(desk, nid, kind, why[0] if why else "", os.environ.get("HANSA_ROLE") or getpass.getuser(),
+        gaps.mark(desk, nid, kind, why[0] if why else "", acting_role(getpass.getuser()),
                   notify.session_here())
         print(gaps.show(desk, nid))
     elif len(a.words) == 2 and a.words[0] == "show" and not a.all:
@@ -4244,10 +4401,13 @@ def main(argv=None):
                      "one of its named release targets (hansa lane target L NAME \"...\"); TARGET is needed when "
                      "the lane has more than one; name the target before a one-word note that could be a target "
                      "name (hansa release L TARGET hotfix). "
-                     "hansa records the commit, the target and its command, the note, the commits that go out (with "
-                     "one remote or none: on no remote-tracking branch and not in that target's last release; the "
-                     "whole history when there is no remote-tracking branch) and the files they change. For a "
-                     "target's first release with two or more remotes, including a --fixed target, every base "
+                     "hansa records the commit, the target and its command, the note, the commits that go out and "
+                     "the files they change. When the command still matches, the range starts after the target's "
+                     "last released commit. After a target's first release, a push to a known branch also leaves "
+                     "out commits in its tracking branch. A changed command with an unknown destination uses the "
+                     "same range as a first release. In that range, with one remote or none the commits "
+                     "are those on no remote-tracking branch (the whole history when there is none). With two or "
+                     "more remotes, including for a --fixed target, every base "
                      "commit missing from at least one remote's tracking branches is counted, shown, scanned and "
                      "checked for direct commits; the heading gives each remote's missing count, and a remote with "
                      "no tracking branches lacks the whole history. A word "
@@ -4777,6 +4937,9 @@ def main(argv=None):
         ap.error("add needs the task text or --file")
     if a.cmd == "ask":
         _ask_arguments(ap, a)
+    refused = hidden_refusal(a.cmd)
+    if refused:
+        raise SystemExit(refused)
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     # coordinator-turn: root keeps only what the record needs of the hook's input before the account's hansa sees it
     if a.cmd not in ("coordinator", "coordinator-turn", "init", "notify", "notify-follow", "up", "desks", "menu",
