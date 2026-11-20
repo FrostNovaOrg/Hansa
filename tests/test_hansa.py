@@ -18932,8 +18932,14 @@ def save():'''))
         self.assertEqual(got["network"], {"allowedDomains": ["registry.npmjs.org", "localhost:5173"],
                                           "deniedDomains": [], "allowLocalBinding": True})
         worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
-        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"])  # the same lists as the worker's
-        self.assertEqual(got["filesystem"]["denyWrite"], worker["denyWrite"])
+        self.assertEqual(got["filesystem"]["denyRead"], worker["denyRead"])
+        wt = m["worktree"]
+        self.assertEqual(got["filesystem"]["denyWrite"], [
+            *worker["denyWrite"], f"{wt}/.claude", f"{wt}/.codex", f"{wt}/.agents", f"{wt}/.mcp.json",
+            f"{wt}/**/.claude", f"{wt}/**/.codex", f"{wt}/**/.agents", f"{wt}/**/.mcp.json",
+            f"{wt}/**/.claude/settings.json", f"{wt}/**/.claude/settings.local.json",
+            f"{wt}/**/.claude/hooks", f"{wt}/**/.claude/skills",
+        ])
         self.assertIn(str(self.desk.secrets_dir), got["filesystem"]["denyRead"])
         self.assertIn(str(Path.home() / ".ssh"), got["filesystem"]["denyRead"])
         self.assertIn(str(Path(m["worktree"]) / ".git"), got["filesystem"]["denyWrite"])
