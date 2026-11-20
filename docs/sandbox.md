@@ -171,10 +171,21 @@ verification of the same task in the earlier verification's ([A repeated verific
 Hansa gives each Claude Code worker an explicit list of built-in tools with `--tools`.
 The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit`, sandboxed `Bash`
 and the session's own checklist (`TodoWrite`). Bench commands run through Bash.
+Workers can watch a running command with `Monitor` and stop a job with `TaskStop`
+(`KillShell` in older versions). Hansa also allows `TaskOutput` and its older name
+`BashOutput` on releases that provide them. Claude Code 2.1.329 delivers background
+results as notifications. The worker's Monitor hook accepts the shell-command form, which uses Bash
+permissions. Hansa drops blanket lane grants for Monitor. If managed policy disables
+command hooks, Claude Code's own WebSocket permissions and the lane's network list
+govern its WebSocket form.
 The lane can also grant `WebSearch` and site-specific `WebFetch`. A lane permission can approve
 the use of an available tool. Adding another built-in name to the lane cannot enable that tool.
-This keeps repository text out of other sessions' inboxes, including when a Claude Code upgrade
-adds a messaging tool. Verifications, follow-ups, resumes and wrap-ups use the same list.
+Hansa denies the known session, team, scheduling, project and connector tools by name.
+Claude Code's `Agent` can deliver a prompt to a teammate or start a cloud session, so workers
+also forgo ordinary subagents. `Skill` can fork an agent and `ToolSearch` can reconnect to
+MCP servers. Workers can read project skill instructions with `Read`.
+Verifications, follow-ups, resumes and wrap-ups use the same list, including when a saved
+command predates an upgrade. Newly introduced built-ins stay outside the list.
 `hansa ping` uses an empty list.
 
 The coordinator's `scout` and `reviewer` subagents get `Read` and `Bash`.

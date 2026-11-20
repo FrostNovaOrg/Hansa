@@ -22,6 +22,10 @@ test('hansa helpers run as subagents even when Claude Code offers to spawn teamm
     expect(result.deny).toContain(subagentType)
     expect(result.deny).toContain('subagent')
     expect(await dispatch(coordinator, { subagentType }, async () => spawned)).toBe(spawned)
+    expect(await dispatch(coordinator, { subagentType, model: 'sonnet' }, async (event: unknown) => {
+      expect(event).toEqual({ subagentType, model: 'sonnet' })
+      return spawned
+    })).toBe(spawned)
     expect(await dispatch(lineOnly, teammate, async () => spawned)).toBe(spawned)
   }
   expect(await dispatch(coordinator, { subagentType: 'another-helper', isTeammate: true },

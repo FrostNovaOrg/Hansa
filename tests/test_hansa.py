@@ -893,6 +893,8 @@ def tmp_writable() -> bool:
 
 
 SECRETS = ("SECRET-TEXT", "org-123", "/x/transcript-77.jsonl", "sess-identity-77", "/y/cwd-77")
+HELPER_DENY_LINE = ("disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, "
+                    "TaskUpdate, GetTask, Yield")
 
 
 def turn_hook_input(event: str, error=None) -> str:
@@ -27454,14 +27456,16 @@ def save():'''))
         self.assertIn("force=unset", out)
         # only Claude Code's own helpers are denied, by name; no rule names the Agent tool alone or a model
         argv = out.splitlines()[0].split()
-        denied = [x for x in argv if x.startswith("Agent")]
-        self.assertTrue(denied)
-        self.assertTrue(all(x.startswith("Agent(") and x.endswith(")") and "model" not in x for x in denied), denied)
+        rules = argv[argv.index("--disallowedTools") + 1:argv.index("--model")]
+        self.assertCountEqual([r for r in rules if r.partition("(")[0] in ("Agent", "Task")],
+                              ["Agent(general-purpose)", "Agent(Explore)", "Agent(Plan)", "Agent(claude)",
+                               "Agent(statusline-setup)", "Agent(claude-code-guide)"])
         settings = json.loads((self.desk.root / ".claude" / "settings.json").read_text())
         self.assertNotIn("availableModels", settings)
-        self.assertFalse([r for r in settings["permissions"].get("deny", []) if r == "Agent" or r.startswith("Agent(")])
-        for f in (self.desk.root / ".claude" / "agents").glob("*.md"):
-            self.assertNotIn("disallowedTools", f.read_text())
+        self.assertFalse([r for r in settings["permissions"].get("deny", []) if r.partition("(")[0] in ("Agent", "Task")])
+        for role in ("scout", "reviewer", "operator"):
+            header = (self.desk.root / ".claude" / "agents" / f"{role}.md").read_text().split("\n---\n", 1)[0]
+            self.assertEqual([s for s in header.splitlines() if s.startswith("disallowedTools:")], [HELPER_DENY_LINE])
 
     def page_save(self, change):
         """Load the settings as the page does, change them, save (what POST /api/settings does); what the page
@@ -27930,8 +27934,9 @@ def save():'''))
         for role, extra, block in [
             ("scout", {"name": "reader"}, True), ("operator", {"team_name": "group"}, True),
             ("reviewer", {"name": "review"}, True), ("Re_viewer", {"name": "review"}, True),
-            ("scout", {}, False), ("reviewer", {"run_in_background": True}, False),
-            ("operator", {}, False), ("another-agent", {"name": "other"}, False),
+            ("scout", {}, False), ("reviewer", {"run_in_background": True}, False), ("operator", {}, False),
+            ("scout", {"model": "sonnet"}, False), ("reviewer", {"model": "opus", "run_in_background": True}, False),
+            ("operator", {"model": "haiku"}, False), ("another-agent", {"name": "other"}, False),
         ]:
             with self.subTest(role=role, extra=extra):
                 event = {"tool_input": {"subagent_type": role, "prompt": "private repository text", **extra}}
@@ -27939,6 +27944,8 @@ def save():'''))
                 self.assertEqual(r.returncode, 2 if block else 0, r.stderr)
                 if block:
                     self.assertIn("subagent", r.stderr)
+                else:
+                    self.assertEqual(r.stdout, "")  # no updatedInput that replaces the call's model
                 self.assertNotIn("private repository text", r.stderr + r.stdout)
         for malformed in ("{", '{"tool_input":null}'):
             r = subprocess.run(shlex.split(action["command"]), input=malformed, capture_output=True, text=True)
@@ -29931,14 +29938,36 @@ def save():'''))
     def assert_worker_tools(self, argv, *web):
         # Read the complete variadic option from the launch, including any extra values after the first.
         self.assertEqual(argv.count("--tools"), 1)
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertNotIn("--mcp-config", argv)
         names = []
         for value in argv[argv.index("--tools") + 1:]:
             if value.startswith("-"):
                 break
             names.extend(value.replace(",", " ").split())
-        self.assertCountEqual(names, ["Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite", *web])
-        for name in ("ListAgents", "SendMessage", "SendFile", "GetTask", "Yield"):
-            self.assertIn(name, self.denied_by(argv))
+        self.assertCountEqual(names, ["Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite",
+                                      "Monitor", "TaskOutput", "BashOutput", "BashOutputTool", "AgentOutput",
+                                      "AgentOutputTool", "TaskStop", "KillShell", "KillBash", *web])
+        hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        self.assertEqual([h["matcher"] for h in hooks], ["^Monitor$"])
+        self.assertCountEqual([r for r in self.denied_by(argv) if "(" not in r], """
+            Agent Task ListAgents ListPeers SendMessage SendFile FetchInboxMessage SubagentHandback ObserverReport
+            Workflow RunWorkflow TeamCreate TeamDelete TaskCreate TaskGet TaskList TaskUpdate GetTask Yield
+            AskUserQuestion ScheduleWakeup CronCreate CronDelete CronList RemoteTrigger PushNotification
+            ReadNotifications Poll SendUserMessage Brief SendUserFile WrapUp Projects SendToProject SendToProjectContext
+            ClaudeDesign DesignSync Artifact ArtifactCheck ArtifactData ArtifactComments AppifactRepl PublishPlugin
+            SendFeedback ReportFindings OfferChromeSetup ShareOnboardingGuide ShowOnboardingRolePicker
+            ConnectGitHub SubscribePR SuggestBackgroundPR AutofixPr memory_list memory_read memory_write
+            WebBrowser Frame FrameRead enable__mcp__claude-in-chrome enable__mcp__remote-devices__Claude_Browser
+            enable__mcp__remote-devices__computer request_computer
+            self_hosted_runner_get_pool self_hosted_runner_list_runners self_hosted_runner_list_sessions
+            self_hosted_runner_list_secrets self_hosted_runner_spawn_local self_hosted_runner_read_health
+            self_hosted_runner_read_metrics self_hosted_runner_tail_log self_hosted_runner_requeue_session
+            ListMcpResourcesTool ListMcpResources ReadMcpResourceTool ReadMcpResource ReadMcpResourceDirTool
+            ReadMcpResourceDir WaitForMcpServers RefreshMcpTools McpTaskResumePolling ListConnectors SuggestConnectors
+            SearchMcpRegistry ReadWidgetContext SearchPlugins SearchSkills ListPlugins ListSkills SuggestSkills
+            SuggestPluginInstall propose_skills Skill ToolSearch LSP REPL Eval Code SetGoal ProposeGoal PauseGoal GetGoal
+            """.split())
 
     def test_workers_run_in_the_sandbox_and_leave_git_history_to_hansa(self):
         seen = self.tmp / "argv.jsonl"
@@ -30419,8 +30448,9 @@ def save():'''))
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
-        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch",
-                                    "SendMessage", "ListAgents", "FutureTool"]
+        unavailable = ["SendMessage", "ListAgents", "Agent", "Skill", "ToolSearch", "FutureTool"]
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch", "Monitor",
+                                    *unavailable]
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
@@ -30437,7 +30467,8 @@ def save():'''))
         self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
         verifier = self.allowed_by(argv)
         for allowed in (worker, verifier):
-            self.assertFalse({"FutureTool", "SendMessage", "ListAgents"}.intersection(allowed))
+            self.assertFalse(set(unavailable).intersection(allowed))
+            self.assertNotIn("Monitor", allowed)  # available for commands, never a blanket connection grant
             for r in ("Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"):
                 self.assertIn(r, allowed)
         self.assertNotIn("WebFetch", verifier)
@@ -30541,7 +30572,7 @@ def save():'''))
 
     def test_rules_are_checked_as_claude_code_splits_them(self):
         from hansa import run
-        from hansa.desk import one_rule, split_rules
+        from hansa.desk import one_rule, rules_problem, split_rules
         # Claude Code's splitter: commas and spaces outside parentheses, and every ) ends them, not a depth
         self.assertEqual(split_rules("Bash(echo $(true) WebFetch ok)"), ["Bash(echo $(true)", "WebFetch", "ok)"])
         self.assertEqual(split_rules("Bash(a(b),WebFetch,c)"), ["Bash(a(b)", "WebFetch", "c)"])
@@ -30551,6 +30582,10 @@ def save():'''))
             self.assertFalse(one_rule(r), r)
         for r in whole:
             self.assertTrue(one_rule(r), r)
+        device = "enable__mcp__claude-in-chrome"
+        self.assertEqual(rules_problem([device]), "")
+        for bad in (device + ",Bash", device + " --model", "--tools"):
+            self.assertTrue(rules_problem([bad]), bad)
         s = self.desk.settings()
         for bad in split:
             s["lanes"]["a"]["allow"] = [bad]
@@ -37007,8 +37042,6 @@ def save():'''))
                          "Added hello.txt. Checked it exists.\n")
 
     def test_workers_are_not_given_tools_that_need_someone_there(self):
-        tools = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
-                 "AskUserQuestion", "Monitor"]
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
@@ -37023,9 +37056,19 @@ def save():'''))
         for kind, argv in (("worker", task), ("verifier", verify)):
             with self.subTest(kind=kind):
                 self.assert_worker_tools(argv)
-                for t in tools:
-                    self.assertIn(t, self.denied_by(argv))
                 self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
+
+        [guard] = json.loads(task[task.index("--settings") + 1])["hooks"]["PreToolUse"]
+        [action] = guard["hooks"]
+        self.assertEqual(action["type"], "command")
+        for args, status in [({"command": "tail -f build.log", "description": "build output"}, 0),
+                             ({"ws": {"url": "wss://example.invalid"}, "description": "events"}, 2),
+                             ({"command": "true", "mcp": "example"}, 2), (None, 2)]:
+            with self.subTest(args=args):
+                r = subprocess.run(action["command"], shell=True, input=json.dumps({"tool_input": args}),
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, status, r.stderr)
+                self.assertEqual(r.stdout, "")  # a permitted command still goes through normal Bash permission checks
 
     def test_resumes_and_wrap_ups_limit_tools_from_pre_upgrade_commands(self):
         from hansa import run
@@ -37034,14 +37077,22 @@ def save():'''))
         def save_old_command(path, contents, *args, **kwargs):
             if path.name == run.RESUME_ARGV:
                 argv = json.loads(contents)
-                # Preserve the session, sandbox and fences. Model the old permissions-only command,
-                # including a permission from before bare WebFetch was refused.
-                if "--tools" in argv:
-                    at = argv.index("--tools")
+                # Both saved formats predate command monitors. Preserve their file/git fences and web grants.
+                at = argv.index("--tools")
+                if kind == "resume":
                     del argv[at:at + 2]
+                else:
+                    argv[at + 1] = "Bash,Read,Glob,Grep,Edit,Write,NotebookEdit,TodoWrite,WebFetch"
                 deny, allow = argv.index("--disallowedTools"), argv.index("--allowedTools")
-                argv[deny + 1:allow] = [r for r in argv[deny + 1:allow]
-                                        if r not in ("ListAgents", "SendMessage", "SendFile", "GetTask", "Yield")]
+                old_denies = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
+                              "RemoteTrigger", "PushNotification", "AskUserQuestion", "Monitor"]
+                if kind == "wrap-up":
+                    old_denies += ["GetTask", "Yield", "ListAgents", "SendMessage", "SendFile"]
+                argv[deny + 1:allow] = [r for r in argv[deny + 1:allow] if "(" in r] + old_denies
+                settings = argv.index("--settings") + 1
+                box = json.loads(argv[settings])
+                box.pop("hooks", None)
+                argv[settings] = json.dumps(box)
                 contents = json.dumps([*argv, web_rule, "WebFetch", "ListAgents"])
             return write(path, contents, *args, **kwargs)
 
@@ -37055,6 +37106,7 @@ def save():'''))
                     _, calls = self.turns_run()
                 [call] = calls
                 self.assert_worker_tools(call["argv"], web_rule.partition("(")[0])
+                self.assertIn("Bash(git push:*)", self.denied_by(call["argv"]))
                 grants = self.allowed_by(call["argv"])
                 self.assertIn(web_rule, grants)
                 self.assertFalse({"WebFetch", "ListAgents"}.intersection(grants))
@@ -42273,9 +42325,7 @@ def save():'''))
             head = f.read_text().split("\n---\n", 1)[0].splitlines()
             with self.subTest(helper=f.name):
                 self.assertEqual([x for x in head if x.startswith("tools:")], [mine.get(f.name, "tools: Read, Bash")])
-                self.assertEqual([x for x in head if x.startswith("disallowedTools:")],
-                                 ["disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, "
-                                  "TaskUpdate, GetTask, Yield"])
+                self.assertEqual([x for x in head if x.startswith("disallowedTools:")], [HELPER_DENY_LINE])
 
     def test_the_page_only_shows_tasks_by_their_id(self):
         skip_unless_ports(self)

@@ -435,7 +435,32 @@ VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
 WORKER_ALLOW = ["Bash"]
 # --tools sets the worker's built-in tool list. --allowedTools only grants permissions and cannot
 # keep a new Claude Code tool from sending repository text to another session outside the Bash sandbox.
-WORKER_TOOLS = ("Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite")
+WORKER_TOOLS = ("Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite",
+                "Monitor", "TaskOutput", "BashOutput", "BashOutputTool", "AgentOutput", "AgentOutputTool",
+                "TaskStop", "KillShell", "KillBash")
+# Keep the known routes closed by name too: Claude Code can supply tools implicitly (GetTask and Yield
+# alongside Bash). Agent can deliver a prompt to a teammate or a cloud session. Skill can fork an agent.
+WORKER_DENIED_TOOLS = (
+    "Agent", "Task", "ListAgents", "ListPeers", "SendMessage", "SendFile", "FetchInboxMessage", "SubagentHandback",
+    "ObserverReport", "Workflow", "RunWorkflow", "TeamCreate", "TeamDelete",
+    "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "GetTask", "Yield",
+    "AskUserQuestion", "ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
+    "ReadNotifications", "Poll", "SendUserMessage", "Brief", "SendUserFile", "WrapUp",
+    "Projects", "SendToProject", "SendToProjectContext", "ClaudeDesign", "DesignSync", "Artifact", "ArtifactCheck",
+    "ArtifactData", "ArtifactComments", "AppifactRepl", "PublishPlugin", "SendFeedback", "ReportFindings",
+    "OfferChromeSetup", "ShareOnboardingGuide", "ShowOnboardingRolePicker", "ConnectGitHub", "SubscribePR",
+    "SuggestBackgroundPR", "AutofixPr", "memory_list", "memory_read", "memory_write",
+    "WebBrowser", "Frame", "FrameRead", "enable__mcp__claude-in-chrome", "enable__mcp__remote-devices__Claude_Browser",
+    "enable__mcp__remote-devices__computer", "request_computer",
+    "self_hosted_runner_get_pool", "self_hosted_runner_list_runners", "self_hosted_runner_list_sessions",
+    "self_hosted_runner_list_secrets", "self_hosted_runner_spawn_local", "self_hosted_runner_read_health",
+    "self_hosted_runner_read_metrics", "self_hosted_runner_tail_log", "self_hosted_runner_requeue_session",
+    "ListMcpResourcesTool", "ListMcpResources", "ReadMcpResourceTool", "ReadMcpResource", "ReadMcpResourceDirTool",
+    "ReadMcpResourceDir", "WaitForMcpServers", "RefreshMcpTools", "McpTaskResumePolling", "ListConnectors", "SuggestConnectors",
+    "SearchMcpRegistry", "ReadWidgetContext", "SearchPlugins", "SearchSkills", "ListPlugins", "ListSkills",
+    "SuggestSkills", "SuggestPluginInstall", "propose_skills", "Skill", "ToolSearch", "LSP", "REPL", "Eval", "Code",
+    "SetGoal", "ProposeGoal", "PauseGoal", "GetGoal",
+)
 WORKER_TMP_ROOT = "/tmp"  # where each worker run's own temporary folder is made (make_worker_tmp)
 # Git history is hansa's. Inside the sandbox any command runs without a rule, so a git command
 # that changes history or branches is kept out by name. Verifications keep VERIFY_ALLOW's two.
@@ -490,9 +515,6 @@ SANDBOX_PROTECTED_PATHS = (*SANDBOX_PLACEHOLDERS, ".claude")
 # Project settings may run commands when opened. Refuse worker changes to these names at any depth,
 # including on Linux where the sandbox can only protect fixed paths. Keep while workers can change them.
 PROJECT_SETTINGS_NAMES = (".claude", ".codex", ".agents")
-# A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified.
-INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
-                     "AskUserQuestion", "Monitor"]
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
 UPDATE_NOTE = """
@@ -1981,13 +2003,15 @@ def isolated(cwd, settings: dict | None = None) -> list:
 
 
 def resumed_worker_argv(raw: Path) -> list:
-    """Resume the worker with its original permissions, including on desks upgraded during the run."""
+    """Keep the saved sandbox, file fences and lane grants, applying today's built-in tool policy."""
     argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
-    if "--tools" not in argv:  # older saved commands ended with the deny rules, then the allow rules
-        deny, allow = argv.index("--disallowedTools"), argv.index("--allowedTools")
-        argv[deny:] = worker_tool_args(argv[deny + 1:allow], argv[allow + 1:])
+    deny, allow = argv.index("--disallowedTools"), argv.index("--allowedTools")
+    start = argv.index("--tools") if "--tools" in argv else deny
+    # Earlier hansa denied Monitor wholesale. Only its sandboxed command form is available now.
+    fences = [r for r in argv[deny + 1:allow] if r != "Monitor" and r not in WORKER_DENIED_TOOLS]
+    argv[start:] = worker_tool_args(fences, argv[allow + 1:])
     at = argv.index("--settings") + 1
-    argv[at] = json.dumps({**json.loads(argv[at]), **NO_MODEL_SWITCH})
+    argv[at] = json.dumps({**json.loads(argv[at]), **NO_MODEL_SWITCH, "hooks": worker_hooks()})
     argv[argv.index("--session-id")] = "--resume"
     return argv
 
@@ -3254,15 +3278,21 @@ def worker_tool_args(denied: list, allowed: list) -> list:
     grants = []
     for rule in allowed:
         name = rule.partition("(")[0]
+        if name == "Monitor":  # command monitors use Bash permissions; never preapprove a WebSocket
+            continue
         if name in ("WebFetch", "WebSearch") and not refused_rule(rule):
             if name not in tools:
                 tools.append(name)
         elif name not in WORKER_TOOLS:
             continue
         grants.append(rule)
-    # GetTask and Yield can be included implicitly with Bash. Keep both out even on those releases.
-    return ["--tools", ",".join(tools), "--disallowedTools", *denied, "GetTask", "Yield", "ListAgents", "SendMessage",
-            "SendFile", "--allowedTools", *grants]
+    return ["--tools", ",".join(tools), "--disallowedTools", *denied, *WORKER_DENIED_TOOLS, "--allowedTools", *grants]
+
+
+def worker_hooks() -> dict:
+    command = shlex.join([sys.executable, "-I", str(Path(__file__).resolve().with_name("worker_monitor.py"))])
+    # A command hook blocks on exit 2. A missing interpreter or script must block as well.
+    return {"PreToolUse": [{"matcher": "^Monitor$", "hooks": [{"type": "command", "command": command + " || exit 2"}]}]}
 
 
 def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", lane=None, lane_name: str = "") -> list:
@@ -4891,7 +4921,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     box = sandbox_settings(desk, lane, pname, p, wt, tmp)
     sandbox_guard(desk, lane_name, "verifier" if verifying else "worker", box["sandbox"], wt)  # else held (hold)
-    argv += isolated(wt, box)
+    argv += isolated(wt, {**box, "hooks": worker_hooks()})
     left = write_list(desk, lane)[1]  # what the sandbox (the setup's and the check's too) was not given
     desk.update(tid, write_left_out=left)
     for line in left:
@@ -4908,7 +4938,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         [*desk_read_rules(desk), *desk_fence_rules(desk, wt, tmp), *no_read_rules(kept),
          *no_read_rules(session_private(desk)), *no_read_rules(other_desks_hidden(desk)),
          *no_read_rules(Path(account_home()) / f for f in HOME_STARTS[0][1]),
-         *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS],
+         *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)]],
         [*lane_allow(desk, lane, wt), *WORKER_ALLOW, *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")],
          *(VERIFY_ALLOW if verifying else [])])
     unsplit = argv_rules_problem(argv)
