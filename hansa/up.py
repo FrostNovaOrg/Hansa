@@ -1720,12 +1720,106 @@ def coordinator_up(desk: Desk) -> bool:
     return False
 
 
+def _same_file(a, b) -> bool:
+    try:
+        return bool(a) and bool(b) and os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def installation_problem(command) -> str:
+    """Why a hansa a desk's record names (serve-start.json's, coordinator-start.json's "hansa") is not started: ''
+    when it is a hansa installation this account runs, the same file (os.path.samefile) as this hansa's own
+    launcher (hansa_command) or as a hansa the account's list of desks names (or that path as the list writes it).
+    Only a hansa writes that list, each serve start and init putting its own launcher there (list_desk), and it lies
+    outside every desk: what is written in a desk's folder (a look-alike desk in notes/, say) cannot add to it.
+    Guards against a record that names another program, which hansa up would run; it goes when such records are
+    signed."""
+    if not isinstance(command, str) or not command:
+        return ""  # none recorded: this hansa's own runs
+    listed = [r.get("hansa") for _, r in listed_desks(include_missing=True)]
+    if command in listed or any(_same_file(command, x) for x in [hansa_command(), *listed]):
+        return ""
+    return (f"the hansa it names ({command}) is not a hansa installation this account runs (this one, "
+            f"{hansa_command()}, or one on the account's list of desks)")
+
+
+def claude_problem(desk: Desk, saved_env) -> str:
+    """Why a desk's record of a start is not run for the claude it would start: '' when the claude its saved
+    environment finds (HANSA_CLAUDE, else the first on its PATH: claude_bin, as the server's workers and the
+    coordinator's session would run it) is the same file as the claude this hansa finds in its own environment
+    (the principal's, who runs hansa up), or when that environment finds none (nothing starts as claude then)."""
+    from .desk import claude_bin
+    try:
+        recorded = claude_bin(start_env(desk, saved_env if isinstance(saved_env, dict) else {}))  # as clean_env's
+    except RuntimeError:
+        return ""
+    try:
+        mine = claude_bin()
+    except RuntimeError:
+        mine = ""
+    if _same_file(recorded, mine):
+        return ""
+    return (f"the claude its environment names ({recorded}) is not the claude this hansa finds here "
+            f"({mine or 'none'}): start hansa up where HANSA_CLAUDE or the PATH names that claude")
+
+
+def env_inside_desk(desk: Desk, saved_env) -> str:
+    """Why a record's saved variables are not used: one names a folder or file inside a desk (outer_desk; the desk's
+    own folder too, where the server runs, which a relative PATH entry names), where a session or a worker may write
+    (a look-alike's bin/ on PATH, its own CLAUDE_CONFIG_DIR, XDG_STATE_HOME or HANSA_TMUX); '' when none does."""
+    from .desk import outer_desk
+    kept = start_env(desk, saved_env if isinstance(saved_env, dict) else {})
+    for k, v in kept.items():
+        for x in (v.split(os.pathsep) if k == "PATH" else [v] if v.startswith("/") else []):
+            at = os.path.join(str(desk.root), x)  # a relative entry: in the folder the server starts in
+            if outer_desk(os.path.join(at, "x")):  # the folder itself, or one above it
+                return f"its {k} names {x or '.'}, inside a desk's folder"
+    return ""
+
+
+def recorded_start_problem(desk: Desk) -> str:
+    """Why hansa up starts nothing on this desk from its records: '' when the hansa each record names is a hansa
+    installation (installation_problem), its saved variables name nothing inside a desk (env_inside_desk) and the
+    claude each would start is the claude program (claude_problem; for a session hansa notify on recorded, the
+    program its words name too, as notify-launch checks it), else one
+    sentence. serve-start.json and coordinator-start.json lie in the desk's .hansa/, so this is what keeps a
+    look-alike desk's records from running a program of their own."""
+    serve = read_json(desk.state_dir / "serve-start.json", {}) or {}
+    serve = serve if isinstance(serve, dict) else {}
+    coord = read_coordinator(desk)
+    coord = coord if coord.get("kind") in ("coordinator", "notify") else {}
+    for name, rec in (("serve-start.json", serve), (COORDINATOR_START, coord)):
+        env = rec["env"] if isinstance(rec.get("env"), dict) else None
+        why = installation_problem(rec.get("hansa")) or (
+            env_inside_desk(desk, env) or claude_problem(desk, env) if env is not None else "")
+        if not why and rec is coord and rec.get("kind") == "notify" and isinstance(rec.get("argv"), list) \
+                and rec["argv"] and isinstance(rec["argv"][0], str):
+            from .cli import same_program
+            from .desk import claude_bin
+            try:
+                claude = claude_bin(start_env(desk, env or {}))  # as coordinator_up starts it
+            except RuntimeError:
+                claude = ""
+            if claude and not same_program(rec["argv"][0], claude):
+                why = (f"the program its session's words name ({rec['argv'][0]}) is not the claude this desk uses "
+                       f"({claude})")
+        if why:
+            return f"hansa up started nothing on {desk.root}: in {desk.state_dir / name}, {why}"
+    return ""
+
+
 def desk_up(desk: Desk) -> bool:
-    """The desk's startup sequence: the server, then the coordinator's session."""
+    """The desk's startup sequence: the server, then the coordinator's session. Nothing when a record names a
+    program that is not hansa's or claude (recorded_start_problem)."""
     theirs = account.desk_account(desk.root)
     if theirs:
         command = shlex.join([hansa_command(), "--desk", str(desk.root), "up"])
         print(f"This desk belongs to {theirs}; run as {theirs}: {command}")
+        return False
+    refused = recorded_start_problem(desk)
+    if refused:
+        print(f"hansa: {refused}", file=sys.stderr)
         return False
     desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     # One hansa up at a time per desk: two at once would each start the server (tmux: "duplicate session: serve")

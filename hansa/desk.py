@@ -2998,6 +2998,60 @@ def listed_overlaps(root) -> list:
                               if str(r).startswith("/") and _above(str(r), str(root)) != _above(str(root), str(r))))
 
 
+def session_or_run() -> bool:
+    """Whether hansa runs inside a Claude Code session (its Bash tool, a helper's, the ! prefix: the session's
+    variables, hansa.session_vars) or in a run hansa started (a worker, a setup, a check: HANSA_TASK, which hansa
+    gives each), and not as root's handoff to the desk's account (up.handed_from_root): where outer_desk applies."""
+    from . import session_vars
+    if not (session_vars() or os.environ.get("HANSA_TASK")):
+        return False
+    from .up import handed_from_root
+    return not handed_from_root()
+
+
+def outer_desk(root) -> str:
+    """The folder of a desk that holds the folder `root` (any folder above it that is a desk, is_desk), nearest
+    first; '' when none does. A folder in that desk's .hansa/tmp (run.RUN_TMP_DIR: where hansa makes the TMPDIR of
+    each lane command on Linux, as a lane's check running hansa's own tests makes its desks there) is not held by
+    it: neither a Claude Code session nor a worker writes there (cli.permissions, the runs' sandboxes hide .hansa).
+    A folder on the way that cannot be looked into is passed (a sandbox may close the outer desk)."""
+    here = Path(os.path.abspath(str(root)))
+    here = Path(resolved(str(here)) or here)
+    for d in here.parents:
+        try:
+            if not Desk(d).is_desk():
+                continue
+        except OSError:
+            continue
+        from .run import RUN_TMP_DIR
+        if not _above(str(d / ".hansa" / RUN_TMP_DIR), str(here)):
+            return str(d)
+    return ""
+
+
+def inner_desk_problem(root) -> str:
+    """Why hansa does not take the folder `root` as a desk (to use or to make) here: in a Claude Code session or a
+    run hansa started (session_or_run), a folder inside another desk (outer_desk: its notes/, worktrees/, a lane's
+    worktree, anywhere below its top) is part of that desk, never a desk of its own, so that what a session or a
+    worker may write there (a settings.json and tasks/ of its own) is never read as the principal's settings or
+    records. '' when it may: elsewhere, or from the principal's own terminal (a desk the principal keeps inside
+    another stays theirs to use, as hansa init only warns of it)."""
+    if not session_or_run():
+        return ""
+    outer = outer_desk(root)
+    if not outer:
+        return ""
+    return (f"{Path(os.path.abspath(str(root)))} lies inside the desk at {outer}, so hansa does not take it as a desk "
+            f"of its own from a Claude Code session or a run; nothing was done (use that desk, or a desk outside it)")
+
+
+def refuse_inner_desk(root) -> None:
+    """Stop with inner_desk_problem's sentence when there is one."""
+    problem = inner_desk_problem(root)
+    if problem:
+        raise SystemExit(f"hansa: {problem}")
+
+
 def path_spellings(path: str) -> list:
     """A folder's path as given, with links resolved, and on macOS without /private in front when that leads
     to the same folder (cli.desk_spellings, for any folder)."""
@@ -3213,6 +3267,7 @@ class Desk:
             how = "--desk" if explicit else "HANSA_DESK"
             try:
                 if desk.is_desk():
+                    refuse_inner_desk(desk.root)
                     return desk
             except OSError as e:
                 raise SystemExit(f"hansa: cannot read {desk.given}, named by {how} ({e.strerror or e})") from None
@@ -3226,6 +3281,7 @@ class Desk:
             except OSError:  # a sandbox may close an enclosing desk to a run
                 continue
             if found:
+                refuse_inner_desk(d)  # a folder inside another desk is no desk of its own here, not even optional
                 theirs = cls(d).foreign_desk()
                 if not theirs:
                     return cls(d)

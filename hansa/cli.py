@@ -24,7 +24,7 @@ from . import account, after, alert, build, cost, gaps, goals, history, installe
 from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entry, SettingsError, desk_privacy, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
-                   PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
+                   PROJECT_INTRO, NAME, answer_name, refuse_inner_desk, compact_settings, work_lane_problem, write_text, mkdir_private)
 from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
@@ -584,6 +584,7 @@ def _text(args) -> str:
 def cmd_init(a):
     if answer_name(a.lane):  # before anything is made, for another account too
         raise SystemExit(answer_lane_refused(a.lane))
+    refuse_inner_desk(a.dir)  # from a session or a run, no new desk inside another desk's folder
     if a.user:
         _init_for(a)
     desk = init_desk_or_say(Path(a.dir), a.repo or "", a.lane, a.base)
@@ -611,7 +612,9 @@ def cmd_init(a):
 
 
 def cmd_example(a):
-    from .example import make
+    from .example import DEFAULT_DIR, make
+    # its desk is made in DIR/desk: none inside another desk's folder, from a session or a run
+    refuse_inner_desk((Path(os.path.expanduser(a.dir)) if a.dir else Path.home() / DEFAULT_DIR) / "desk")
     make(Path(a.dir) if a.dir else None, a.lang)
 
 

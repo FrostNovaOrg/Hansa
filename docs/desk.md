@@ -1162,6 +1162,23 @@ words, and for a port in use, how to pick another.
 The command path keeps links to the installation, so switching such a link
 makes future starts use the new installation.
 
+`hansa up` starts a recorded program only when it is hansa's or claude:
+the `bin/hansa` that `serve-start.json` or `coordinator-start.json` names must
+be the same file as the running hansa's own, or as one the account's list of
+desks names (only a hansa writes that list, each server start and `hansa init`
+putting its own installation there, and it lies outside every desk); the claude
+a record's saved variables find (`HANSA_CLAUDE`, else the first on its `PATH`)
+must be the same file as the claude `hansa up` finds in its own environment; and
+the program a session's recorded words name must be that claude, as
+`notify-launch` checks it. Otherwise `hansa up` starts nothing, the server
+included, and says in one sentence which record names what, for example
+`hansa up started nothing on DESK: in .../serve-start.json, the hansa it names
+(PATH) is not a hansa installation this account runs (this one, PATH, or one on
+the account's list of desks)`. So a record written in a desk's folder (a
+look-alike desk in `notes/`, say) cannot have `hansa up` run a program of its
+own. When the claude differs only because this shell's `PATH` or `HANSA_CLAUDE`
+differs from the recorded start's, run `hansa up` where they name the same claude.
+
 Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, where the
 page was last served. If something else holds that port, the server starts
 without its page rather than on another port, where a link, bookmark or proxy
@@ -1772,6 +1789,34 @@ desk for hansa to find:
   start, and `hansa web` does not open it), in one sentence: remove the file and
   start `hansa serve` again for a new key.
 - The account's list of desks (`desks.json`) and its lock are 0600.
+
+### A folder inside a desk
+
+A Claude Code session may write in its desk's `notes/` without asking, and a
+worker in its lane's worktree, so either could write a `settings.json` and a
+`tasks/` there: a folder that looks like a desk, with ticks and records of its own.
+So, inside a Claude Code session (its Bash tool, a helper's, the `!` prefix) or
+a run hansa started (a worker, a setup, a check), a folder that lies inside
+another desk (its `notes/`, `worktrees/`, a lane's worktree, anywhere below its
+top) is not a desk: hansa refuses it for every command, whether it is found from
+the current folder, named with `--desk` or by `HANSA_DESK`, in one sentence:
+`PATH lies inside the desk at OUTER, so hansa does not take it as a desk of its
+own from a Claude Code session or a run; nothing was done`. `hansa init DIR` and
+`hansa example DIR` make no desk there either. The outer desk itself, and a desk
+elsewhere, are taken as before.
+
+- A folder in the outer desk's `.hansa/tmp` is not held by it: there hansa makes
+  the temporary folder of each of a lane's commands on Linux, so a lane's check
+  that runs hansa's own tests makes its desks there. Neither a session nor a
+  worker writes there (the session's rules deny reading and editing `.hansa/`;
+  every run's sandbox hides it), and no variable of the caller's changes this.
+- From the principal's own terminal (none of the session's variables, no
+  `HANSA_TASK`), and when root's hansa hands a command to the desk's account, a
+  desk inside another desk is taken as before: `hansa init` only warns of it.
+- A desk inside a lane's repository is not inside another desk, and is taken as
+  before.
+
+This rule may go when a desk's settings carry the principal's signature.
 
 ### Where a desk's files grow
 
