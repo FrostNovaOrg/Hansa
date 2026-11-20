@@ -164,8 +164,8 @@ Afterwards the same tab keeps its key in session storage (the first way) or need
 
 From outside, while **Allow changing settings from outside this machine** (`settings_from_outside`, off by default) is off, the page may only read, answer or stop releases, and pause or resume dispatch. Saving settings and keys, testing alerts or pushes, recognizing push addresses, checking providers (Ping) and confirming top-ups require the switch; turn it on in **Settings → Lanes → General** from the machine's own address through the SSH tunnel.
 Settings shows this restriction at the top of every section and locks its fields, while text remains readable and copyable.
-A request counts as from outside if its `Host` is not a loopback name (`127.0.0.1`, `localhost`, `[::1]`) or it carries `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`.
-A proxy that hides both its outside host name and these headers would not be recognised as outside: do not set one up that way.
+A request counts as from outside if its `Host` is not a loopback name (`127.0.0.1`, `localhost`, `[::1]`), or it carries `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, a non-loopback `Origin` or `Sec-Fetch-Site: cross-site`.
+If a proxy rewrites `Host` to loopback, add a forwarding header so requests without those browser headers still count as outside.
 
 ## Status, work and cost on the web page
 
@@ -941,10 +941,8 @@ or tmux server.
 Below it, **Allow changing settings from outside this machine**
 (`settings_from_outside`, off by default) decides whether a request that reaches
 `hansa serve` from outside this machine may save settings and provider keys,
-test alerts or pushes, recognize push addresses, check providers (Ping) and confirm top-ups. A
-request counts as from outside unless its `Host` is `127.0.0.1`, `localhost` or
-`[::1]` (any port or letter case) and it has no proxy header (`Forwarded`,
-`X-Forwarded-*`, `X-Real-IP`, `Via`). While the switch is off, such a request
+test alerts or pushes, recognize push addresses, check providers (Ping) and confirm top-ups.
+While the switch is off, a request [from outside](#opening-the-page-from-outside-the-machine)
 may only read, answer or stop releases, and pause or resume dispatch. Other POST
 requests get HTTP 200 with `ok: false`: code `settings_local_only` for settings
 and keys, `outside_local_only` for the others, before any action runs. An allowlist

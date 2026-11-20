@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -95,6 +96,7 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
 
 # A Host the browser sends for this machine's own address, the SSH tunnel's: any port, any letter case
 LOOPBACK_HOST = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:[0-9]{1,5})?", re.IGNORECASE)
+ORIGIN_ADDRESS = re.compile(r"https?://(localhost|[0-9.]+|\[[0-9a-f:.]*:[0-9a-f:.]*\])(?::[0-9]{1,5})?", re.IGNORECASE)
 # Headers a proxy adds; and every X-Forwarded-* header
 PROXY_HEADERS = ("forwarded", "x-real-ip", "via")
 SETTINGS_LOCAL_ONLY = ("settings and keys change only from this machine's own address (127.0.0.1 or localhost, "
@@ -109,14 +111,25 @@ OUTSIDE_LOCAL_ONLY = ('POST {path} was refused from outside this machine; to all
 
 
 def from_outside(headers) -> bool:
-    """Whether a request to the page came from outside this machine: it is local only with one Host, a loopback
-    name, and none of the headers a proxy adds. Whatever cannot be read is from outside."""
+    """Check for a single loopback Host and for proxy or browser headers that mark an outside request."""
     try:
-        names = [str(k).lower() for k in headers.keys()]
-        hosts = [v for k, v in headers.items() if str(k).lower() == "host"]
-        if any(n in PROXY_HEADERS or n.startswith("x-forwarded-") for n in names):
-            return True
-        return not (len(hosts) == 1 and isinstance(hosts[0], str) and LOOPBACK_HOST.fullmatch(hosts[0].strip()))
+        hosts = []
+        for name, value in headers.items():
+            name = str(name).lower()
+            if name in PROXY_HEADERS or name.startswith("x-forwarded-"):
+                return True
+            if name == "host":
+                hosts.append(value)
+            elif name == "origin":
+                origin = ORIGIN_ADDRESS.fullmatch(value.strip(" \t"))
+                if not origin:
+                    return True
+                host = origin[1].strip("[]").lower()
+                if host != "localhost" and not ipaddress.ip_address(host).is_loopback:
+                    return True
+            elif name == "sec-fetch-site" and value.strip(" \t").lower() == "cross-site":
+                return True
+        return not (len(hosts) == 1 and LOOPBACK_HOST.fullmatch(hosts[0].strip()))
     except Exception:
         return True
 
@@ -214,6 +227,32 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
         def log_message(self, *args):
             pass
 
+        def parse_request(self):
+            return super().parse_request() and self._valid_framing()
+
+        def handle_expect_100(self):
+            # The base parser can send 100 Continue before parse_request returns.
+            return self._valid_framing() and super().handle_expect_100()
+
+        def _valid_framing(self):
+            # Check before dispatch so unread bytes cannot become the next request on a kept connection.
+            lengths = {value.strip(" \t") for value in self.headers.get_all("Content-Length", [])}
+            encoded = "Transfer-Encoding" in self.headers
+            if (self.headers.defects or (encoded and (lengths or self.command == "POST"))
+                    or any(not re.fullmatch(r"[0-9]+", length) for length in lengths)
+                    or len({length.lstrip("0") for length in lengths}) > 1):
+                return self._refuse_length()
+            if self.command in ("GET", "HEAD") and (encoded or any(length.lstrip("0") for length in lengths)):
+                self.close_connection = True
+                self._bad_request("unexpected_body", "body", "request body is not allowed")
+                return False
+            return True
+
+        def _refuse_length(self):
+            self.close_connection = True
+            self._bad_request("invalid_length", "Content-Length", "body needs a nonnegative Content-Length")
+            return False
+
         def _authed(self) -> bool:
             return hmac.compare_digest(self.headers.get("Authorization", "").encode(),
                                        ("Bearer " + token).encode())
@@ -256,7 +295,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             for k, v in (headers or {}).items():
                 self.send_header(k, v)
             self.end_headers()
-            if code != 304:
+            if code != 304 and self.command != "HEAD":
                 self.wfile.write(data)
 
         def _bad_request(self, code: str, field: str, problem: str):
@@ -392,12 +431,12 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if not self._authed() or self.headers.get("X-Hansa") != "1":
                 self.close_connection = True  # the unread body cannot become the next HTTP/1.1 request
                 return self._send(403, {"error": "forbidden"})
-            length = self.headers.get("Content-Length", "0")
-            if self.headers.get("Transfer-Encoding") or not re.fullmatch(r"[0-9]+", length):
-                self.close_connection = True
-                return self._bad_request("invalid_length", "Content-Length", "body needs a nonnegative Content-Length")
+            length = self.headers.get("Content-Length", "0").strip(" \t").lstrip("0") or "0"
             try:
-                data = self.rfile.read(int(length)) or b"{}"
+                try:
+                    data = self.rfile.read(int(length)) or b"{}"
+                except (OverflowError, ValueError):
+                    return self._refuse_length()
                 try:
                     body = json.loads(data)
                 except ValueError:
