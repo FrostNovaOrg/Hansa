@@ -29,13 +29,12 @@ import sys
 import tempfile
 import threading
 import time
-import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from . import account, after, build, installed, installed_text, pictures, session_vars, without_session
+from . import account, after, build, installed, installed_text, pictures, project_files, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_log_lock, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, connected_providers, key_name, provider_entry, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems, old_codex_provider)
@@ -1240,13 +1239,20 @@ def git_settings(cwd) -> list:
     return worktree_git_settings() if is_linked(cwd) else checkout_git_settings()
 
 
-def git(*args, cwd, env=None, stdin=None) -> str:
+def git(*args, cwd, env=None, stdin=None, raw=False) -> str:
+    """git's output, as text; raw: its bytes, stdin given as bytes."""
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
     # Hansa reads git's diagnostics and --shortstat in English, even with a caller's locale override.
     # Keep this in the child environment: workers and lane commands retain their own locale.
     e = {**without_session(os.environ), **GIT_ID, **(env or {}), "LC_ALL": "C"}
     r = subprocess.run(["git", "-c", "core.quotePath=false", *git_settings(cwd), *args],
-                       cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace", input=stdin)
+                       cwd=str(cwd), env=e, capture_output=True, input=stdin,
+                       **({} if raw else {"text": True, "errors": "replace"}))
+    if raw:
+        if r.returncode:
+            r.stderr = r.stderr.decode("utf-8", "replace")
+        else:
+            return r.stdout
     if r.returncode:
         refused = account.git_refusal(r.stderr or "", cwd)
         if refused:
@@ -2581,10 +2587,10 @@ def git_file_changed(desk: Desk, tid: str, e: GitFileChanged) -> str:
             f"so the lane's next task runs normally")
 
 
-def wgit(desk: Desk, wt: Path, *args, env=None, stdin=None) -> str:
+def wgit(desk: Desk, wt: Path, *args, env=None, stdin=None, raw=False) -> str:
     """git in a worktree, run only after its .git file is checked."""
     check_git_file(desk, wt)
-    return git(*args, cwd=wt, env=env, stdin=stdin)
+    return git(*args, cwd=wt, env=env, stdin=stdin, raw=raw)
 
 
 def sandbox_leftovers(desk: Desk, wt: Path) -> list:
@@ -2614,12 +2620,8 @@ class RepositoryInside(SandboxPathChanged):
 
 
 # What git takes for a .git entry: in any case, and on macOS with the characters HFS+ ignores in a name
-_HFS_IGNORED = dict.fromkeys(map(ord, "‌‍‎‏‪‫‬‭‮"
-                                      "⁪⁫⁬⁭⁮⁯﻿"))
-
-
-def _nfc(p: str) -> str:
-    return p if p.isascii() else unicodedata.normalize("NFC", p)
+_HFS_IGNORED = project_files._HFS_IGNORED
+_nfc = project_files.nfc
 
 
 def gitlinks(desk: Desk, wt: Path, *revs) -> dict:
@@ -2646,28 +2648,9 @@ def index_gitlinks(desk: Desk, wt: Path, env=None) -> dict:
 def repos_inside(desk: Desk, wt: Path, places) -> list:
     """The folders below the worktree's top that hold a .git entry (a folder, a file or a link), found by hansa's own
     walk (lstat, no link followed, no git), but for `places` (the submodules' paths, never walked into) and those the
-    worktree ignores: git looks into none of these. Sorted, relative, with /."""
-    places = {_nfc(p) for p in places}
-    found, todo = [], [""]
-    while todo:
-        rel = todo.pop()
-        try:
-            with os.scandir(os.path.join(wt, rel)) as it:
-                entries = list(it)
-        except OSError:  # one git cannot read either
-            continue
-        for d in entries:
-            p = f"{rel}/{d.name}" if rel else d.name
-            if d.name.translate(_HFS_IGNORED).lower() == ".git":
-                if rel and _nfc(rel) not in places:
-                    found.append(rel)
-                continue  # a git folder (the top's own too) is not walked into
-            try:
-                if d.is_dir(follow_symlinks=False) and _nfc(p) not in places:
-                    todo.append(p)
-            except OSError:
-                continue
-    found = sorted(set(found))
+    worktree ignores: git looks into none of these. Sorted, relative, with /. The walk is project_files.walk, which
+    finds the project settings a run loads (clear_project_files) as well."""
+    found = project_files.walk(wt, places)[0]
     ignored = set()
     for i in range(0, len(found), 200):  # git skips an ignored folder; one it cannot match stays found
         try:
@@ -2720,6 +2703,59 @@ def clear_repos_inside(desk: Desk, wt: Path, rev: str) -> list:
     for i in range(0, len(changed), 200):
         wgit(desk, wt, "reset", "-q", rev, "--", *(f":(top,literal){p}" for p in changed[i:i + 200]))
     return sorted({*found, *changed})
+
+
+# In a run's raw folder: the start commit's project settings (project_files.manifest), for the lane's setup's
+# wrapper, and what that wrapper did after the setup ({removed, restored, error})
+PROJECT_FILES_MANIFEST = "project-files.json"
+PROJECT_FILES_DONE = "project-files-done.json"
+
+
+def project_held(desk: Desk, wt: Path, rev: str) -> dict:
+    """The entries of commit `rev` at the project paths a run loads (project_files.NAMES, at any depth):
+    {path: (git mode, content or a link's target)}, read from git's objects alone."""
+    found = {}
+    for e in wgit(desk, wt, "ls-tree", "-r", "-z", "--full-tree", rev).split("\0"):
+        if e:
+            info, path = e.split("\t", 1)
+            mode, kind, oid = info.split()
+            if kind == "blob" and project_files.is_project_path(path):
+                found[path] = (mode, oid)
+    data, ids = {}, sorted({o for _, o in found.values()})
+    out = wgit(desk, wt, "cat-file", "--batch", stdin="".join(f"{o}\n" for o in ids).encode(), raw=True) if ids else b""
+    at = 0
+    while at < len(out):
+        nl = out.index(b"\n", at)
+        oid, _, size = out[at:nl].decode().split()
+        data[oid] = out[nl + 1:nl + 1 + int(size)]
+        at = nl + 2 + int(size)
+    return {p: (m, data[o]) for p, (m, o) in found.items()}
+
+
+def clear_project_files(desk: Desk, wt: Path, tid: str, rev: str) -> dict:
+    """Just before a run's provider starts: make the project settings in the worktree exactly commit `rev`'s
+    (project_files.settle: hansa removes what it does not hold, and puts back what it holds otherwise, no link
+    followed, no git), and keep rev's for the wrapper that does it again after the lane's setup (with_setup). Records
+    what it did (note_project_files); a removal that fails raises RuntimeError, one sentence: the run does not start."""
+    held, places = project_held(desk, wt, rev), gitlinks(desk, wt, rev)
+    try:
+        done = project_files.settle(wt, held, places)
+    except OSError as e:
+        raise RuntimeError(project_files.failure(e)) from None
+    write_json(desk.raw_dir(tid) / PROJECT_FILES_MANIFEST, project_files.manifest(held, places))
+    note_project_files(desk, tid, done)
+    return done
+
+
+def note_project_files(desk: Desk, tid: str, done: dict) -> None:
+    """Add what clearing the project settings removed and put back to the task's record (project_files), for show:
+    each path once, though the clearing after the lane's setup may meet again what the one before it did."""
+    if not (done.get("removed") or done.get("restored")):
+        return
+    desk.change(tid, lambda m: {"project_files": {k: list(dict.fromkeys(
+        [*((m.get("project_files") or {}).get(k) or []), *(done.get(k) or [])])) for k in ("removed", "restored")}})
+    desk.event("project_files_cleared", task=tid, removed=(done.get("removed") or [])[:20],
+               restored=(done.get("restored") or [])[:20])
 
 
 def add_all(desk: Desk, wt: Path, places=(), env=None) -> None:
@@ -4564,15 +4600,20 @@ def note_git_at_start(desk: Desk, wt: Path, tid: str) -> None:
 
 
 def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict, wt: Path) -> list:
-    """The worker command, preceded by the lane's setup command when it has one (see SETUP_SCRIPT)."""
+    """The worker command, preceded by the lane's setup command when it has one (see SETUP_SCRIPT), and after that
+    by hansa's clearing of the project settings the setup may have left (project_files, run on its own: outside the
+    sandbox, Python isolated from the worktree and the environment), which then execs the worker."""
     if not lane.get("setup"):
         return argv
     raw = desk.raw_dir(tid)
     (raw / "setup.log.done").unlink(missing_ok=True)  # an earlier try's mark says nothing about this one
+    (raw / PROJECT_FILES_DONE).unlink(missing_ok=True)
     srt, settings, tmp, own = in_srt(desk, tid, "setup", lane, pname, p, wt)
     line = expected_git_line(desk, wt) or "(unknown, so no git runs here)"
+    clear = [sys.executable, "-I", str(Path(project_files.__file__).resolve()), str(raw / PROJECT_FILES_MANIFEST),
+             str(raw / PROJECT_FILES_DONE), str(wt), "--"]
     return ["/bin/sh", "-c", SETUP_SCRIPT, "hansa-setup", in_sandbox(desk, lane, lane["setup"]), str(raw / "setup.log"), str(raw / "run.err"),
-            line, tmp, srt, settings, own, *argv]
+            line, tmp, srt, settings, own, *clear, *argv]
 
 
 def cancelled_before_start(desk: Desk, tid: str) -> bool:
@@ -5106,6 +5147,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
+    # the project settings it loads are its start commit's: here, and again after the lane's setup (with_setup)
+    clear_project_files(desk, wt, tid, (desk.meta(tid).get("run_start") or {}).get("commit") or "HEAD")
     command = with_setup(desk, tid, argv, lane, pname, p, wt)
     with desk.lock():  # a cancel lands before this (the worker never starts) or after it (it is stopped)
         if cancelled_before_start(desk, tid):
@@ -6040,7 +6083,15 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     memory = oom_result(meta.get("oom_start"))
     d = desk.tasks_dir / tid
     done = desk.state_dir / "runs" / tid / "setup.log.done"
-    set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
+    # what clearing the project settings after the lane's setup did (with_setup); when it failed, the worker never
+    # started either
+    cleared = read_json(desk.state_dir / "runs" / tid / PROJECT_FILES_DONE, {}) if meta.get("setup_ran") else {}
+    cleared = cleared if isinstance(cleared, dict) else {}
+    for name in (PROJECT_FILES_DONE, PROJECT_FILES_MANIFEST):
+        (desk.state_dir / "runs" / tid / name).unlink(missing_ok=True)
+    note_project_files(desk, tid, cleared)
+    unready = str(cleared.get("error") or "")
+    set_up = (not meta.get("setup_ran") or done.exists()) and not unready  # else the worker never started: nothing is its work
     began = None  # when Claude Code started, as near as hansa knows: the lane's setup's end, else the first message
     for f in (done, desk.state_dir / "runs" / tid / "first-message.md"):
         try:
@@ -6201,7 +6252,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     codex = (p or {}).get("kind") == "codex"
     # what the continuation after the ceiling met (a limit, a dropped connection) rests no provider and
     # queues nothing again: the task ends as one stopped at the ceiling
-    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed or wu else \
+    kind, why = ("", "") if meta.get("cancel") or setup or unready or changed or killed or wu else \
         unusable_reason(run, err, subscription, codex=codex)
     # a report written before the connection went is the worker's finished work: that run ends as it did
     net = "" if kind or late or wu else network_reason(run, err)
@@ -6220,6 +6271,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     elif setup:
         state, error = "failed", (f"the lane's setup command failed (exit {setup.group(1)}), so the worker never "
                                   f"started; hansa show {tid} has the setup's last lines")
+    elif unready:  # the project settings left after the setup could not be cleared: the run did not start
+        state, error = "failed", f"could not start: {unready}"
     elif meta.get("timed_out") or wu:  # at a ceiling, continued after it or not: the one wrap_up named, if it ran
         lane = desk.settings()["lanes"].get(meta.get("lane"), {})
         limit = (f"{wu['limit_turns']} turns" if wu.get("limit_turns")

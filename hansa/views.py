@@ -1848,6 +1848,19 @@ def task_page(desk: Desk, tid: str) -> dict:
     return {"meta": meta, "text": text, "text_parts": messages["parts"]}
 
 
+def project_files_line(cleared: dict) -> str:
+    """hansa show's line for the project settings a run's start found that its start commit does not hold (run.
+    clear_project_files): how many were removed, up to 5 named, and those put back to the commit's; '' for none."""
+    def named(paths):
+        more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
+        return f"{len(paths)} ({', '.join(paths[:5])}{more})"
+    removed, restored = cleared.get("removed") or [], cleared.get("restored") or []
+    parts = ([f"removed {named(removed)}"] if removed else []) + (
+        [f"put back to the commit's {named(restored)}"] if restored else [])
+    return ("project settings in the worktree that its start commit does not hold (.claude, .codex, .agents, "
+            ".mcp.json), before it started: " + "; ".join(parts)) if parts else ""
+
+
 def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_messages=None) -> str:
     """hansa show. full: the whole text and report. heard: whether the session it is for hears from hansa
     (default: the session this command runs in)."""
@@ -1941,6 +1954,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                    + f" is in git stash as {at} (hansa: left over before {tid}); its changes: "
                    + f"hansa git {m['lane']} diff {at}^ {at}"
                    + (f"; its new files: hansa git {m['lane']} show {at}^3" if left.get("untracked") else ""))
+    cleared = project_files_line(m.get("project_files") or {})
+    if cleared:
+        out.append(cleared)
     if m.get("closed"):  # a verification that had ended when its task closed: kept as it ended
         out.append(m["closed"])
     if m.get("machine_problem") and m["state"] == "failed":
