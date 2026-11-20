@@ -10473,10 +10473,36 @@ def save():'''))
 
         (self.repo / ".git").rename(self.tmp / "removed-git")
         (self.repo / "other.txt").write_text("fixture file outside Git history\n")
+        # Stop Git discovery here even when TMPDIR is inside a checkout. hansa strips inherited GIT_* variables.
+        real = shutil.which("git")
+        git = self.tmp / "bin" / "git"
+        git.write_text(f"#!/bin/sh\nexport GIT_CEILING_DIRECTORIES={shlex.quote(str(self.tmp.resolve()))}\n"
+                       f'exec {shlex.quote(real)} "$@"\n')
+        git.chmod(0o755)
         code, out, err = self.hansa_git("a", "diff", "README.md", "other.txt")
         self.assertEqual((code, out), (1, ""))
         self.assertIn("no Git checkout", err)
         self.assertIn("Nothing was run", err)
+
+    def test_hansa_git_diffs_two_commits_in_a_bare_lane_repository(self):
+        self.commit_in_repo("README.md", "demo\nsecond line\n")
+        bare = self.tmp / "bare.git"
+        self.git_out("clone", "--bare", "--quiet", str(self.repo), str(bare))
+        self.hansa("lane", "add", "b", "--repo", str(bare))
+
+        with self.subTest("commit diff"):
+            code, out, err = self.hansa_git("b", "diff", "HEAD~1", "HEAD", "--stat")
+            self.assertEqual((code, err), (0, ""))
+            self.assertRegex(out, r"README\.md\s+\|\s+1\s+\+")
+
+        for cmd, option, *args in (("diff", "--no-index", "HEAD", "config"),
+                                   ("diff", "../repo/README.md", "config"),
+                                   ("grep", "--untracked", "demo")):
+            with self.subTest(cmd=cmd, option=option):
+                code, out, err = self.hansa_git("b", cmd, option, *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"{option} is refused", err)
+                self.assertIn("Nothing was run", err)
 
     def test_hansa_git_reads_a_lane_in_a_checkout_subfolder(self):
         pkg = self.repo / "pkg"
