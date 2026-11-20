@@ -2641,6 +2641,10 @@ def cmd_coordinator(a):
     hooks = {**turns, "SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
         f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}, *turns["SessionStart"]]}
+    # A named Agent call can launch a teammate with mandatory messaging, even when its definition
+    # denies it. The ordinary command hook also runs on versions and starts without hansa's mod.
+    guard = shlex.join([sys.executable, "-I", str(Path(__file__).resolve().with_name("helper_spawn.py"))])
+    hooks["PreToolUse"] = [{"matcher": "^Agent$|^Task$", "hooks": [{"type": "command", "command": guard + " || exit 2"}]}]
     own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)
@@ -2822,8 +2826,9 @@ def helper_text(text: str, model: str) -> str:
     own model field; with none, as hansa ships it, so it runs on the coordinator's model. A model the coordinator names
     for one call of the Agent tool comes before either (Claude Code's order)."""
     # the read-only helpers' hook that holds their shell to reading commands (helper_bash.py), as this hansa runs it
-    text = text.replace('"HANSA_HELPER_BASH"', json.dumps(shlex.join(
-        [sys.executable, "-I", str(Path(__file__).with_name("helper_bash.py"))])))
+    command = shlex.join([sys.executable, "-I", str(Path(__file__).with_name("helper_bash.py"))])
+    # Claude Code blocks on exit 2. A missing interpreter otherwise gives the shell's exit 127.
+    text = text.replace('"HANSA_HELPER_BASH"', json.dumps(command + " || exit 2"))
     if not model:
         return text
     head, sep, rest = text.partition("\n---\n")

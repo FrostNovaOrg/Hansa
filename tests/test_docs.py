@@ -209,6 +209,14 @@ def check_links(root):
 
 
 class DocsTest(unittest.TestCase):
+    def test_workers_sandbox_help_explains_the_missing_checklist_on_2_1_329(self):
+        from hansa.cli import topic_text
+        topic = topic_text("workers-sandbox")
+        paragraph = next((p for p in topic.split("\n\n") if "no built-in checklist" in p), "")
+        for word in ("2.1.329", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "CLAUDE_CODE_TASK_LIST_ID"):
+            with self.subTest(word=word):
+                self.assertIn(word, paragraph)
+
     def test_alerts_help_describes_command_visibility(self):
         from hansa.cli import topic_text
         text = " ".join(topic_text("alerts").split())

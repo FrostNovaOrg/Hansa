@@ -433,6 +433,37 @@ VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
 # with ${...} or a heredoc holding braces and quotes, and nobody answers. This is safe only while the sandbox
 # never lets a command out (allowUnsandboxedCommands false, no excludedCommands).
 WORKER_ALLOW = ["Bash"]
+# --tools sets the worker's built-in tool list. --allowedTools only grants permissions and cannot
+# keep a new Claude Code tool from sending repository text to another session outside the Bash sandbox.
+WORKER_TOOLS = ("Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite",
+                "Monitor", "TaskOutput", "BashOutput", "BashOutputTool", "AgentOutput", "AgentOutputTool",
+                "TaskStop", "KillShell", "KillBash")
+# Keep the known routes closed by name too: Claude Code can supply tools implicitly (GetTask and Yield
+# alongside Bash). Agent can deliver a prompt to a teammate or a cloud session. Skill can fork an agent.
+WORKER_DENIED_TOOLS = (
+    "Agent", "Task", "ListAgents", "ListPeers", "SendMessage", "SendFile", "FetchInboxMessage", "SubagentHandback",
+    "ObserverReport", "Workflow", "RunWorkflow", "TeamCreate", "TeamDelete",
+    # In 2.1.329 the four checklist tools use the session ID by default. Settings can select a shared list after
+    # provider_env starts clean. Managed settings take precedence over --settings.
+    "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
+    "GetTask", "Yield",
+    "AskUserQuestion", "ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
+    "ReadNotifications", "Poll", "SendUserMessage", "Brief", "SendUserFile", "WrapUp",
+    "Projects", "SendToProject", "SendToProjectContext", "ClaudeDesign", "DesignSync", "Artifact", "ArtifactCheck",
+    "ArtifactData", "ArtifactComments", "AppifactRepl", "PublishPlugin", "SendFeedback", "ReportFindings",
+    "OfferChromeSetup", "ShareOnboardingGuide", "ShowOnboardingRolePicker", "ConnectGitHub", "SubscribePR",
+    "SuggestBackgroundPR", "AutofixPr", "memory_list", "memory_read", "memory_write",
+    "WebBrowser", "Frame", "FrameRead", "enable__mcp__claude-in-chrome", "enable__mcp__remote-devices__Claude_Browser",
+    "enable__mcp__remote-devices__computer", "request_computer",
+    "self_hosted_runner_get_pool", "self_hosted_runner_list_runners", "self_hosted_runner_list_sessions",
+    "self_hosted_runner_list_secrets", "self_hosted_runner_spawn_local", "self_hosted_runner_read_health",
+    "self_hosted_runner_read_metrics", "self_hosted_runner_tail_log", "self_hosted_runner_requeue_session",
+    "ListMcpResourcesTool", "ListMcpResources", "ReadMcpResourceTool", "ReadMcpResource", "ReadMcpResourceDirTool",
+    "ReadMcpResourceDir", "WaitForMcpServers", "RefreshMcpTools", "McpTaskResumePolling", "ListConnectors", "SuggestConnectors",
+    "SearchMcpRegistry", "ReadWidgetContext", "SearchPlugins", "SearchSkills", "ListPlugins", "ListSkills",
+    "SuggestSkills", "SuggestPluginInstall", "propose_skills", "Skill", "ToolSearch", "LSP", "REPL", "Eval", "Code",
+    "SetGoal", "ProposeGoal", "PauseGoal", "GetGoal",
+)
 WORKER_TMP_ROOT = "/tmp"  # where each worker run's own temporary folder is made (make_worker_tmp)
 # Git history is hansa's. Inside the sandbox any command runs without a rule, so a git command
 # that changes history or branches is kept out by name. Verifications keep VERIFY_ALLOW's two.
@@ -489,9 +520,6 @@ SANDBOX_PROTECTED_PATHS = (*SANDBOX_PLACEHOLDERS, ".claude")
 PROJECT_SETTINGS_NAMES = (".claude", ".codex", ".agents")
 # The standalone Codex adapter mirrors the lane commands' project denies. Its tests compare the rules.
 NESTED_CLAUDE_SETTINGS = (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".claude/skills")
-# A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified.
-INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
-                     "AskUserQuestion", "Monitor"]
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
 UPDATE_NOTE = """
@@ -2017,11 +2045,17 @@ def isolated(cwd, settings: dict | None = None) -> list:
                                      "autoMemoryEnabled": False, **NO_MODEL_SWITCH})]
 
 
-def no_model_switch(argv: list) -> list:
-    """A worker's saved command (RESUME_ARGV) as resume and wrap_up run it: its --settings object with
-    NO_MODEL_SWITCH, so a run whose command was saved before hansa set it does not switch models either."""
+def resumed_worker_argv(raw: Path) -> list:
+    """Keep the saved sandbox, file fences and lane grants, applying today's built-in tool policy."""
+    argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
+    deny, allow = argv.index("--disallowedTools"), argv.index("--allowedTools")
+    start = argv.index("--tools") if "--tools" in argv else deny
+    # Earlier hansa denied Monitor wholesale. Only its sandboxed command form is available now.
+    fences = [r for r in argv[deny + 1:allow] if r != "Monitor" and r not in WORKER_DENIED_TOOLS]
+    argv[start:] = worker_tool_args(fences, argv[allow + 1:])
     at = argv.index("--settings") + 1
-    argv[at] = json.dumps({**json.loads(argv[at]), **NO_MODEL_SWITCH})
+    argv[at] = json.dumps({**json.loads(argv[at]), **NO_MODEL_SWITCH, "hooks": worker_hooks()})
+    argv[argv.index("--session-id")] = "--resume"
     return argv
 
 
@@ -3467,6 +3501,28 @@ def lane_allow(desk: Desk, lane: dict, wt: Path) -> list:
     reach Claude Code as several."""
     files = [rule(t, wt) for t in ("Read", "Edit")]  # Edit covers Write
     return files + ["TodoWrite"] + list(dict.fromkeys(r for r in lane.get("allow", []) if not refused_rule(r)))
+
+
+def worker_tool_args(denied: list, allowed: list) -> list:
+    tools = list(WORKER_TOOLS)
+    grants = []
+    for rule in allowed:
+        name = rule.partition("(")[0]
+        if name == "Monitor":  # command monitors use Bash permissions; never preapprove a WebSocket
+            continue
+        if name in ("WebFetch", "WebSearch") and not refused_rule(rule):
+            if name not in tools:
+                tools.append(name)
+        elif name not in WORKER_TOOLS:
+            continue
+        grants.append(rule)
+    return ["--tools", ",".join(tools), "--disallowedTools", *denied, *WORKER_DENIED_TOOLS, "--allowedTools", *grants]
+
+
+def worker_hooks() -> dict:
+    command = shlex.join([sys.executable, "-I", str(Path(__file__).resolve().with_name("worker_monitor.py"))])
+    # A command hook blocks on exit 2. A missing interpreter or script must block as well.
+    return {"PreToolUse": [{"matcher": "^Monitor$", "hooks": [{"type": "command", "command": command + " || exit 2"}]}]}
 
 
 def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", lane=None, lane_name: str = "") -> list:
@@ -5112,7 +5168,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
     box = sandbox_settings(desk, lane, pname, p, wt, tmp)
     sandbox_guard(desk, lane_name, "verifier" if verifying else "worker", box["sandbox"], wt)  # else held (hold)
-    argv += isolated(wt, box)
+    argv += isolated(wt, {**box, "hooks": worker_hooks()})
     left = write_list(desk, lane)[1]  # what the sandbox (the setup's and the check's too) was not given
     desk.update(tid, write_left_out=left)
     for line in left:
@@ -5125,12 +5181,13 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     desk.update(tid, no_read_left_out=not_kept)
     for line in not_kept:
         desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
-    argv += ["--disallowedTools", *desk_read_rules(desk), *desk_fence_rules(desk, wt, tmp), *no_read_rules(kept),
-             *no_read_rules(session_private(desk)), *no_read_rules(other_desks_hidden(desk)),
-             *no_read_rules(Path(account_home()) / f for f in HOME_STARTS[0][1]),
-             *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
-    argv += ["--allowedTools", *lane_allow(desk, lane, wt), *WORKER_ALLOW,
-             *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
+    argv += worker_tool_args(
+        [*desk_read_rules(desk), *desk_fence_rules(desk, wt, tmp), *no_read_rules(kept),
+         *no_read_rules(session_private(desk)), *no_read_rules(other_desks_hidden(desk)),
+         *no_read_rules(Path(account_home()) / f for f in HOME_STARTS[0][1]),
+         *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)]],
+        [*lane_allow(desk, lane, wt), *WORKER_ALLOW, *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")],
+         *(VERIFY_ALLOW if verifying else [])])
     unsplit = argv_rules_problem(argv)
     if unsplit:  # a deny rule Claude Code would split leaves its folder open: no worker starts with one
         raise RuntimeError(f"hansa started no {'verifier' if verifying else 'worker'}: {unsplit}")
@@ -5246,8 +5303,7 @@ def resume(desk: Desk, tid: str):
     wt = Path(meta["worktree"])
     try:
         check_git_file(desk, wt)
-        argv = no_model_switch(json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8")))
-        argv[argv.index("--session-id")] = "--resume"
+        argv = resumed_worker_argv(raw)
     except (GitFileChanged, OSError, ValueError):  # finish says what happened
         return None
     sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
@@ -5300,8 +5356,7 @@ def wrap_up(desk: Desk, tid: str):
     wt = Path(meta["worktree"])
     try:
         check_git_file(desk, wt)
-        argv = no_model_switch(json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8")))
-        argv[argv.index("--session-id")] = "--resume"
+        argv = resumed_worker_argv(raw)
         turns = int(argv[argv.index("--max-turns") + 1])  # the ceiling of turns the run had
         argv[argv.index("--max-turns") + 1] = str(WRAP_UP_TURNS)  # counted from this call (RESUME_FACTS 4)
     except (GitFileChanged, OSError, ValueError, IndexError):  # finish says what happened

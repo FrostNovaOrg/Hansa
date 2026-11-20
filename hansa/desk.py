@@ -3038,6 +3038,10 @@ def rules_problem(rules) -> str:
     """Why hansa may not start Claude Code with these rules: one would reach it as several (one_rule), named with
     the path it was made for (path_rule_problem); '' when each reaches it as itself."""
     for r in rules:
+        # Hansa's by-name device denies include enable__mcp__claude-in-chrome. A bare name with internal
+        # dashes is one argv value. Lane grants still go through refused_rule before reaching this check.
+        if isinstance(r, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", r):
+            continue
         if one_rule(r):
             continue
         m = re.match(r"^[A-Za-z_]+\(//(.*?)(/\*\*)?\)$", r) if isinstance(r, str) else None

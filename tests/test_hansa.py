@@ -900,6 +900,14 @@ def tmp_writable() -> bool:
 
 TURN_SESSION_ID = "77777777-7777-4777-8777-777777777777"  # the session's id in the hooks' input, as Claude Code gives it
 SECRETS = ("SECRET-TEXT", "org-123", "/x/transcript-77.jsonl", TURN_SESSION_ID, "/y/cwd-77")
+HELPER_DENY_LINE = ("disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, "
+                    "TaskUpdate, GetTask, Yield")
+HELPER_BASH_HOOK = '''hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "HANSA_HELPER_BASH"'''
 
 
 def turn_hook_input(event: str, error=None) -> str:
@@ -4018,7 +4026,9 @@ class UpTest(unittest.TestCase):
 def helper_as_shipped(given: str) -> str:
     """A helper's definition in the desk as hansa ships it: its read-only hook's command (helper_bash.py, as the hansa
     that wrote it runs it) back to the placeholder hansa fills in."""
-    return re.sub(r'command: "[^"\n]*helper_bash\.py"', 'command: "HANSA_HELPER_BASH"', given)
+    script = shlex.quote(str(Path(cli.__file__).with_name("helper_bash.py")))
+    ending = json.dumps(f" -I {script} || exit 2")[1:]  # only the launching Python's path varies
+    return re.sub(r'command: "[^"\n]+' + re.escape(ending), 'command: "HANSA_HELPER_BASH"', given)
 
 
 class CoordinatorUpTest(unittest.TestCase):
@@ -5760,8 +5770,10 @@ class CoordinatorUpTest(unittest.TestCase):
             self.assertEqual(r.returncode, code, r.stderr)
         for name in ("scout.md", "reviewer.md"):
             given = cli.helper_text((Path(cli.__file__).with_name("agents") / name).read_text(), "")
-            self.assertIn("PreToolUse", given)
-            self.assertIn(f'command: {json.dumps(shlex.join([sys.executable, "-I", str(script)]))}', given)
+            command = shlex.join([sys.executable, "-I", str(script)]) + " || exit 2"
+            hook = HELPER_BASH_HOOK.replace('"HANSA_HELPER_BASH"', json.dumps(command))
+            self.assertEqual(given.partition("\n---\n")[0].partition("\ntools: ")[2],
+                             f"Read, Bash\n{HELPER_DENY_LINE}\n{hook}")
 
     def test_a_rule_claude_code_would_split_stops_the_launch_as_it_stops_hansa_coordinator(self):
         odd = Desk(self.tmp / "odd) desk")
@@ -28032,6 +28044,8 @@ def save():'''))
         words = r.stdout.splitlines()
         self.assertEqual(words.count("--disallowedTools"), 1)
         denied = words[words.index("--disallowedTools") + 1:words.index("--model")]
+        self.assertNotIn("--tools", words)
+        self.assertFalse({"SendMessage", "ListAgents"}.intersection(denied))
         repo = str(self.repo.resolve()).lstrip("/")
         for rule in (f"Edit(//{repo}/**)", "Agent(general-purpose)"):
             self.assertIn(rule, denied)
@@ -28175,14 +28189,16 @@ def save():'''))
         self.assertIn("force=unset", out)
         # only Claude Code's own helpers are denied, by name; no rule names the Agent tool alone or a model
         argv = out.splitlines()[0].split()
-        denied = [x for x in argv if x.startswith("Agent")]
-        self.assertTrue(denied)
-        self.assertTrue(all(x.startswith("Agent(") and x.endswith(")") and "model" not in x for x in denied), denied)
+        rules = argv[argv.index("--disallowedTools") + 1:argv.index("--model")]
+        self.assertCountEqual([r for r in rules if r.partition("(")[0] in ("Agent", "Task")],
+                              ["Agent(general-purpose)", "Agent(Explore)", "Agent(Plan)", "Agent(claude)",
+                               "Agent(statusline-setup)", "Agent(claude-code-guide)"])
         settings = json.loads((self.desk.root / ".claude" / "settings.json").read_text())
         self.assertNotIn("availableModels", settings)
-        self.assertFalse([r for r in settings["permissions"].get("deny", []) if r == "Agent" or r.startswith("Agent(")])
-        for f in (self.desk.root / ".claude" / "agents").glob("*.md"):
-            self.assertNotIn("disallowedTools", f.read_text())
+        self.assertFalse([r for r in settings["permissions"].get("deny", []) if r.partition("(")[0] in ("Agent", "Task")])
+        for role in ("scout", "reviewer", "operator"):
+            header = (self.desk.root / ".claude" / "agents" / f"{role}.md").read_text().split("\n---\n", 1)[0]
+            self.assertEqual([s for s in header.splitlines() if s.startswith("disallowedTools:")], [HELPER_DENY_LINE])
 
     def page_save(self, change):
         """Load the settings as the page does, change them, save (what POST /api/settings does); what the page
@@ -28640,6 +28656,71 @@ def save():'''))
         self.soon(lambda: all(x.get("ended") for x in notify.records(self.desk)))
         self.assertIs(json.loads((self.desk.state_dir / "coordinator-start.json").read_text())["turn_hooks"], True)
         check_turn_hooks(self, words, self.desk, rec[0]["session"]["pid"])
+
+    def test_coordinator_blocks_teammate_launches_of_its_helpers_without_the_mod(self):
+        argv, _, _ = self.start_with_mod(version="2.0.0")
+        self.assertNotIn("--plugin-dir", argv)
+        hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]
+        [guard] = hooks["PreToolUse"]
+        self.assertEqual(guard["matcher"], "^Agent$|^Task$")
+        [action] = guard["hooks"]
+        self.assertEqual(action["type"], "command")
+        for role, extra, block in [
+            ("scout", {"name": "reader"}, True), ("operator", {"team_name": "group"}, True),
+            ("reviewer", {"name": "review"}, True), ("Re_viewer", {"name": "review"}, True),
+            ("scout", {}, False), ("reviewer", {"run_in_background": True}, False), ("operator", {}, False),
+            ("scout", {"model": "sonnet"}, False), ("reviewer", {"model": "opus", "run_in_background": True}, False),
+            ("operator", {"model": "haiku"}, False), ("another-agent", {"name": "other"}, False),
+        ]:
+            with self.subTest(role=role, extra=extra):
+                event = {"tool_input": {"subagent_type": role, "prompt": "private repository text", **extra}}
+                r = subprocess.run(action["command"], shell=True, input=json.dumps(event), capture_output=True, text=True)
+                self.assertEqual(r.returncode, 2 if block else 0, r.stderr)
+                if block:
+                    self.assertIn("subagent", r.stderr)
+                else:
+                    self.assertEqual(r.stdout, "")  # no updatedInput that replaces the call's model
+                self.assertNotIn("private repository text", r.stderr + r.stdout)
+        for malformed in ("{", '{"tool_input":null}'):
+            r = subprocess.run(action["command"], shell=True, input=malformed, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+
+    def test_helper_launch_is_blocked_if_the_hooks_python_is_missing(self):
+        with unittest.mock.patch.object(sys, "executable", str(self.tmp / "missing python")):
+            argv, _, _ = self.start_with_mod(version="2.0.0")
+        [guard] = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        [action] = guard["hooks"]
+        event = {"tool_input": {"subagent_type": "scout", "name": "reader"}}
+        r = subprocess.run(action["command"], shell=True, input=json.dumps(event), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_coordinator_installs_the_helper_launch_guard_and_both_read_only_shell_hooks_together(self):
+        python = self.tmp / "hook python"
+        python.symlink_to(sys.executable)
+        with unittest.mock.patch.object(sys, "executable", str(python)):
+            argv, _, _ = self.start_with_mod("-p", "one turn")
+        [guard] = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        self.assertEqual(guard["matcher"], "^Agent$|^Task$")
+        [launch] = guard["hooks"]
+        # A permitted and a refused call for each command from this same coordinator start.
+        cases = [(launch["command"], "Agent", {"subagent_type": "scout"}, {"subagent_type": "scout", "name": "reader"})]
+        for role in ("scout", "reviewer"):
+            header = (self.desk.root / ".claude" / "agents" / f"{role}.md").read_text().partition("\n---\n")[0]
+            [line] = [s for s in header.splitlines() if s.startswith("          command: ")]
+            cases.append((json.loads(line.split(": ", 1)[1]), "Bash", {"command": "hansa status"},
+                          {"command": "hansa merge t1"}))
+
+        def check(command, tool, args, expected):
+            event = json.dumps({"tool_name": tool, "tool_input": args})
+            result = subprocess.run(command, shell=True, input=event, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, expected, (tool, args, result.stderr))
+
+        for command, tool, permitted, refused in cases:
+            check(command, tool, permitted, 0)
+            check(command, tool, refused, 2)
+        python.unlink()  # the coordinator already built its settings and installed the definitions
+        for command, tool, permitted, _ in cases:
+            check(command, tool, permitted, 2)
 
     def test_coordinator_removes_a_dead_sessions_turn_record_for_its_own_pid(self):
         d = self.desk.state_dir / "coordinator-turns"
@@ -30745,6 +30826,41 @@ def save():'''))
     def denied_by(argv):
         return argv[argv.index("--disallowedTools") + 1:argv.index("--allowedTools")]
 
+    def assert_worker_tools(self, argv, *web):
+        # Read the complete variadic option from the launch, including any extra values after the first.
+        self.assertEqual(argv.count("--tools"), 1)
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertNotIn("--mcp-config", argv)
+        self.assertFalse({"--agent-teams", "--team-name", "--agent-name", "--agent-id"}.intersection(argv))
+        names = []
+        for value in argv[argv.index("--tools") + 1:]:
+            if value.startswith("-"):
+                break
+            names.extend(value.replace(",", " ").split())
+        self.assertCountEqual(names, ["Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite",
+                                      "Monitor", "TaskOutput", "BashOutput", "BashOutputTool", "AgentOutput",
+                                      "AgentOutputTool", "TaskStop", "KillShell", "KillBash", *web])
+        hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        self.assertEqual([h["matcher"] for h in hooks], ["^Monitor$"])
+        self.assertCountEqual([r for r in self.denied_by(argv) if "(" not in r], """
+            Agent Task ListAgents ListPeers SendMessage SendFile FetchInboxMessage SubagentHandback ObserverReport
+            Workflow RunWorkflow TeamCreate TeamDelete TaskCreate TaskGet TaskList TaskUpdate GetTask Yield
+            AskUserQuestion ScheduleWakeup CronCreate CronDelete CronList RemoteTrigger PushNotification
+            ReadNotifications Poll SendUserMessage Brief SendUserFile WrapUp Projects SendToProject SendToProjectContext
+            ClaudeDesign DesignSync Artifact ArtifactCheck ArtifactData ArtifactComments AppifactRepl PublishPlugin
+            SendFeedback ReportFindings OfferChromeSetup ShareOnboardingGuide ShowOnboardingRolePicker
+            ConnectGitHub SubscribePR SuggestBackgroundPR AutofixPr memory_list memory_read memory_write
+            WebBrowser Frame FrameRead enable__mcp__claude-in-chrome enable__mcp__remote-devices__Claude_Browser
+            enable__mcp__remote-devices__computer request_computer
+            self_hosted_runner_get_pool self_hosted_runner_list_runners self_hosted_runner_list_sessions
+            self_hosted_runner_list_secrets self_hosted_runner_spawn_local self_hosted_runner_read_health
+            self_hosted_runner_read_metrics self_hosted_runner_tail_log self_hosted_runner_requeue_session
+            ListMcpResourcesTool ListMcpResources ReadMcpResourceTool ReadMcpResource ReadMcpResourceDirTool
+            ReadMcpResourceDir WaitForMcpServers RefreshMcpTools McpTaskResumePolling ListConnectors SuggestConnectors
+            SearchMcpRegistry ReadWidgetContext SearchPlugins SearchSkills ListPlugins ListSkills SuggestSkills
+            SuggestPluginInstall propose_skills Skill ToolSearch LSP REPL Eval Code SetGoal ProposeGoal PauseGoal GetGoal
+            """.split())
+
     def test_workers_run_in_the_sandbox_and_leave_git_history_to_hansa(self):
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
@@ -31224,20 +31340,28 @@ def save():'''))
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
-        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"]
+        unavailable = ["SendMessage", "ListAgents", "Agent", "Skill", "ToolSearch", "FutureTool",
+                       "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]
+        s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch", "Monitor",
+                                    *unavailable]
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
-        worker = self.allowed_by(json.loads(seen.read_text().splitlines()[-1]))
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assert_worker_tools(argv, "WebFetch", "WebSearch")
+        worker = self.allowed_by(argv)
         s["lanes"]["a"]["allow"].append("WebFetch")  # saved before it was refused: left out of the run
         self.desk.settings_path.write_text(json.dumps(s))
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--desk", str(self.desk.root), "verify", tid])
         self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
         argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assert_worker_tools(argv, "WebFetch", "WebSearch")
         self.assertIn("checking another worker's finished task", argv[argv.index("--append-system-prompt") + 1])
         verifier = self.allowed_by(argv)
         for allowed in (worker, verifier):
+            self.assertFalse(set(unavailable).intersection(allowed))
+            self.assertNotIn("Monitor", allowed)  # available for commands, never a blanket connection grant
             for r in ("Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch"):
                 self.assertIn(r, allowed)
         self.assertNotIn("WebFetch", verifier)
@@ -31341,7 +31465,7 @@ def save():'''))
 
     def test_rules_are_checked_as_claude_code_splits_them(self):
         from hansa import run
-        from hansa.desk import one_rule, split_rules
+        from hansa.desk import one_rule, rules_problem, split_rules
         # Claude Code's splitter: commas and spaces outside parentheses, and every ) ends them, not a depth
         self.assertEqual(split_rules("Bash(echo $(true) WebFetch ok)"), ["Bash(echo $(true)", "WebFetch", "ok)"])
         self.assertEqual(split_rules("Bash(a(b),WebFetch,c)"), ["Bash(a(b)", "WebFetch", "c)"])
@@ -31351,6 +31475,10 @@ def save():'''))
             self.assertFalse(one_rule(r), r)
         for r in whole:
             self.assertTrue(one_rule(r), r)
+        device = "enable__mcp__claude-in-chrome"
+        self.assertEqual(rules_problem([device]), "")
+        for bad in (device + ",Bash", device + " --model", "--tools"):
+            self.assertTrue(rules_problem([bad]), bad)
         s = self.desk.settings()
         for bad in split:
             s["lanes"]["a"]["allow"] = [bad]
@@ -38484,8 +38612,6 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
                          "Added hello.txt. Checked it exists.\n")
 
     def test_workers_are_not_given_tools_that_need_someone_there(self):
-        tools = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
-                 "AskUserQuestion", "Monitor"]
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
@@ -38497,10 +38623,78 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
             main(["--desk", str(self.desk.root), "verify", tid])
         self.settle(d, self.desk.meta(tid)["verify"])
         task, verify = [json.loads(x) for x in seen.read_text().splitlines()]
-        for argv in (task, verify):
-            for t in tools:
-                self.assertIn(t, self.denied_by(argv))
-            self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
+        for kind, argv in (("worker", task), ("verifier", verify)):
+            with self.subTest(kind=kind):
+                self.assert_worker_tools(argv)
+                self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
+
+        [guard] = json.loads(task[task.index("--settings") + 1])["hooks"]["PreToolUse"]
+        [action] = guard["hooks"]
+        self.assertEqual(action["type"], "command")
+        for args, status in [({"command": "tail -f build.log", "description": "build output"}, 0),
+                             ({"ws": {"url": "wss://example.invalid"}, "description": "events"}, 2),
+                             ({"command": "true", "mcp": "example"}, 2), (None, 2)]:
+            with self.subTest(args=args):
+                r = subprocess.run(action["command"], shell=True, input=json.dumps({"tool_input": args}),
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, status, r.stderr)
+                self.assertEqual(r.stdout, "")  # a permitted command still goes through normal Bash permission checks
+
+    def test_workers_do_not_inherit_the_callers_team_or_shared_checklist(self):
+        from hansa import run
+        shared = {"CLAUDE_CODE_TASK_LIST_ID": "shared-list", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+                  "CLAUDE_INTERNAL_ASSISTANT_TEAM_NAME": "team", "CLAUDE_INTERNAL_SESSION_TASK_LIST_ID": "team-list"}
+        settings = self.desk.settings()
+        lane = {**settings["lanes"]["a"], "env": {**shared, "FROM_LANE": "yes"}}
+        tid = self.desk.new_task("Check the worker environment")
+        with unittest.mock.patch.dict(os.environ, shared):
+            env = run.worker_env(self.desk, tid, "a", lane, "claude", settings["providers"]["claude"], str(self.tmp))
+        self.assertEqual(shared.keys() & env.keys(), set())
+        lane_file = Path(env["CLAUDE_ENV_FILE"]).read_text()
+        self.assertIn("export FROM_LANE=yes", lane_file)
+        for name in shared:
+            self.assertNotIn(f"export {name}=", lane_file)
+
+    def test_resumes_and_wrap_ups_limit_tools_from_pre_upgrade_commands(self):
+        from hansa import run
+        write = run.write_text
+
+        def save_old_command(path, contents, *args, **kwargs):
+            if path.name == run.RESUME_ARGV:
+                argv = json.loads(contents)
+                # Both saved formats predate command monitors. Preserve their file/git fences and web grants.
+                at = argv.index("--tools")
+                if kind == "resume":
+                    del argv[at:at + 2]
+                else:
+                    argv[at + 1] = "Bash,Read,Glob,Grep,Edit,Write,NotebookEdit,TodoWrite,WebFetch"
+                deny, allow = argv.index("--disallowedTools"), argv.index("--allowedTools")
+                old_denies = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
+                              "RemoteTrigger", "PushNotification", "AskUserQuestion", "Monitor"]
+                if kind == "wrap-up":
+                    old_denies += ["GetTask", "Yield", "ListAgents", "SendMessage", "SendFile"]
+                argv[deny + 1:allow] = [r for r in argv[deny + 1:allow] if "(" in r] + old_denies
+                settings = argv.index("--settings") + 1
+                box = json.loads(argv[settings])
+                box.pop("hooks", None)
+                argv[settings] = json.dumps(box)
+                contents = json.dumps([*argv, web_rule, "WebFetch", "ListAgents"])
+            return write(path, contents, *args, **kwargs)
+
+        for kind, web_rule in (("resume", "WebSearch"), ("wrap-up", "WebFetch(domain:docs.python.org)")):
+            with self.subTest(kind=kind), unittest.mock.patch.object(run, "write_text", save_old_command):
+                if kind == "resume":
+                    seen = self.tmp / "resumed.jsonl"
+                    self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen)})
+                    calls = self.calls_of(seen.name)
+                else:
+                    _, calls = self.turns_run()
+                [call] = calls
+                self.assert_worker_tools(call["argv"], web_rule.partition("(")[0])
+                self.assertIn("Bash(git push:*)", self.denied_by(call["argv"]))
+                grants = self.allowed_by(call["argv"])
+                self.assertIn(web_rule, grants)
+                self.assertFalse({"WebFetch", "ListAgents"}.intersection(grants))
 
     def test_background_work_still_running_when_the_worker_ended_is_said(self):
         line = ("the worker ended while its background work was still running ({}); its report may be "
@@ -38529,6 +38723,7 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
         calls = [json.loads(x) for x in seen.read_text().splitlines()]
         self.assertEqual(len(calls), 1)
         argv, prompt = calls[0]["argv"], " ".join(calls[0]["prompt"].split())
+        self.assert_worker_tools(argv)
         self.assertEqual(argv[argv.index("--resume") + 1], m["session_id"])
         self.assertNotIn("--session-id", argv)
         self.assertIn("Run a long build or test suite in the foreground",  # its own run's Bash limits as well
@@ -38679,6 +38874,7 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
         # continued once, in its own session (RESUME_FACTS 1), a few turns (RESUME_FACTS 4), told why and what for
         [call] = calls
         argv, prompt = call["argv"], " ".join(call["prompt"].split())
+        self.assert_worker_tools(argv)
         self.assertEqual(argv[argv.index("--resume") + 1], m["session_id"])
         self.assertNotIn("--session-id", argv)
         self.assertEqual(argv[argv.index("--max-turns") + 1], str(run.WRAP_UP_TURNS))
@@ -38993,6 +39189,7 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
         self.assertEqual(m["state"], "done", m)
         # the command line (FORK_FACTS 1, 3): forked from the parent's session, with an id of its own
         [argv] = [a for a in self.calls_of() if "--fork-session" in a]
+        self.assert_worker_tools(argv)
         self.assertEqual(argv[argv.index("--resume") + 1], parent["session_id"])
         sid = argv[argv.index("--session-id") + 1]
         self.assertNotEqual(sid, parent["session_id"])
@@ -43708,10 +43905,15 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
 
     def test_helpers_name_only_tools_claude_code_has(self):
         code = Path(__file__).resolve().parent.parent / "hansa" / "agents"
-        mine = {"operator.md": "tools: Read, Bash, Edit, Write"}  # the one helper that changes the machine
-        for f in code.glob("*.md"):
-            tools = next(x for x in f.read_text().splitlines() if x.startswith("tools:"))
-            self.assertEqual(tools, mine.get(f.name, "tools: Read, Bash"), f.name)
+        read_only = ["tools: Read, Bash", HELPER_DENY_LINE, *HELPER_BASH_HOOK.splitlines()]
+        expected = {"scout.md": read_only, "reviewer.md": read_only,
+                    "operator.md": ["tools: Read, Bash, Edit, Write", HELPER_DENY_LINE]}
+        self.assertCountEqual([f.name for f in code.glob("*.md")], expected)
+        for name, fields in expected.items():
+            head = (code / name).read_text().partition("\n---\n")[0].splitlines()
+            with self.subTest(helper=name):
+                self.assertEqual([x for x in head if x != "---" and not x.startswith(
+                    ("name:", "description:", "effort:", "maxTurns:"))], fields)
 
     def test_the_page_only_shows_tasks_by_their_id(self):
         skip_unless_ports(self)

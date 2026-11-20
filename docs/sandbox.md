@@ -171,6 +171,46 @@ conversation, but for two cases: a follow-up may go on in the conversation of th
 ([Going on in the earlier conversation](tasks.md#going-on-in-the-earlier-conversation)), and a repeated
 verification of the same task in the earlier verification's ([A repeated verification](tasks.md#a-repeated-verification)).
 
+Hansa gives each Claude Code worker an explicit list of built-in tools with `--tools`.
+The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit` and sandboxed
+`Bash`. Bench commands run through Bash.
+
+**Workers have no built-in checklist on Claude Code 2.1.329 with its default task tools.**
+`TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` normally use the current session's
+list. Claude Code can select a shared list through `CLAUDE_CODE_TASK_LIST_ID`, and in
+team mode `TaskUpdate` can send an assignment to a teammate. Hansa starts workers
+without inherited list or team variables. Claude Code can still apply those variables
+from settings after launch, and managed settings take precedence over hansa's command-line
+settings. Hansa therefore denies all four tools. Workers can use `TodoWrite` on releases
+that offer it.
+
+Workers can watch a running command with `Monitor` and stop a job with `TaskStop`
+(`KillShell` in older versions). Hansa also allows `TaskOutput` and its older name
+`BashOutput` on releases that provide them. Claude Code 2.1.329 delivers background
+results as notifications. The worker's Monitor hook accepts the shell-command form, which uses Bash
+permissions. Hansa drops blanket lane grants for Monitor. If managed policy disables
+command hooks, Claude Code's own WebSocket permissions and the lane's network list
+govern its WebSocket form.
+The lane can also grant `WebSearch` and site-specific `WebFetch`. A lane permission can approve
+the use of an available tool. Adding another built-in name to the lane cannot enable that tool.
+Hansa denies the known session, team, scheduling, project and connector tools by name.
+Claude Code's `Agent` can deliver a prompt to a teammate or start a cloud session, so workers
+also forgo ordinary subagents. `Skill` can fork an agent and `ToolSearch` can reconnect to
+MCP servers. Workers can read project skill instructions with `Read`.
+Verifications, follow-ups, resumes and wrap-ups use the same list, including when a saved
+command predates an upgrade. Newly introduced built-ins stay outside the list.
+`hansa ping` uses an empty list.
+
+The coordinator's `scout` and `reviewer` subagents get `Read` and `Bash`. A hook in
+each definition checks that its Bash command only reads. If the hook's Python interpreter
+is missing, Claude Code blocks the command.
+`operator` also gets `Edit` and `Write`. All three exclude messaging, agent discovery and
+the background-task tools Claude Code can add alongside Bash. Launch these helpers as ordinary
+subagents, omitting `name` and `team_name`. The coordinator's agent-launch hook blocks named
+or team launches of these three roles even without hansa's mod. Claude Code gives experimental
+teammates mandatory messaging and shared task tools. If the principal disables all Claude Code
+hooks and enables experimental teams, only ordinary subagent launches retain the restrictions.
+
 ## Headless browsers
 
 Measured 2026-10-23, srt 0.0.77, as lane checks (`hansa lane try`):
