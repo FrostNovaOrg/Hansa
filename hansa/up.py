@@ -1471,18 +1471,31 @@ def _card_note(desk: Desk) -> str:
     return f"the recorded session does not read the card: add {c['line']} to its CLAUDE.md (hansa explain notify)"
 
 
-# The commands the card lists, each allowed in the coordinator's session without a question (cli.permissions)
-CARD_COMMANDS = ("status", "desks", "add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close",
-                 "notify", "wait", "pause", "resume", "explain", "lane", "hide", "concurrency", "disk-floor",
-                 "memory-floor", "cost", "ask", "release", "changelog", "notes", "gaps", "goal", "decide",
-                 "decisions", "ping", "help")
+# The hansa commands the coordinator's session runs without a question (cli.permissions), which in Claude Code's
+# auto mode its classifier does not look at either: only those whose worst case stays within the coordinator's own
+# work. Others (notify, disk-floor, memory-floor, desks --forget, lane add, remove and target, up, serve, web,
+# coordinator, init, the hidden ones, and options before the command) are asked about, or judged by auto mode, like
+# any other command. In Claude Code's grammar `Bash(X:*)` matches X alone and X followed by a space and anything,
+# never Xy; `Bash(X)` matches X exactly
+ALLOWED_WHOLE = ("status", "show", "diff", "git", "wait", "explain", "cost", "changelog", "decisions", "help", "add",
+                 "retry", "verify", "cancel", "close", "merge", "gaps", "goal", "decide", "ask", "notes", "pause",
+                 "resume", "ping", "release", "concurrency", "hide", "bench", "doctor")  # with any arguments
+ALLOWED_EXACT = ("desks", "desks --json", "lane")  # only as written: the lists
+ALLOWED_SUB = ("lane set", "lane brief", "lane try")  # these subcommands, with any arguments
 WIDE_RULE = "Bash(hansa:*)"  # what an older hansa allowed: every hansa command, without a question
+
+
+def allow_rules() -> list:
+    """The coordinator's session's allow rules for hansa's own commands, in this order."""
+    return [*(f"Bash(hansa {c}:*)" for c in ALLOWED_WHOLE), *(f"Bash(hansa {c})" for c in ALLOWED_EXACT),
+            *(f"Bash(hansa {c}:*)" for c in ALLOWED_SUB)]
 
 
 def old_rules_line(desk: Desk) -> str:
     """For hansa status: one line while the desk's .claude/settings.json, which a session in the desk reads, still
-    allows every hansa command without a question (WIDE_RULE, as hansa wrote it before) or lacks a rule of
-    CARD_COMMANDS; '' otherwise, when it cannot be read, or on another account's desk (root's session has its own)."""
+    allows a hansa command without a question that allow_rules does not (WIDE_RULE, as hansa wrote it before, or a
+    rule an earlier version gave) or lacks one of them; '' otherwise, when it cannot be read, or on another account's
+    desk (root's session has its own)."""
     if account.desk_account(desk.root):
         return ""
     s = read_json(desk.root / ".claude" / "settings.json", None)
@@ -1490,11 +1503,34 @@ def old_rules_line(desk: Desk) -> str:
         else None
     if not isinstance(allow, list):
         return ""
-    if WIDE_RULE not in allow and all(f"Bash(hansa {c}:*)" in allow for c in CARD_COMMANDS):
+    ours = allow_rules()
+    theirs = [x for x in allow if isinstance(x, str) and x.replace(" ", "").startswith("Bash(hansa")]
+    if all(x in ours for x in theirs) and all(x in allow for x in ours):
         return ""
-    return ("the coordinator's session still runs on settings from an older hansa, which let it run any hansa command "
-            "without asking you: close that session and start it again with hansa coordinator in a terminal of yours "
+    return ("the coordinator's session still runs on settings from an older hansa, which let it run hansa commands "
+            "without asking you that now ask: close that session and start it again with hansa coordinator in a terminal of yours "
             "(or hansa up, when hansa coordinator started it last), which writes the new settings")
+
+
+# claude's words that loosen, replace or move the new session's permission questions, tools, hooks, helpers or the
+# settings it reads: hansa coordinator takes them only from the principal's own terminal (session_start_word)
+SESSION_REFUSED_WORDS = (
+    "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode",
+    "--permission-prompts", "--permission-prompt-tool", "--allowedTools", "--allowed-tools", "--disallowedTools",
+    "--disallowed-tools", "--tools", "--settings", "--setting-sources", "--add-dir", "--mcp-config",
+    "--strict-mcp-config", "--plugin-dir", "--plugin-url", "--agent", "--agents", "--bare", "--safe-mode",
+    "--restricted", "--chrome")
+
+
+def session_start_word(words: list) -> str:
+    """The first of claude's words (before a --) that SESSION_REFUSED_WORDS names, as --word or --word=value; ''
+    when none does."""
+    for w in words:
+        if w == "--":
+            break
+        if isinstance(w, str) and w.partition("=")[0] in SESSION_REFUSED_WORDS:
+            return w.partition("=")[0]
+    return ""
 
 
 # claude's words that switch its permission questions off, in whole or for some tools: hansa status names them in the

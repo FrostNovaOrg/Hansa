@@ -123,10 +123,6 @@ HIDDEN_COMMANDS = {"coordinator-cleared": "the coordinator's session's hook afte
                    "notify-feed": "a follower",
                    "notify-launch": "hansa up"}
 HOOK_COMMANDS = ("coordinator-cleared", "coordinator-turn")
-# The commands the card lists, each allowed in the coordinator's session without a question (permissions): one rule
-# each, matched from the start of the command line, so a hidden command, an unknown word or options before the
-# command (hansa --desk X ...) are asked about like any other command
-CARD_COMMANDS = up.CARD_COMMANDS
 
 
 def hidden_refusal(cmd: str) -> str:
@@ -434,7 +430,9 @@ def permissions(desk: Desk) -> dict:
     # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win.
     # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
     # the short way matches only with both
-    return {"allow": [*(f"Bash(hansa {c}:*)" for c in CARD_COMMANDS), *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
+    # hansa's own commands the session runs without a question (up.allow_rules): matched from the start of the
+    # command line, so a hidden command, an unknown word or options before the command are asked about
+    return {"allow": [*up.allow_rules(), *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
             "deny": desk_read_denials(desk) + [f"Edit({g})" for g in guarded] + other_desk_rules(desk, "Edit")
             + no_publish_rules()}
 
@@ -2425,13 +2423,14 @@ def cmd_web(a):
 
 def cmd_coordinator(a):
     """Start the coordinator's interactive session in the desk, on the coordinator provider."""
-    # the principal's own terminal only: from a Claude Code session's shell (or with HANSA_ROLE, which hansa gives
-    # the coordinator's session, or a worker's HANSA_TASK) the words after coordinator would be the session's own
-    if session_vars() or os.environ.get("HANSA_ROLE") or os.environ.get("HANSA_TASK"):
-        why = "a Claude Code session's shell" if session_vars() else \
-            " and ".join(x for x in ("HANSA_ROLE", "HANSA_TASK") if os.environ.get(x)) + " set"
-        raise SystemExit(f"hansa: hansa coordinator starts claude from the principal's own terminal, not from a "
-                         f"Claude Code session or an agent ({why}); nothing was started")
+    # from a Claude Code session's shell (or with HANSA_ROLE, which hansa gives the coordinator's session, or a
+    # worker's HANSA_TASK) the session's permission layer judges the start; words that would loosen or replace the
+    # new session's permission questions, tools or settings are the principal's own, from their terminal
+    word = up.session_start_word(a.rest) if session_vars() or os.environ.get("HANSA_ROLE") or \
+        os.environ.get("HANSA_TASK") else ""
+    if word:
+        raise SystemExit(f"hansa: {word} changes the new session's permissions, tools or settings, so hansa "
+                         f"coordinator takes it only from the principal's own terminal; nothing was started")
     clear, rest = _clear_daily(a.rest)
     desk = Desk.find(a.desk)
     # a run that ends by itself (-p ...): neither refused beside a running session nor recorded as the session's start

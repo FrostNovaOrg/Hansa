@@ -18,7 +18,7 @@ FIND_ACTIONS = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fp
 RUNS_OR_WRITES = {"rg": ("--pre", "--pre-glob", "--search-zip", "--hostname-bin"), "file": ("--compile",)}
 SHORT_RUNS_OR_WRITES = {"rg": "z", "file": "C"}
 # hansa's commands that read: the words after hansa, each alone or with what may follow it
-HANSA_READERS = {"show", "diff", "git", "status", "explain", "help", "decisions", "changelog", "cost", "desks"}
+HANSA_READERS = {"show", "diff", "git", "status", "explain", "help", "decisions", "changelog", "cost"}
 HANSA_READING_FORMS = {"goal": ("list", "show"), "gaps": ("", "--all", "show"), "lane": ("",)}
 
 
@@ -54,7 +54,7 @@ def refusal(command: str) -> str:
     if not rest or rest[0].startswith("-"):
         return "hansa's options go after its command"
     cmd, after = rest[0], rest[1:]
-    if cmd in HANSA_READERS:
+    if cmd in HANSA_READERS or cmd == "desks" and after in ([], ["--json"]):  # desks lists; --forget changes
         return ""
     if cmd in HANSA_READING_FORMS and (after[0] if after else "") in HANSA_READING_FORMS[cmd]:
         return ""

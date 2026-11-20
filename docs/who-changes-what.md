@@ -116,20 +116,29 @@ not already allowed.
 
 Setup, check and merge check run outside the worker, in the lane's sandbox (srt), and each change to
 them is recorded and told to the principal by the coordinator. The coordinator is not a
-worker: it runs on this machine outside any sandbox. Claude Code runs without
-asking only the `hansa` commands the card lists, each written as the card shows
-it (`hansa status`, `hansa add ...`; one rule each in the desk's
-`.claude/settings.json`). It asks the principal before any other command, a
-`hansa` one with options before its command (`hansa --desk X ...`) or a word
-the card does not list included, unless they have allowed it; the coordinator
-may run other commands the principal's work needs, such as installing software
-a lane needs or setting up a tool, and says in plain words what the command
-does and why. hansa's own steps that it gives no help text (the follower, the
-start `hansa up` makes, root's handoff to the desk's account) refuse a call
-from a Claude Code session's shell, and the session's own hooks act only for
-the session they run in; the start `hansa up` makes runs only the claude the
-desk uses; and `hansa coordinator` starts only from the principal's own
-terminal. Who stopped, asked, paused or marked something is recorded as the
+worker: it runs on this machine outside any sandbox. Claude Code runs these
+`hansa` commands without asking (one rule each in the desk's
+`.claude/settings.json`): `status`, `show`, `diff`, `git`, `wait`, `explain`,
+`cost`, `changelog`, `decisions`, `help`, `add`, `retry`, `verify`, `cancel`,
+`close`, `merge`, `gaps`, `goal`, `decide`, `ask`, `notes`, `pause`,
+`resume`, `ping`, `release`, `concurrency`, `hide`, `bench` and `doctor`,
+with any arguments; `hansa desks` and `hansa desks --json`; `hansa lane`
+alone and `lane set`, `lane brief` and `lane try`. In auto mode its classifier
+does not look at these either, so the list holds only commands whose worst
+case stays within the coordinator's own work: hansa's others (`notify`,
+`disk-floor`, `memory-floor`, `desks --forget`, `lane add`, `lane remove`,
+`lane target`, `up`, `serve`, `web`, `coordinator`, `init`, any with options
+before the command) are asked about, or judged by auto mode, like any other
+command. The coordinator may run other commands the principal's work needs,
+such as installing software a lane needs or setting up a tool, and says in
+plain words what the command does and why. hansa's own steps that it gives no
+help text (the follower, the start `hansa up` makes, root's handoff to the
+desk's account) refuse a call from a Claude Code session's shell, and the
+session's own hooks act only for the session they run in; the start `hansa
+up` makes runs only the claude the desk uses. `hansa coordinator` from a
+Claude Code session refuses words that change the new session's permissions,
+tools or settings (`--permission-mode`, `--settings`, `--add-dir` and the
+like): those come from the principal's own terminal. Who stopped, asked, paused or marked something is recorded as the
 coordinator for every command run in a Claude Code session, whatever
 `HANSA_ROLE` says there. It has three helpers: `scout` and `reviewer` only
 read (their shell runs reading commands only: `grep`, `find`, `cat` and the

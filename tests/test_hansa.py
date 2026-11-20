@@ -5491,19 +5491,37 @@ class CoordinatorUpTest(unittest.TestCase):
             main(["--desk", str(self.desk.root), "coordinator-cleared"])
         self.assertTrue(cleared.exists(), out.getvalue())
 
-    def test_hansa_coordinator_is_refused_in_a_claude_code_session_or_with_hansa_role(self):
+    def test_hansa_coordinator_from_a_session_refuses_only_words_that_change_permissions_tools_or_settings(self):
+        from hansa import up
+        refused = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode",
+                   "--permission-prompts", "--permission-prompt-tool", "--allowedTools", "--allowed-tools",
+                   "--disallowedTools", "--disallowed-tools", "--tools", "--settings", "--setting-sources", "--add-dir",
+                   "--mcp-config", "--strict-mcp-config", "--plugin-dir", "--plugin-url", "--agent", "--agents",
+                   "--bare", "--safe-mode", "--restricted", "--chrome")
+        self.assertEqual(up.SESSION_REFUSED_WORDS, refused)
         for env, session in (({}, {"CLAUDECODE": "1"}), ({"HANSA_ROLE": "coordinator"}, {}),
-                             ({"HANSA_ROLE": "page"}, {})):
-            for words in ([], ["-p", "hi", "--dangerously-skip-permissions"]):
+                             ({"HANSA_TASK": "t1"}, {}), ({}, {})):
+            for words in ([], ["-p", "hi"], ["--name", "b", "--model", "opus"], *(
+                    [w, "x"] for w in refused), ["-p", "hi", "--permission-mode=bypassPermissions"]):
+                inside = bool(env or session)
+                word = next((w.partition("=")[0] for w in words if w.partition("=")[0] in refused), "")
                 with self.subTest(env=env, session=session, words=words), \
                         unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.dict(hansa.SESSION, session), \
-                        unittest.mock.patch("hansa.run.claude_bin") as found, unittest.mock.patch("os.execvpe") as ran, \
-                        self.assertRaisesRegex(SystemExit, "hansa coordinator starts claude from the principal's own "
-                                                           "terminal.*nothing was started"):
+                        unittest.mock.patch("hansa.run.claude_bin", side_effect=RuntimeError("no claude here")) as found, \
+                        unittest.mock.patch("os.execvpe") as ran, contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(SystemExit) as e:
                     main(["--desk", str(self.desk.root), "coordinator", *words])
-                found.assert_not_called()
                 ran.assert_not_called()
-        self.assertFalse((self.desk.state_dir / "coordinator.json").exists())
+                if inside and word:  # one sentence naming the word; nothing prepared or started
+                    self.assertEqual(e.exception.code, f"hansa: {word} changes the new session's permissions, tools "
+                                                       "or settings, so hansa coordinator takes it only from the "
+                                                       "principal's own terminal; nothing was started")
+                    found.assert_not_called()
+                else:  # as from the principal's terminal: it goes on to start claude
+                    self.assertIn("no claude here", str(e.exception.code))
+                    found.assert_called()
+        # after a --, claude's words are the prompt's
+        self.assertEqual(up.session_start_word(["--name", "x", "--", "--settings"]), "")
 
     def test_status_says_when_the_recorded_start_switches_permission_questions_off(self):
         from hansa import up
@@ -5533,6 +5551,8 @@ class CoordinatorUpTest(unittest.TestCase):
         for allow, said in ((["Bash(hansa:*)"], True),  # as an older hansa wrote it
                             ([*current["allow"], "Bash(hansa:*)"], True),  # the new rules beside the wide one
                             (current["allow"][1:], True),  # one of the card's commands missing
+                            ([*current["allow"], "Bash(hansa notify:*)"], True),  # one an earlier version gave
+                            ([*current["allow"], "Bash(hansa desks:*)"], True),
                             (current["allow"], False)):  # as hansa coordinator writes it now
             with self.subTest(allow=allow[:2], said=said):
                 write_json(mine, {"permissions": {**current, "allow": allow}})
@@ -5551,15 +5571,36 @@ class CoordinatorUpTest(unittest.TestCase):
         cli.coordinator_desk(self.desk, os.getuid())
         self.assertEqual(up.old_rules_line(self.desk), "")
 
-    def test_the_allow_rules_name_each_card_command_and_nothing_else_of_hansa(self):
-        allow = cli.permissions(self.desk)["allow"]
-        bash = [x for x in allow if x.startswith("Bash(")]
-        self.assertEqual(bash, [f"Bash(hansa {c}:*)" for c in cli.CARD_COMMANDS])
-        card = (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
-        for c in cli.CARD_COMMANDS:
-            self.assertIn(f"`hansa {c}", card)
-        for hidden in cli.HIDDEN_COMMANDS:
-            self.assertFalse(any(x.startswith(f"Bash(hansa {hidden}") for x in bash), hidden)
+    def test_the_allow_rules_are_exactly_the_principals_list(self):
+        from hansa import up
+        whole = ("status", "show", "diff", "git", "wait", "explain", "cost", "changelog", "decisions", "help", "add",
+                 "retry", "verify", "cancel", "close", "merge", "gaps", "goal", "decide", "ask", "notes", "pause",
+                 "resume", "ping", "release", "concurrency", "hide", "bench", "doctor")
+        bash = [x for x in cli.permissions(self.desk)["allow"] if x.startswith("Bash(")]
+        self.assertEqual(bash, [*(f"Bash(hansa {c}:*)" for c in whole), "Bash(hansa desks)", "Bash(hansa desks --json)",
+                                "Bash(hansa lane)", "Bash(hansa lane set:*)", "Bash(hansa lane brief:*)",
+                                "Bash(hansa lane try:*)"])
+
+        def allowed(command):  # Claude Code's grammar: X:* is X alone or X, a space and anything; X alone is exact
+            return any(command == r[5:-3] or command.startswith(r[5:-3] + " ") if r.endswith(":*)")
+                       else command == r[5:-1] for r in bash)
+        for command in ("hansa lane set a check x", "hansa lane brief a", "hansa lane brief a --file f", "hansa lane",
+                        "hansa lane try a --log", "hansa desks", "hansa desks --json", "hansa bench rebuild",
+                        "hansa status", "hansa add 'x' --lane a", "hansa doctor --json", "hansa release --stop 3",
+                        "hansa goal add x", "hansa gaps mark n1 fixed why"):
+            self.assertTrue(allowed(command), command)
+        for command in ("hansa desks --forget X", "hansa desks --json --forget X", "hansa lane add b --repo /r",
+                        "hansa lane remove a", "hansa lane target a prod 'make deploy'", "hansa lanes", "hansa lane-x",
+                        "hansa lane settle", "hansa notify on", "hansa notify", "hansa disk-floor 5",
+                        "hansa memory-floor 2", "hansa up", "hansa serve", "hansa web", "hansa coordinator",
+                        "hansa coordinator -p hi", "hansa init /x", "hansa --desk X status", "hansa -h",
+                        "hansa statusx", "hansa", *(f"hansa {h}" for h in cli.HIDDEN_COMMANDS),
+                        *(f"hansa {h} --pid 1" for h in cli.HIDDEN_COMMANDS)):
+            self.assertFalse(allowed(command), command)
+        # hansa configures no auto mode anywhere
+        code = Path(__file__).resolve().parent.parent / "hansa"
+        self.assertFalse([f.name for f in code.rglob("*") if f.is_file() and f.suffix in (".py", ".md", ".json")
+                          and "autoMode" in f.read_text(encoding="utf-8", errors="replace")])
 
     def test_hansa_role_given_in_a_session_cannot_record_the_principal(self):
         with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "page"}):
@@ -5624,7 +5665,9 @@ class CoordinatorUpTest(unittest.TestCase):
                         ("cat f >> out", "redirects"), ("grep x <(id)", "redirects"), ("echo `id`", "expands"),
                         ("grep x f && rm f", "more than one"), ("hansa --desk X show t1", "options go after")):
             self.assertIn(why, helper_bash.refusal(no), no)
-        for ok in ("rg -n x f", "rg --passthru x f", "rg -- --pre f", "file f", "diff a b", "tail -n 5 f", "wc -l f",
+        self.assertIn("changes something", helper_bash.refusal("hansa desks --forget /x"))
+        self.assertIn("changes something", helper_bash.refusal("hansa desks --json --forget /x"))
+        for ok in ("hansa desks", "hansa desks --json", "rg -n x f", "rg --passthru x f", "rg -- --pre f", "file f", "diff a b", "tail -n 5 f", "wc -l f",
                    "hansa explain lane a", "hansa changelog a"):
             self.assertEqual(helper_bash.refusal(ok), "", ok)
         script = Path(helper_bash.__file__)
@@ -28129,7 +28172,7 @@ def save():'''))
         s = json.loads(mine.read_text())
         root = str(self.desk.root).lstrip("/")
         self.assertEqual([x for x in s["permissions"]["allow"] if x.startswith("Bash(")],
-                         [f"Bash(hansa {c}:*)" for c in cli.CARD_COMMANDS])
+                         hansa.up.allow_rules())
         self.assertNotIn("Bash(bh:*)", s["permissions"]["allow"])
         self.assertIn(f"Read(//{root}/.hansa/**)", s["permissions"]["deny"])
         self.assertEqual(s["env"], {"KEEP": "1"})  # other settings there stay
