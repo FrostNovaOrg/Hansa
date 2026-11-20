@@ -403,7 +403,7 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
     if os.environ.get("FAKE_RESUMED"):
         open(os.environ["FAKE_RESUMED"], "a").write(json.dumps({"prompt": prompt, "argv": sys.argv, "leftover_alive": left,
             "env": {k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "HANSA_TASK",
-                                                   "HANSA_RUN")}}) + "\n")
+                                                   "HANSA_RUN", "CLAUDE_CODE_ENABLE_TASKS")}}) + "\n")
     if os.environ.get("FAKE_RESUME_FAIL"):  # the resumed call ends on an error: a limit, or a program that refuses
         if os.environ.get("FAKE_RESUME_FAIL_ROWS"):  # after it wrote a reply to the record, as a real call can
             with open(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl"), "a") as f:
@@ -801,6 +801,8 @@ if os.environ.get("FAKE_REDIRECT_GIT"):  # points .git at a copy of the git fold
     open(".git", "w").write("gitdir: " + os.path.abspath("copied-git") + "\n")
 if os.environ.get("FAKE_SHOW_ARGV"):
     open(os.environ["FAKE_SHOW_ARGV"], "a").write(json.dumps(sys.argv) + "\n")
+if os.environ.get("FAKE_SEE_CHECKLIST"):  # what selects Claude Code's checklist tool, as the run started
+    open(os.environ["FAKE_SEE_CHECKLIST"], "a").write(json.dumps(os.environ.get("CLAUDE_CODE_ENABLE_TASKS")) + "\n")
 if os.environ.get("FAKE_SEE_BASH"):  # Claude Code's own limits on one Bash call, as it was given them
     open(os.environ["FAKE_SEE_BASH"], "a").write(json.dumps(
         {k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS")}) + "\n")
@@ -31085,11 +31087,11 @@ def save():'''))
             names.extend(value.replace(",", " ").split())
         self.assertCountEqual(names, ["Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite",
                                       "Monitor", "TaskOutput", "BashOutput", "BashOutputTool", "AgentOutput",
-                                      "AgentOutputTool", "TaskStop", "KillShell", "KillBash", *web])
+                                      "AgentOutputTool", "TaskStop", "KillShell", "KillBash", "Agent", "Task", *web])
         hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
-        self.assertEqual([h["matcher"] for h in hooks], ["^Monitor$"])
+        self.assertEqual([h["matcher"] for h in hooks], ["^Monitor$", "^Agent$|^Task$"])
         self.assertCountEqual([r for r in self.denied_by(argv) if "(" not in r], """
-            Agent Task ListAgents ListPeers SendMessage SendFile FetchInboxMessage SubagentHandback ObserverReport
+            ListAgents ListPeers SendMessage SendFile FetchInboxMessage SubagentHandback ObserverReport
             Workflow RunWorkflow TeamCreate TeamDelete TaskCreate TaskGet TaskList TaskUpdate GetTask Yield
             AskUserQuestion ScheduleWakeup CronCreate CronDelete CronList RemoteTrigger PushNotification
             ReadNotifications Poll SendUserMessage Brief SendUserFile WrapUp Projects SendToProject SendToProjectContext
@@ -38874,7 +38876,8 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
                 self.assert_worker_tools(argv)
                 self.assertIn("Nobody will wake you", argv[argv.index("--append-system-prompt") + 1])
 
-        [guard] = json.loads(task[task.index("--settings") + 1])["hooks"]["PreToolUse"]
+        [guard] = [h for h in json.loads(task[task.index("--settings") + 1])["hooks"]["PreToolUse"]
+                   if h["matcher"] == "^Monitor$"]
         [action] = guard["hooks"]
         self.assertEqual(action["type"], "command")
         for args, status in [({"command": "tail -f build.log", "description": "build output"}, 0),
@@ -38901,6 +38904,207 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
         for name in shared:
             self.assertNotIn(f"export {name}=", lane_file)
 
+    @staticmethod
+    def subagent_guard(argv):
+        [guard] = [h for h in json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+                   if h["matcher"] == "^Agent$|^Task$"]
+        [action] = guard["hooks"]
+        return action["command"]
+
+    def guard_says(self, command, args, cwd=None):
+        event = {"tool_name": "Agent", "tool_input": args, **({"cwd": str(cwd)} if cwd else {})}
+        r = subprocess.run(command, shell=True, input=json.dumps(event), capture_output=True, text=True, timeout=30,
+                           cwd=str(cwd or self.tmp))
+        self.assertEqual(r.stdout, "")  # no updatedInput: a plain call goes on as the worker gave it
+        return r.returncode, r.stderr
+
+    def test_workers_and_verifiers_start_plain_local_subagents_only(self):
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(d, self.desk.meta(tid)["verify"])
+        plain = {"prompt": "read the repository", "description": "survey", "subagent_type": "Explore",
+                 "model": "haiku", "effort": "low", "run_in_background": True}
+        for kind, argv in zip(("worker", "verifier"), [json.loads(x) for x in seen.read_text().splitlines()]):
+            command = self.subagent_guard(argv)
+            self.assertIn("Agent", argv[argv.index("--tools") + 1].split(","))
+            self.assertNotIn("Agent", self.denied_by(argv))
+            for args in (plain, {"prompt": "read it"}, {"prompt": "read it", "subagent_type": "general-purpose"}):
+                with self.subTest(kind=kind, args=args):
+                    self.assertEqual(self.guard_says(command, args)[0], 0)
+            for extra in ({"name": "reader"}, {"team_name": "group"}, {"isolation": "remote"},
+                          {"isolation": "worktree"}, {"cwd": "/"}, {"mode": "plan"}, {"a_later_field": True},
+                          {"name": ""}):
+                with self.subTest(kind=kind, extra=extra):
+                    status, said = self.guard_says(command, {**plain, **extra})
+                    self.assertEqual(status, 2)
+                    self.assertIn("plain subagent", said)
+                    self.assertNotIn("read the repository", said)
+            for event in ("{", '{"tool_input": null}', '{"tool_input": ["prompt"]}',
+                          '{"tool_input": {"prompt": "x", "subagent_type": 3}}'):
+                with self.subTest(kind=kind, event=event):
+                    r = subprocess.run(command, shell=True, input=event, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(r.returncode, 2)
+
+    def test_a_subagent_launch_is_refused_when_the_guard_cannot_run(self):
+        from hansa import run
+        failing = self.tmp / "failing python"
+        failing.write_text("#!/bin/sh\nexit 1\n")
+        failing.chmod(0o755)
+        for python in (self.tmp / "missing python", failing):
+            with self.subTest(python=python.name), unittest.mock.patch.object(sys, "executable", str(python)):
+                hooks = run.worker_hooks()["PreToolUse"]
+            [command] = [h["hooks"][0]["command"] for h in hooks if h["matcher"] == "^Agent$|^Task$"]
+            self.assertEqual(self.guard_says(command, {"prompt": "read it"})[0], 2)
+
+    def test_a_subagent_type_whose_definition_reaches_further_is_refused(self):
+        from hansa import run
+        [command] = [h["hooks"][0]["command"] for h in run.worker_hooks()["PreToolUse"]
+                     if h["matcher"] == "^Agent$|^Task$"]
+        agents = self.tmp / "checkout" / ".claude" / "agents"
+        (agents / "more").mkdir(parents=True)
+        (agents / "reader.md").write_text("---\nname: reader\ndescription: reads\ntools: Read, SendMessage, Agent\n"
+                                          "model: haiku\n---\nRead.\n")
+        (agents / "more" / "far.md").write_text("---\nname: Far_Reader\ndescription: x\nisolation: remote\n---\nGo.\n")
+        (agents / "hooked.md").write_text("---\nname: hooked\ndescription: x\nhooks:\n  PreToolUse: []\n---\nGo.\n")
+        (agents / "served.md").write_text("---\nname: served\ndescription: x\nmcpServers:\n  - remote\n---\nGo.\n")
+        cwd = self.tmp / "checkout" / "src"
+        cwd.mkdir()
+        self.assertEqual(self.guard_says(command, {"prompt": "x", "subagent_type": "reader"}, cwd)[0], 0)
+        self.assertEqual(self.guard_says(command, {"prompt": "x"}, cwd)[0], 0)  # general-purpose: not defined here
+        for kind in ("far-reader", "FAR READER", "hooked", "served"):
+            with self.subTest(kind=kind):
+                status, said = self.guard_says(command, {"prompt": "x", "subagent_type": kind}, cwd)
+                self.assertEqual(status, 2)
+                self.assertIn("plain subagent", said)
+        (agents / "general-purpose.md").write_text("---\nname: general-purpose\ndescription: x\nisolation: worktree\n---\n")
+        self.assertEqual(self.guard_says(command, {"prompt": "x"}, cwd)[0], 2)  # the default type, redefined
+        # Claude Code read the definitions as the run started: one made to look plain later is still refused
+        [started] = [h["hooks"][0]["command"] for h in run.worker_hooks(self.tmp / "checkout")["PreToolUse"]
+                     if h["matcher"] == "^Agent$|^Task$"]
+        (agents / "more" / "far.md").write_text("---\nname: Far_Reader\ndescription: x\n---\nGo.\n")
+        self.assertEqual(self.guard_says(command, {"prompt": "x", "subagent_type": "far-reader"}, cwd)[0], 0)
+        self.assertEqual(self.guard_says(started, {"prompt": "x", "subagent_type": "far-reader"}, cwd)[0], 2)
+        self.assertEqual(self.guard_says(started, {"prompt": "x", "subagent_type": "reader"}, cwd)[0], 0)
+        (agents / "unreadable.md").mkdir()  # a definition that cannot be read: no type is known to be plain
+        self.assertEqual(self.guard_says(command, {"prompt": "x", "subagent_type": "reader"}, cwd)[0], 2)
+        [blind] = [h["hooks"][0]["command"] for h in run.worker_hooks(self.tmp / "checkout")["PreToolUse"]
+                   if h["matcher"] == "^Agent$|^Task$"]
+        (agents / "unreadable.md").rmdir()
+        self.assertEqual(self.guard_says(blind, {"prompt": "x", "subagent_type": "reader"}, cwd)[0], 2)
+
+    def test_an_agent_definition_is_read_exactly_as_claude_code_reads_it_or_every_launch_is_refused(self):
+        from hansa import run
+        [command] = [h["hooks"][0]["command"] for h in run.worker_hooks()["PreToolUse"]
+                     if h["matcher"] == "^Agent$|^Task$"]
+        reaching = "name: far\ndescription: x\nisolation: remote\n"
+        # Forms hansa does not read exactly: Claude Code may read isolation: remote in them (Bun's YAML reads an
+        # indented block, and its second try turns leading tabs into spaces), so no type is taken to be plain.
+        unread = {
+            "spaces": "---\n name: far\n description: x\n isolation: remote\n---\n",
+            "tabs": "---\n\tname: far\n\tdescription: x\n\tisolation: remote\n---\n",
+            "first key indented": "---\n  name: far\nisolation: remote\n---\n",
+            "indented comment first": "---\n  # x\nname: far\nisolation: remote\n---\n",
+            "quoted key": '---\nname: far\ndescription: x\n"isolation": remote\n---\n',
+            "single-quoted key": "---\nname: far\ndescription: x\n'isolation': remote\n---\n",
+            "tab after the key": "---\nname: far\ndescription: x\nisolation:\tremote\n---\n",
+            "space before the colon": "---\nname: far\ndescription: x\nisolation : remote\n---\n",
+            "a comment after the name": "---\nname: other # far\ndescription: x\nisolation: remote\n---\n",
+            "the name going on": "---\nname: other\n  far\ndescription: x\nisolation: remote\n---\n",
+            "a name with a tag": "---\nname: !!str far\ndescription: x\nisolation: remote\n---\n",
+            "a key twice": "---\nname: other\nname: far\ndescription: x\nisolation: remote\n---\n",
+            "flow mapping": "---\n{name: far, description: x, isolation: remote}\n---\n",
+            "merge key": "---\nname: far\ndescription: x\n<<: {isolation: remote}\n---\n",
+            "explicit key": "---\nname: far\ndescription: x\n? isolation\n: remote\n---\n",
+            "lone carriage return": "---\nname: far\ndescription: x\risolation: remote\n---\n",
+            "line separator": "---\nname: far\ndescription: x\u2028isolation: remote\n---\n",
+            "next line": "---\nname: far\ndescription: x\x85isolation: remote\n---\n",
+            "second byte-order mark": "---\nname: far\ndescription: x\n\ufeffisolation: remote\n---\n",
+        }
+        # Forms read exactly: what Claude Code reads in them is what hansa reads.
+        read = {
+            "crlf": ("---\r\n" + reaching.replace("\n", "\r\n") + "---\r\n", True),
+            "byte-order mark": ("\ufeff---\n" + reaching + "---\n", True),
+            "quoted name": ("---\nname: 'far'\ndescription: x\nisolation: remote\n---\n", True),
+            "tab-indented list under a key": ("---\nname: far\ndescription: x\ntools:\n\t- Read\nhooks:\n  x: 1\n---\n", True),
+            # Claude Code reads only the first block, which ends at the first ---, even inside a line
+            "second block": ("---\nname: far\ndescription: x\n---\n---\nisolation: remote\n---\n", False),
+            "--- inside a value": ("---\nname: far\ndescription: a---b\nisolation: remote\n---\n", False),
+            "--- after the opening's spaces": ("---  \nname: far\ndescription: x\n---\nisolation: remote\n", False),
+        }
+        for label, (text, refused) in [*((k, (v, None)) for k, v in unread.items()), *read.items()]:
+            with self.subTest(form=label):
+                checkout = self.tmp / f"checkout-{abs(hash(label))}"
+                agents = checkout / ".claude" / "agents"
+                agents.mkdir(parents=True)
+                (agents / "reader.md").write_text("---\nname: reader\ndescription: reads\n---\nRead.\n")
+                (agents / "other.md").write_bytes(text.encode("utf-8"))  # its line ends as written
+                [started] = [h["hooks"][0]["command"] for h in run.worker_hooks(checkout)["PreToolUse"]
+                             if h["matcher"] == "^Agent$|^Task$"]
+                for guard in (command, started):
+                    far, said = self.guard_says(guard, {"prompt": "x", "subagent_type": "far"}, checkout)
+                    plain = self.guard_says(guard, {"prompt": "x", "subagent_type": "reader"}, checkout)[0]
+                    if refused is None:  # not read exactly: no launch at all
+                        self.assertEqual((far, plain), (2, 2))
+                        self.assertIn("cannot read every agent definition exactly", said)
+                    else:
+                        self.assertEqual((far, plain), (2 if refused else 0, 0))
+        # A folder of definitions that cannot be listed is not passed over: its types are unknown
+        checkout = self.tmp / "checkout-closed"
+        closed = checkout / ".claude" / "agents" / "closed"
+        closed.mkdir(parents=True)
+        (closed / "far.md").write_text("---\n" + reaching + "---\n")
+        closed.chmod(0)
+        self.addCleanup(closed.chmod, 0o700)
+        if os.access(closed, os.R_OK):  # root reads it all the same
+            self.skipTest("this account can list a folder whatever its mode")
+        for guard in (command, *[h["hooks"][0]["command"] for h in run.worker_hooks(checkout)["PreToolUse"]
+                                 if h["matcher"] == "^Agent$|^Task$"]):
+            self.assertEqual(self.guard_says(guard, {"prompt": "x", "subagent_type": "reader"}, checkout)[0], 2)
+
+    def test_a_worker_is_told_which_agent_types_of_its_start_commit_reach_further(self):
+        seen = self.tmp / "argv.jsonl"
+        (self.repo / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".claude" / "agents" / "far.md").write_text("---\nname: far\ndescription: x\nisolation: remote\n---\n")
+        subprocess.run(["git", "add", ".claude/agents/far.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "an agent"],
+                       cwd=self.repo, check=True)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(Dispatcher(self.desk), tid)
+        command = self.subagent_guard(json.loads(seen.read_text().splitlines()[-1]))
+        self.assertEqual(shlex.split(command)[-4:], ["far", "||", "exit", "2"])
+
+    def test_workers_have_the_session_checklist_and_others_keep_their_environment(self):
+        from hansa import cli, run
+        seen = self.tmp / "checklist.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SEE_CHECKLIST": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--desk", str(self.desk.root), "verify", tid])
+        self.settle(d, self.desk.meta(tid)["verify"])
+        self.assertEqual([json.loads(x) for x in seen.read_text().splitlines()], ["0", "0"])  # worker, verifier
+        settings = self.desk.settings()
+        self.assertNotIn("CLAUDE_CODE_ENABLE_TASKS", cli.coordinator_desk(self.desk, os.getuid())["env"])
+        self.assertNotIn("CLAUDE_CODE_ENABLE_TASKS", run.provider_env(self.desk, "claude", settings["providers"]["claude"]))
+        s = self.codex_settings()
+        self.assertEqual(self.desk.save_settings(s), [])
+        env = run.worker_env(self.desk, tid, "a", s["lanes"]["a"], "codex", self.desk.settings()["providers"]["codex"],
+                             str(self.tmp))
+        self.assertNotIn("CLAUDE_CODE_ENABLE_TASKS", env)
+
     def test_resumes_and_wrap_ups_limit_tools_from_pre_upgrade_commands(self):
         from hansa import run
         write = run.write_text
@@ -38918,7 +39122,7 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
                 old_denies = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
                               "RemoteTrigger", "PushNotification", "AskUserQuestion", "Monitor"]
                 if kind == "wrap-up":
-                    old_denies += ["GetTask", "Yield", "ListAgents", "SendMessage", "SendFile"]
+                    old_denies += ["GetTask", "Yield", "ListAgents", "SendMessage", "SendFile", "Agent", "Task"]
                 argv[deny + 1:allow] = [r for r in argv[deny + 1:allow] if "(" in r] + old_denies
                 settings = argv.index("--settings") + 1
                 box = json.loads(argv[settings])
@@ -38937,6 +39141,7 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
                     _, calls = self.turns_run()
                 [call] = calls
                 self.assert_worker_tools(call["argv"], web_rule.partition("(")[0])
+                self.assertEqual(call["env"]["CLAUDE_CODE_ENABLE_TASKS"], "0")
                 self.assertIn("Bash(git push:*)", self.denied_by(call["argv"]))
                 grants = self.allowed_by(call["argv"])
                 self.assertIn(web_rule, grants)

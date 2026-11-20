@@ -158,6 +158,9 @@ MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFA
 # (desk.RUN_ENV_PREFIXES), and it reaches only the commands in the sandbox (env_file), not Claude Code.
 NO_MODEL_SWITCH = {"switchModelsOnFlag": False}
 NO_MODEL_SWITCH_ENV = {"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1"}
+# A worker's checklist: with this, Claude Code 2.1.329 offers TodoWrite, whose list is the session's own (held in
+# memory, by session or subagent), in place of the four task tools, which can be pointed at another session's list.
+NO_SHARED_CHECKLIST_ENV = {"CLAUDE_CODE_ENABLE_TASKS": "0"}
 # Every variable provider_env sets for the provider itself; the rest of its environment is the caller's
 PROVIDER_VARS = ("CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
                  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", *MODEL_VARS)
@@ -435,16 +438,19 @@ VERIFY_ALLOW = ["Bash(git checkout:*)", "Bash(git restore:*)"]
 WORKER_ALLOW = ["Bash"]
 # --tools sets the worker's built-in tool list. --allowedTools only grants permissions and cannot
 # keep a new Claude Code tool from sending repository text to another session outside the Bash sandbox.
+# Agent (Task before) starts local subagents only: worker_hooks refuses a teammate, a cloud agent and any field
+# hansa does not know (worker_agent.py). A subagent gets no tool its worker lacks: the list and denies hold there.
 WORKER_TOOLS = ("Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "TodoWrite",
                 "Monitor", "TaskOutput", "BashOutput", "BashOutputTool", "AgentOutput", "AgentOutputTool",
-                "TaskStop", "KillShell", "KillBash")
+                "TaskStop", "KillShell", "KillBash", "Agent", "Task")
 # Keep the known routes closed by name too: Claude Code can supply tools implicitly (GetTask and Yield
-# alongside Bash). Agent can deliver a prompt to a teammate or a cloud session. Skill can fork an agent.
+# alongside Bash). Skill can fork an agent.
 WORKER_DENIED_TOOLS = (
-    "Agent", "Task", "ListAgents", "ListPeers", "SendMessage", "SendFile", "FetchInboxMessage", "SubagentHandback",
+    "ListAgents", "ListPeers", "SendMessage", "SendFile", "FetchInboxMessage", "SubagentHandback",
     "ObserverReport", "Workflow", "RunWorkflow", "TeamCreate", "TeamDelete",
     # In 2.1.329 the four checklist tools use the session ID by default. Settings can select a shared list after
-    # provider_env starts clean. Managed settings take precedence over --settings.
+    # provider_env starts clean. Managed settings take precedence over --settings. Workers have TodoWrite instead
+    # (NO_SHARED_CHECKLIST_ENV).
     "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
     "GetTask", "Yield",
     "AskUserQuestion", "ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
@@ -2045,16 +2051,17 @@ def isolated(cwd, settings: dict | None = None) -> list:
                                      "autoMemoryEnabled": False, **NO_MODEL_SWITCH})]
 
 
-def resumed_worker_argv(raw: Path) -> list:
+def resumed_worker_argv(raw: Path, wt=None) -> list:
     """Keep the saved sandbox, file fences and lane grants, applying today's built-in tool policy."""
     argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
     deny, allow = argv.index("--disallowedTools"), argv.index("--allowedTools")
     start = argv.index("--tools") if "--tools" in argv else deny
-    # Earlier hansa denied Monitor wholesale. Only its sandboxed command form is available now.
-    fences = [r for r in argv[deny + 1:allow] if r != "Monitor" and r not in WORKER_DENIED_TOOLS]
+    # Earlier hansa denied Monitor, and Agent (Task), wholesale. Only their forms worker_hooks lets through are
+    # available now.
+    fences = [r for r in argv[deny + 1:allow] if r not in ("Monitor", "Agent", "Task") and r not in WORKER_DENIED_TOOLS]
     argv[start:] = worker_tool_args(fences, argv[allow + 1:])
     at = argv.index("--settings") + 1
-    argv[at] = json.dumps({**json.loads(argv[at]), **NO_MODEL_SWITCH, "hooks": worker_hooks()})
+    argv[at] = json.dumps({**json.loads(argv[at]), **NO_MODEL_SWITCH, "hooks": worker_hooks(wt)})
     argv[argv.index("--session-id")] = "--resume"
     return argv
 
@@ -3508,8 +3515,8 @@ def worker_tool_args(denied: list, allowed: list) -> list:
     grants = []
     for rule in allowed:
         name = rule.partition("(")[0]
-        if name == "Monitor":  # command monitors use Bash permissions; never preapprove a WebSocket
-            continue
+        if name in ("Monitor", "Agent", "Task"):  # command monitors use Bash permissions; never preapprove a WebSocket
+            continue  # nor a subagent launch: worker_hooks decides which run
         if name in ("WebFetch", "WebSearch") and not refused_rule(rule):
             if name not in tools:
                 tools.append(name)
@@ -3519,10 +3526,19 @@ def worker_tool_args(denied: list, allowed: list) -> list:
     return ["--tools", ",".join(tools), "--disallowedTools", *denied, *WORKER_DENIED_TOOLS, "--allowedTools", *grants]
 
 
-def worker_hooks() -> dict:
-    command = shlex.join([sys.executable, "-I", str(Path(__file__).resolve().with_name("worker_monitor.py"))])
-    # A command hook blocks on exit 2. A missing interpreter or script must block as well.
-    return {"PreToolUse": [{"matcher": "^Monitor$", "hooks": [{"type": "command", "command": command + " || exit 2"}]}]}
+def worker_hooks(wt=None) -> dict:
+    """The worker's PreToolUse guards. Given its worktree as the run starts, the Agent guard is also told the agent
+    types whose definitions Claude Code is about to read reach further than a plain subagent (worker_agent.py)."""
+    from . import worker_agent
+    found = worker_agent.reaching(str(wt), account=False) if wt else []  # the account's: read by the hook
+    reaching = [worker_agent.ANY] if found is None else found  # ANY: one could not be read; every launch is refused
+
+    def guard(script, *args):
+        command = shlex.join([sys.executable, "-I", str(Path(__file__).resolve().with_name(script)), *args])
+        # A command hook blocks on exit 2. A missing interpreter or script, or one that fails, must block as well.
+        return [{"type": "command", "command": f"{command} || exit 2"}]
+    return {"PreToolUse": [{"matcher": "^Monitor$", "hooks": guard("worker_monitor.py")},
+                           {"matcher": "^Agent$|^Task$", "hooks": guard("worker_agent.py", *reaching)}]}
 
 
 def words_in_merge(desk: Desk, repo, tip: str, commit: str, message: str = "", lane=None, lane_name: str = "") -> list:
@@ -5206,6 +5222,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
     # the project settings it loads are its start commit's: here, and again after the lane's setup (with_setup)
     clear_project_files(desk, wt, tid, (desk.meta(tid).get("run_start") or {}).get("commit") or "HEAD")
+    at = argv.index("--settings") + 1  # the agent definitions it will read are those now there
+    argv[at] = json.dumps({**json.loads(argv[at]), "hooks": worker_hooks(wt)})
     command = with_setup(desk, tid, argv, lane, pname, p, wt)
     with desk.lock():  # a cancel lands before this (the worker never starts) or after it (it is stopped)
         if cancelled_before_start(desk, tid):
@@ -5234,7 +5252,8 @@ def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: 
     (resume, wrap_up; the one after the ceiling is given no bench: it starts nothing)."""
     bench = None if getattr(desk, "_bench_off", False) or not bench_ok else getattr(desk, "_bench", None)
     extra = bench.register(tid, lane, tmp, wt) if bench and desk.settings()["bench"]["enabled"] else {}
-    return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), **extra, "HANSA_TASK": tid,
+    return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), **extra,
+            **(NO_SHARED_CHECKLIST_ENV if p["kind"] != "codex" else {}), "HANSA_TASK": tid,
             "HANSA_RUN": tmp_mark(desk, tid, tmp), pictures.ENV: pictures.folder(tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
             "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
             "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
@@ -5303,7 +5322,7 @@ def resume(desk: Desk, tid: str):
     wt = Path(meta["worktree"])
     try:
         check_git_file(desk, wt)
-        argv = resumed_worker_argv(raw)
+        argv = resumed_worker_argv(raw, wt)
     except (GitFileChanged, OSError, ValueError):  # finish says what happened
         return None
     sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
@@ -5356,7 +5375,7 @@ def wrap_up(desk: Desk, tid: str):
     wt = Path(meta["worktree"])
     try:
         check_git_file(desk, wt)
-        argv = resumed_worker_argv(raw)
+        argv = resumed_worker_argv(raw, wt)
         turns = int(argv[argv.index("--max-turns") + 1])  # the ceiling of turns the run had
         argv[argv.index("--max-turns") + 1] = str(WRAP_UP_TURNS)  # counted from this call (RESUME_FACTS 4)
     except (GitFileChanged, OSError, ValueError, IndexError):  # finish says what happened
