@@ -111,6 +111,45 @@ NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
 # limits of their own; the desk's helpers do the same jobs at a set effort instead.
 BUILTIN_HELPERS = ("general-purpose", "Explore", "Plan", "claude", "statusline-setup", "claude-code-guide")
+# hansa's hidden commands (no help text), each with who runs it. hansa itself starts the follower, the launcher and
+# the account's hansa with the session's variables taken out (hansa/__init__.py), so a call that has them comes from a
+# Claude Code session's shell (its Bash tool, a helper's, the ! prefix): refused there (hidden_refusal). The session's
+# own hooks (HOOK_COMMANDS) run with its variables too, and so are not told apart from its Bash tool by them: the
+# session's allow rules (permissions) leave those to the principal's question
+HIDDEN_COMMANDS = {"coordinator-cleared": "the coordinator's session's hook after a /clear",
+                   "coordinator-turn": "the coordinator's session's hooks as a turn ends",
+                   "coordinator-desk": "hansa coordinator as root, for the desk's own account",
+                   "notify-follow": "hansa notify on, hansa coordinator and hansa up, which start a follower",
+                   "notify-feed": "a follower",
+                   "notify-launch": "hansa up"}
+HOOK_COMMANDS = ("coordinator-cleared", "coordinator-turn")
+# The commands the card lists, each allowed in the coordinator's session without a question (permissions): one rule
+# each, matched from the start of the command line, so a hidden command, an unknown word or options before the
+# command (hansa --desk X ...) are asked about like any other command
+CARD_COMMANDS = ("status", "desks", "add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close",
+                 "notify", "wait", "pause", "resume", "explain", "lane", "hide", "concurrency", "disk-floor",
+                 "memory-floor", "cost", "ask", "release", "changelog", "notes", "gaps", "goal", "decide",
+                 "decisions", "ping", "help")
+
+
+def hidden_refusal(cmd: str) -> str:
+    """Why this hidden command is not run here, '' when it may be: from a Claude Code session's shell (its variables
+    set), any of them but the session's own hooks."""
+    if cmd not in HIDDEN_COMMANDS or cmd in HOOK_COMMANDS or not session_vars():
+        return ""
+    return (f"hansa: {cmd} is a step of hansa's own, run by {HIDDEN_COMMANDS[cmd]}, not a command for a Claude Code "
+            "session or its helpers; nothing was run or written")
+
+
+def acting_role(default: str) -> str:
+    """Who ran this command, as hansa records it (who stopped a release, asked, paused, resumed or marked a note):
+    "coordinator" from a Claude Code session's shell, whatever HANSA_ROLE says there (one given on the command line
+    is the session's own word); outside one, HANSA_ROLE (a desk owner's wrapper sets it) or the default. Never
+    "page": only the page records the principal (desk.py, release.py)."""
+    if session_vars():
+        return "coordinator"
+    role = os.environ.get("HANSA_ROLE") or ""
+    return role if role and role != "page" else default
 ON_MAC = sys.platform == "darwin"
 
 
@@ -398,7 +437,7 @@ def permissions(desk: Desk) -> dict:
     # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win.
     # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
     # the short way matches only with both
-    return {"allow": ["Bash(hansa:*)", *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
+    return {"allow": [*(f"Bash(hansa {c}:*)" for c in CARD_COMMANDS), *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
             "deny": desk_read_denials(desk) + [f"Edit({g})" for g in guarded] + other_desk_rules(desk, "Edit")
             + no_publish_rules()}
 
@@ -923,7 +962,7 @@ def cmd_merge(a):
             if not steps:
                 raise SystemExit(f"hansa: lane {check_name} has no check to run again; nothing was merged")
             commands = "; then ".join(f"{s['what']} ({s['command']})" for s in steps)
-            by = os.environ.get("HANSA_ROLE", "cli")
+            by = acting_role("cli")
             desk.update(a.id, state="merging", merge_check_result=None,
                         merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by}, **sess)
             desk.event("check_rerun_queued", task=a.id, onto=tip, by=by, command=merge_command(check_lane), steps=steps)
@@ -1661,7 +1700,7 @@ def _stop_release(desk: Desk, a) -> None:
         raise SystemExit(f"hansa: --stop takes a release's number (hansa release lists them), not {a.stop!r}")
     reason = " ".join(([a.lane] if a.lane else []) + list(a.note))
     # who, as the principal's alert names them (release.STOPPED_BY): a Claude Code session on a desk is the coordinator's
-    by = os.environ.get("HANSA_ROLE") or ("coordinator" if session_vars() else "terminal")
+    by = acting_role("terminal")
     out = release.stop_release(desk, int(rid), reason, by=by)
     if not out["ok"]:
         raise SystemExit("hansa: " + "; ".join(out["problems"]) + ". Nothing was changed")
@@ -1707,12 +1746,12 @@ def _answer_by_code(desk: Desk, a) -> None:
 
 
 def cmd_pause(a):
-    Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=os.environ.get("HANSA_ROLE", "cli"))
+    Desk.find(a.desk).pause(" ".join(a.reason) or "paused", by=acting_role("cli"))
     print("paused: no new tasks start until `hansa resume`; running tasks finish")
 
 
 def cmd_resume(a):
-    Desk.find(a.desk).resume(by=os.environ.get("HANSA_ROLE", "cli"))
+    Desk.find(a.desk).resume(by=acting_role("cli"))
     print("resumed")
 
 
@@ -1784,10 +1823,10 @@ def cmd_ask(a):
         if os.environ.get("HANSA_TASK"):  # a worker or verification: the to-dos are the coordinator's
             raise SystemExit("hansa: only the coordinator closes a to-do; a worker or verification "
                              "cannot. Say in your report that it may be done")
-        Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
+        Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=acting_role("cli"))
         print(f"to-do #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the outcome")
         return
-    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
+    n = Desk.find(a.desk).add_ask(" ".join(a.text), by=acting_role("cli"),
                                   session=notify.session_here(), why=a.why, holds=a.holds, goal=a.goal or "")
     print(f"to-do #{n} is on the principal's list; they answer in the conversation")
 
@@ -1901,7 +1940,7 @@ def cmd_release(a):
     # On a one-target lane, a mistyped target must not become a note and release the only target.
     if note and note[0] and (note[0] in targets or len(targets) == 1 and NAME.match(note[0])):
         target = note.pop(0)
-    r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
+    r = release.ask(desk, a.lane, " ".join(note), by=acting_role("cli"),
                     session=notify.session_here(), target=target, direct=a.direct)
     who = release.what(r)
     head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}"
@@ -2034,6 +2073,18 @@ def cmd_coordinator_turn(a):
         return
 
 
+def same_program(named: str, claude: str) -> bool:
+    """Whether a session's recorded words name claude: by its name (claude, as Claude Code is run, whatever folder it
+    is in), or a path to the same file as this desk's. notify-launch runs the desk's either way."""
+    if os.path.basename(named) == "claude" or named == claude:
+        return True
+    found = named if os.sep in named else shutil.which(named)
+    try:
+        return bool(found) and os.path.samefile(found, claude)
+    except OSError:
+        return False
+
+
 def cmd_notify_launch(a):
     """hansa up's start of a session hansa notify on recorded: the follower for this process, which becomes the
     session as it execs claude (as hansa coordinator does), the start recorded again, then claude with the inbox
@@ -2048,6 +2099,16 @@ def cmd_notify_launch(a):
     unsplit = rules_problem(rules) or desk_paths_problem(desk, [home, *run_homes()])
     if unsplit:  # a deny rule Claude Code would split, or one under a path it reads as a pattern, closes nothing
         raise SystemExit(f"hansa: the coordinator's session was not started: {unsplit}")
+    # only the claude this desk uses (HANSA_CLAUDE's, else the first found: the one hansa doctor reports), never the
+    # program the words name: they name it only to say it is claude, as hansa up's record keeps the session's words
+    from .desk import claude_bin
+    try:
+        claude = claude_bin()
+    except RuntimeError as e:
+        raise SystemExit(f"hansa: the coordinator's session was not started: {e}") from None
+    if not same_program(a.rest[0], claude):
+        raise SystemExit(f"hansa: notify-launch starts only the claude this desk uses ({claude}), not "
+                         f"{a.rest[0]}; nothing was started or recorded")
     # the Stop and StopFailure hooks that record how its turns end; none when its words give a --settings of their
     # own (not merged), and left out of what hansa notify on records, as the rules are
     settings = None if up.has_settings(a.rest[1:]) else json.dumps({"hooks": turn_hooks(desk, os.getpid())})
@@ -2060,7 +2121,7 @@ def cmd_notify_launch(a):
     # hansa's status line and nothing else of the mod (no idle compaction, no daily clear), for this start only;
     # preparing it never stops the session, and what it did not do is said in one line
     env = {k: v for k, v in os.environ.items() if not k.startswith("HANSA_MOD_")}
-    mod = plugin.plan(desk, a.rest[0])  # a copy only on a Claude Code new enough for the mod (plugin.MOD_NEEDS)
+    mod = plugin.plan(desk, claude)  # a copy only on a Claude Code new enough for the mod (plugin.MOD_NEEDS)
     shown = mod["on"]
     if shown:
         env.update(plugin.line_env(desk, plugin.given_effort(a.rest[1:]), desk.settings().get("alert_language"),
@@ -2068,13 +2129,15 @@ def cmd_notify_launch(a):
     for line in [plugin.left_text(mod)] + plugin.mod_lines(mod):
         if line:
             print(f"hansa: {line}", file=sys.stderr)
+    # the desk's claude runs, under the name the words give it (what the session's process shows, and notify on
+    # records again)
     argv = [a.rest[0], *(["--plugin-dir", mod["copy"]] if shown else []), *_notified(desk, a.rest),
             *(up.with_settings(words, settings) if settings else words)]
     up.forget_turns(desk, os.getpid())  # a dead session's record, whose pid this one got, is not this one's
     try:
-        os.execvpe(argv[0], argv, env)
+        os.execvpe(claude, argv, env)
     except OSError as e:
-        raise SystemExit(f"hansa: {argv[0]} did not start: {e}")
+        raise SystemExit(f"hansa: {claude} did not start: {e}")
 
 
 def cmd_notify_follow(a):
@@ -2346,6 +2409,13 @@ def cmd_web(a):
 
 def cmd_coordinator(a):
     """Start the coordinator's interactive session in the desk, on the coordinator provider."""
+    # the principal's own terminal only: from a Claude Code session's shell (or with HANSA_ROLE, which hansa gives
+    # the coordinator's session, or a worker's HANSA_TASK) the words after coordinator would be the session's own
+    if session_vars() or os.environ.get("HANSA_ROLE") or os.environ.get("HANSA_TASK"):
+        why = "a Claude Code session's shell" if session_vars() else \
+            " and ".join(x for x in ("HANSA_ROLE", "HANSA_TASK") if os.environ.get(x)) + " set"
+        raise SystemExit(f"hansa: hansa coordinator starts claude from the principal's own terminal, not from a "
+                         f"Claude Code session or an agent ({why}); nothing was started")
     clear, rest = _clear_daily(a.rest)
     desk = Desk.find(a.desk)
     # a run that ends by itself (-p ...): neither refused beside a running session nor recorded as the session's start
@@ -2625,9 +2695,12 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
 
 
 def helper_text(text: str, model: str) -> str:
-    """A helper's definition as the desk gets it: with the principal's helpers' model (settings helpers_model) as its
+    """A helper's definition as the desk gets it: the read-only helpers' Bash hook given its command; with the principal's helpers' model (settings helpers_model) as its
     own model field; with none, as hansa ships it, so it runs on the coordinator's model. A model the coordinator names
     for one call of the Agent tool comes before either (Claude Code's order)."""
+    # the read-only helpers' hook that holds their shell to reading commands (helper_bash.py), as this hansa runs it
+    text = text.replace('"HANSA_HELPER_BASH"', json.dumps(shlex.join(
+        [sys.executable, "-I", str(Path(__file__).with_name("helper_bash.py"))])))
     if not model:
         return text
     head, sep, rest = text.partition("\n---\n")
@@ -3795,7 +3868,7 @@ def cmd_gaps(a):
     desk = Desk.find(a.desk)
     if a.words and a.words[0] == "mark" and len(a.words) in (3, 4) and not a.all:
         _, nid, kind, *why = a.words
-        gaps.mark(desk, nid, kind, why[0] if why else "", os.environ.get("HANSA_ROLE") or getpass.getuser(),
+        gaps.mark(desk, nid, kind, why[0] if why else "", acting_role(getpass.getuser()),
                   notify.session_here())
         print(gaps.show(desk, nid))
     elif len(a.words) == 2 and a.words[0] == "show" and not a.all:
@@ -4732,6 +4805,9 @@ def main(argv=None):
         ap.error("add needs the task text or --file")
     if a.cmd == "ask":
         _ask_arguments(ap, a)
+    refused = hidden_refusal(a.cmd)
+    if refused:
+        raise SystemExit(refused)
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     # coordinator-turn: root keeps only what the record needs of the hook's input before the account's hansa sees it
     if a.cmd not in ("coordinator", "coordinator-turn", "init", "notify", "notify-follow", "up", "desks", "menu",

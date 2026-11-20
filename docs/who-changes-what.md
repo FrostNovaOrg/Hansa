@@ -116,12 +116,24 @@ not already allowed.
 
 Setup, check and merge check run outside the worker, in the lane's sandbox (srt), and each change to
 them is recorded and told to the principal by the coordinator. The coordinator is not a
-worker: it runs on this machine outside any sandbox, and besides `hansa` it
-may run other commands the principal's work needs, such as installing
-software a lane needs or setting up a tool. Claude Code asks the principal
-before each one unless they have allowed it, and the coordinator says in
-plain words what the command does and why. It has three helpers: `scout`
-and `reviewer` only read; `operator` does one hands-on job on the machine
+worker: it runs on this machine outside any sandbox. Claude Code runs without
+asking only the `hansa` commands the card lists, each written as the card shows
+it (`hansa status`, `hansa add ...`; one rule each in the desk's
+`.claude/settings.json`). It asks the principal before any other command, a
+`hansa` one with options before its command (`hansa --desk X ...`) or a word
+the card does not list included, unless they have allowed it; the coordinator
+may run other commands the principal's work needs, such as installing software
+a lane needs or setting up a tool, and says in plain words what the command
+does and why. hansa's own steps that it gives no help text (the follower, the
+start `hansa up` makes, root's handoff to the desk's account) refuse a call
+from a Claude Code session's shell; the start `hansa up` makes runs only the
+claude the desk uses; and `hansa coordinator` starts only from the principal's own
+terminal. Who stopped, asked, paused or marked something is recorded as the
+coordinator for every command run in a Claude Code session, whatever
+`HANSA_ROLE` says there. It has three helpers: `scout` and `reviewer` only
+read (their shell runs reading commands only: `grep`, `find`, `cat` and the
+like, and hansa's `show`, `diff`, `git`, `status`, `explain`, one at a time);
+`operator` does one hands-on job on the machine
 (installing software, setting up a tool) with the coordinator's rights, each
 command with the principal's permission. Three things stay closed by design:
 reading `secrets/` (the keys), reading or editing the files directly in the

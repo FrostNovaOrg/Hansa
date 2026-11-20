@@ -1412,6 +1412,41 @@ def _card_note(desk: Desk) -> str:
     return f"the recorded session does not read the card: add {c['line']} to its CLAUDE.md (hansa explain notify)"
 
 
+# claude's words that switch its permission questions off, in whole or for some tools: hansa status names them in the
+# coordinator's recorded start (unasked_line), as hansa coordinator passes the principal's words on as given
+UNASKED_FLAGS = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--allowedTools",
+                 "--allowed-tools")
+UNASKED_MODES = ("bypassPermissions", "acceptEdits", "auto", "dontAsk")
+
+
+def unasked_words(words: list) -> list:
+    """The words among these that switch claude's permission questions off (UNASKED_FLAGS, a --permission-mode of
+    UNASKED_MODES), and a --settings of their own, each once, as given."""
+    out = []
+    for i, w in enumerate(words):
+        name, eq, value = w.partition("=")
+        value = value if eq else (words[i + 1] if i + 1 < len(words) and isinstance(words[i + 1], str) else "")
+        if name in UNASKED_FLAGS or name == "--settings" or name == "--permission-mode" and value in UNASKED_MODES:
+            said = f"{name} {value}" if name == "--permission-mode" else name
+            if said not in out:
+                out.append(said)
+    return out
+
+
+def unasked_line(desk: Desk) -> str:
+    """For hansa status: one line when the coordinator's recorded start (hansa coordinator's words, or the session
+    notify on recorded) gives claude words that switch permission questions off or a --settings of the caller's
+    (not the one with the hooks notify-launch adds: its record leaves that out); else ''."""
+    rec = read_coordinator(desk)
+    words = rec.get("words") if rec.get("kind") == "coordinator" else \
+        (rec.get("argv") or [None])[1:] if rec.get("kind") == "notify" and isinstance(rec.get("argv"), list) else []
+    found = unasked_words([x for x in words if isinstance(x, str)] if isinstance(words, list) else [])
+    if not found:
+        return ""
+    return (f"the coordinator's recorded start gives claude {', '.join(found)} of the caller's: Claude Code may run "
+            "commands in it without asking the principal")
+
+
 def coordinator_line(desk: Desk) -> str:
     """For hansa status while no session hears from hansa: what hansa up does about the coordinator's session."""
     rec = read_coordinator(desk)
