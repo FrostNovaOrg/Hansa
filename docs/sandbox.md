@@ -169,8 +169,18 @@ conversation, but for two cases: a follow-up may go on in the conversation of th
 verification of the same task in the earlier verification's ([A repeated verification](tasks.md#a-repeated-verification)).
 
 Hansa gives each Claude Code worker an explicit list of built-in tools with `--tools`.
-The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit`, sandboxed `Bash`
-and the session's own checklist (`TodoWrite`). Bench commands run through Bash.
+The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit` and sandboxed
+`Bash`. Bench commands run through Bash.
+
+**Workers have no built-in checklist on Claude Code 2.1.329 with its default task tools.**
+`TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` normally use the current session's
+list. Claude Code can select a shared list through `CLAUDE_CODE_TASK_LIST_ID`, and in
+team mode `TaskUpdate` can send an assignment to a teammate. Hansa starts workers
+without inherited list or team variables. Claude Code can still apply those variables
+from settings after launch, and managed settings take precedence over hansa's command-line
+settings. Hansa therefore denies all four tools. Workers can use `TodoWrite` on releases
+that offer it.
+
 Workers can watch a running command with `Monitor` and stop a job with `TaskStop`
 (`KillShell` in older versions). Hansa also allows `TaskOutput` and its older name
 `BashOutput` on releases that provide them. Claude Code 2.1.329 delivers background

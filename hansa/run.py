@@ -443,7 +443,10 @@ WORKER_TOOLS = ("Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit",
 WORKER_DENIED_TOOLS = (
     "Agent", "Task", "ListAgents", "ListPeers", "SendMessage", "SendFile", "FetchInboxMessage", "SubagentHandback",
     "ObserverReport", "Workflow", "RunWorkflow", "TeamCreate", "TeamDelete",
-    "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "GetTask", "Yield",
+    # In 2.1.329 the four checklist tools use the session ID by default. Settings can select a shared list after
+    # provider_env starts clean. Managed settings take precedence over --settings.
+    "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
+    "GetTask", "Yield",
     "AskUserQuestion", "ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
     "ReadNotifications", "Poll", "SendUserMessage", "Brief", "SendUserFile", "WrapUp",
     "Projects", "SendToProject", "SendToProjectContext", "ClaudeDesign", "DesignSync", "Artifact", "ArtifactCheck",

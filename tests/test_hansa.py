@@ -27940,7 +27940,7 @@ def save():'''))
         ]:
             with self.subTest(role=role, extra=extra):
                 event = {"tool_input": {"subagent_type": role, "prompt": "private repository text", **extra}}
-                r = subprocess.run(shlex.split(action["command"]), input=json.dumps(event), capture_output=True, text=True)
+                r = subprocess.run(action["command"], shell=True, input=json.dumps(event), capture_output=True, text=True)
                 self.assertEqual(r.returncode, 2 if block else 0, r.stderr)
                 if block:
                     self.assertIn("subagent", r.stderr)
@@ -27948,8 +27948,17 @@ def save():'''))
                     self.assertEqual(r.stdout, "")  # no updatedInput that replaces the call's model
                 self.assertNotIn("private repository text", r.stderr + r.stdout)
         for malformed in ("{", '{"tool_input":null}'):
-            r = subprocess.run(shlex.split(action["command"]), input=malformed, capture_output=True, text=True)
+            r = subprocess.run(action["command"], shell=True, input=malformed, capture_output=True, text=True)
             self.assertEqual(r.returncode, 2)
+
+    def test_helper_launch_is_blocked_if_the_hooks_python_is_missing(self):
+        with unittest.mock.patch.object(sys, "executable", str(self.tmp / "missing python")):
+            argv, _, _ = self.start_with_mod(version="2.0.0")
+        [guard] = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+        [action] = guard["hooks"]
+        event = {"tool_input": {"subagent_type": "scout", "name": "reader"}}
+        r = subprocess.run(action["command"], shell=True, input=json.dumps(event), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_coordinator_removes_a_dead_sessions_turn_record_for_its_own_pid(self):
         d = self.desk.state_dir / "coordinator-turns"
@@ -29940,6 +29949,7 @@ def save():'''))
         self.assertEqual(argv.count("--tools"), 1)
         self.assertIn("--strict-mcp-config", argv)
         self.assertNotIn("--mcp-config", argv)
+        self.assertFalse({"--agent-teams", "--team-name", "--agent-name", "--agent-id"}.intersection(argv))
         names = []
         for value in argv[argv.index("--tools") + 1:]:
             if value.startswith("-"):
@@ -30448,7 +30458,8 @@ def save():'''))
         seen = self.tmp / "argv.jsonl"
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
-        unavailable = ["SendMessage", "ListAgents", "Agent", "Skill", "ToolSearch", "FutureTool"]
+        unavailable = ["SendMessage", "ListAgents", "Agent", "Skill", "ToolSearch", "FutureTool",
+                       "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]
         s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch(domain:docs.python.org)", "WebSearch", "Monitor",
                                     *unavailable]
         self.assertEqual(self.desk.save_settings(s), [])
@@ -37069,6 +37080,21 @@ def save():'''))
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, status, r.stderr)
                 self.assertEqual(r.stdout, "")  # a permitted command still goes through normal Bash permission checks
+
+    def test_workers_do_not_inherit_the_callers_team_or_shared_checklist(self):
+        from hansa import run
+        shared = {"CLAUDE_CODE_TASK_LIST_ID": "shared-list", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+                  "CLAUDE_INTERNAL_ASSISTANT_TEAM_NAME": "team", "CLAUDE_INTERNAL_SESSION_TASK_LIST_ID": "team-list"}
+        settings = self.desk.settings()
+        lane = {**settings["lanes"]["a"], "env": {**shared, "FROM_LANE": "yes"}}
+        tid = self.desk.new_task("Check the worker environment")
+        with unittest.mock.patch.dict(os.environ, shared):
+            env = run.worker_env(self.desk, tid, "a", lane, "claude", settings["providers"]["claude"], str(self.tmp))
+        self.assertEqual(shared.keys() & env.keys(), set())
+        lane_file = Path(env["CLAUDE_ENV_FILE"]).read_text()
+        self.assertIn("export FROM_LANE=yes", lane_file)
+        for name in shared:
+            self.assertNotIn(f"export {name}=", lane_file)
 
     def test_resumes_and_wrap_ups_limit_tools_from_pre_upgrade_commands(self):
         from hansa import run
