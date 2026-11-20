@@ -4,6 +4,29 @@ import { register } from '../hooks/register.js'
 const SETTINGS = '/desk/settings.json'
 const MIN = 60_000
 const THRESHOLDS = { idle_at: 400_000, working_at: 550_000 }
+
+test('hansa helpers run as subagents even when Claude Code offers to spawn teammates', async () => {
+  const handlers: Record<string, Function> = {}
+  register((name: string, fn: Function) => {
+    handlers[name] = fn
+    return { catch: () => undefined }
+  })
+  const dispatch = handlers['agent.spawn']
+  const coordinator = { env: { get: async () => undefined } }
+  const lineOnly = { env: { get: async () => '1' } }
+  const spawned = { agentId: 'agent-1' }
+  for (const subagentType of ['scout', 'reviewer', 'operator']) {
+    const rejectDispatch = async () => { throw new Error('teammate was dispatched') }
+    const teammate = { subagentType, isTeammate: true }
+    const result = await dispatch(coordinator, teammate, rejectDispatch)
+    expect(result.deny).toContain(subagentType)
+    expect(result.deny).toContain('subagent')
+    expect(await dispatch(coordinator, { subagentType }, async () => spawned)).toBe(spawned)
+    expect(await dispatch(lineOnly, teammate, async () => spawned)).toBe(spawned)
+  }
+  expect(await dispatch(coordinator, { subagentType: 'another-helper', isTeammate: true },
+    async () => spawned)).toBe(spawned)
+})
 // The desk's settings file, as hansa's page saves it: the thresholds among the desk's other settings
 const desk = (thresholds: Record<string, unknown>) => JSON.stringify({
   version: 1, concurrency: 2, coordinator: { provider: 'claude', model: 'opus' },

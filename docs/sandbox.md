@@ -168,6 +168,23 @@ conversation, but for two cases: a follow-up may go on in the conversation of th
 ([Going on in the earlier conversation](tasks.md#going-on-in-the-earlier-conversation)), and a repeated
 verification of the same task in the earlier verification's ([A repeated verification](tasks.md#a-repeated-verification)).
 
+Hansa gives each Claude Code worker an explicit list of built-in tools with `--tools`.
+The worker gets `Read`, `Glob`, `Grep`, `Edit`, `Write`, `NotebookEdit`, sandboxed `Bash`
+and the session's own checklist (`TodoWrite`). Bench commands run through Bash.
+The lane can also grant `WebSearch` and site-specific `WebFetch`. A lane permission can approve
+the use of an available tool. Adding another built-in name to the lane cannot enable that tool.
+This keeps repository text out of other sessions' inboxes, including when a Claude Code upgrade
+adds a messaging tool. Verifications, follow-ups, resumes and wrap-ups use the same list.
+`hansa ping` uses an empty list.
+
+The coordinator's `scout` and `reviewer` subagents get `Read` and `Bash`.
+`operator` also gets `Edit` and `Write`. All three exclude messaging, agent discovery and
+the background-task tools Claude Code can add alongside Bash. Launch these helpers as ordinary
+subagents, omitting `name` and `team_name`. The coordinator's agent-launch hook blocks named
+or team launches of these three roles even without hansa's mod. Claude Code gives experimental
+teammates mandatory messaging and shared task tools. If the principal disables all Claude Code
+hooks and enables experimental teams, only ordinary subagent launches retain the restrictions.
+
 ## Headless browsers
 
 Measured 2026-10-23, srt 0.0.77, as lane checks (`hansa lane try`):

@@ -2448,6 +2448,10 @@ def cmd_coordinator(a):
     hooks = {**turns, "SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
         f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}, *turns["SessionStart"]]}
+    # A named Agent call can launch a teammate with mandatory messaging, even when its definition
+    # denies it. The ordinary command hook also runs on versions and starts without hansa's mod.
+    guard = shlex.join([sys.executable, "-I", str(Path(__file__).resolve().with_name("helper_spawn.py"))])
+    hooks["PreToolUse"] = [{"matcher": "^Agent$|^Task$", "hooks": [{"type": "command", "command": guard}]}]
     own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)

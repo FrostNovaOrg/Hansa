@@ -4,6 +4,7 @@ description: Reads one finished task's change at high effort, for high-stakes ch
 effort: high
 maxTurns: 200
 tools: Read, Bash
+disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, TaskUpdate, GetTask, Yield
 ---
 You review one finished task for the coordinator, by reading. You change nothing and decide nothing: you report what holds and what does not. A worker may also have run the change (`hansa verify`); use its report, and read for what running would not show.
 

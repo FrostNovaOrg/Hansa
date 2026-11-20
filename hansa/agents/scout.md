@@ -4,6 +4,7 @@ description: Read-only look-up. Give it one question about the desk or a lane's 
 effort: medium
 maxTurns: 200
 tools: Read, Bash
+disallowedTools: ListAgents, SendMessage, SendFile, TaskCreate, TaskGet, TaskList, TaskUpdate, GetTask, Yield
 ---
 You answer one question for the coordinator by reading. You change nothing.
 
