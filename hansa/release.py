@@ -402,10 +402,10 @@ def _outgoing_basis(repo, base: str = "", command: str = "", prev: dict | None =
     remotes = [name for name in _git_bytes(repo, "remote").split("\n") if name]
     tracking = _git_bytes(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes")
     refs = {ref: sha for sha, ref in (line.split(" ", 1) for line in tracking.split("\n") if line)}
+    since = prev["commit"] if prev and prev.get("command") == command and _has_commit(repo, prev["commit"]) else ""
     destination = outside.push_branch(command, base) if prev else None
     if not destination or destination[0] not in remotes:
-        return _OutgoingBasis("", None, "", remotes, refs)
-    since = prev["commit"] if prev.get("command") == command and _has_commit(repo, prev["commit"]) else ""
+        return _OutgoingBasis(since, None, "", remotes, refs)
     return _OutgoingBasis(since, destination, _tracked_head(repo, *destination, refs), remotes, refs)
 
 
@@ -414,13 +414,14 @@ def _revisions(commit: str, excluded) -> list:
 
 
 def _range(repo, since: str, commit: str, basis: _OutgoingBasis | None = None) -> tuple:
-    """The shared outgoing range and any per-remote ranges used to form it."""
+    """The shared outgoing range and any per-remote ranges used to form it on a first release."""
     if basis is None:
         basis = _outgoing_basis(repo)
-    if basis.destination:
+    if since or basis.destination:
+        # For an unknown destination, only the target's own release gives a cutoff.
         return _revisions(commit, (since, basis.tracked)), {}
     remote_ranges = {}
-    if not since and len(basis.remotes) > 1:
+    if len(basis.remotes) > 1:
         for remote in basis.remotes:
             prefix = f"refs/remotes/{remote}/"
             remote_ranges[remote] = _revisions(commit, (sha for ref, sha in basis.refs.items() if ref.startswith(prefix)))
@@ -436,7 +437,7 @@ def _range(repo, since: str, commit: str, basis: _OutgoingBasis | None = None) -
             return _revisions(commit, [commit]), remote_ranges
         # A boundary missing from another remote still goes out. Only commits every remote has can stop the walk.
         return _revisions(commit, boundary - missing), remote_ranges
-    return _revisions(commit, (*basis.refs.values(), since)), {}
+    return _revisions(commit, basis.refs.values()), {}
 
 
 def _git_bytes(repo, *args) -> str:

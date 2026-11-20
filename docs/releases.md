@@ -42,7 +42,7 @@ release L [TARGET] [note]` (TARGET needed when there is more than one, and befor
 note that could be a target name, as in `hansa release a public staging`)
 records the request (a new request for the same target replaces one still
 waiting): the target, the commit, the command, the note, the
-commits that go out (for a first release or unknown destination with one remote or none: on no
+commits that go out (in the first-release range with one remote or none, those on no
 remote-tracking branch of the repository, or the whole history when it has no tracking branch)
 and the files they change, a file the command names
 (such as `./deploy.sh`) marked. On a one-target lane, an unknown word that `hansa lane target`
@@ -52,9 +52,9 @@ and, if it had a one-time code, says that code no longer works. If a request is 
 commit as the last release it uses as a starting point, the reply first says there is nothing new,
 names that release and says it was asked to run again. These remarks appear in the command's reply,
 not in the alert.
-After a target's first release, an explicit push to a named remote and branch leaves out commits in
-that branch's local tracking ref. It also leaves out commits in the last release if the command still
-matches. A script or other command whose destination cannot be identified uses the first-release range.
+When the command still matches, the range starts after the target's last released commit.
+After a target's first release, an explicit push to a named remote and branch also leaves out commits in
+that branch's local tracking ref. A changed command with an unknown destination uses the first-release range.
 When that range has two or more remotes, including for a `--fixed` target,
 every base commit missing from at least one remote's tracking branches is counted, shown,
 scanned and checked for direct commits, even if another remote already has it;

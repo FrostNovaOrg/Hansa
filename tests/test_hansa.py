@@ -44714,11 +44714,11 @@ def save():'''))
         told = self.hansa("explain", "lane", "a")
         self.assertIn("release target default: sh ./deploy.sh", told)
         self.assertIn("last release of default: #1 lane a target default at " + sha[:10], told)
-        # The command is a script, so the next request still checks the first-release range.
+        # A repeat script release checks the commits since that target last ran.
         self.commit_in_repo("b.txt", "b\n")
         with self.in_session(p, sock):
-            self.assertIn("3 outgoing commit(s) checked", self.hansa("release", "a"))
-        self.assertEqual([c["subject"] for c in release.get(self.desk, 2)["commits"]], ["Add b.txt", "Add deploy.sh", "init"])
+            self.assertIn("1 outgoing commit(s) checked", self.hansa("release", "a"))
+        self.assertEqual([c["subject"] for c in release.get(self.desk, 2)["commits"]], ["Add b.txt"])
 
     def test_the_page_answers_a_release_through_its_own_address(self):
         skip_unless_ports(self)
@@ -48252,24 +48252,118 @@ def save():'''))
                 finally:
                     c.doCleanups()
 
-    def test_script_release_after_success_keeps_the_first_release_range(self):
+    def test_script_release_asked_again_at_the_same_commit_has_nothing_new(self):
         from hansa import release
-        self.add_release_remote("mirror")
-        self.add_release_remote("public")
-        self.git_out("push", "-q", "public", "main")
-        script = self.commit_in_repo("publish.sh", "git push mirror main\n")
-        head = self.commit_in_repo("note.txt", "private falcon\n")
+        head = self.commit_in_repo("publish.sh", "echo released\n")
         self.with_targets(ship="sh ./publish.sh")
         self.tick_targets("ship")
         self.hansa("release", "a", "ship")
         self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+
+        asked = self.hansa("release", "a", "ship")
+        self.assertIn("Nothing new", asked.splitlines()[0])
+        self.assertIn("same commit as release #1", asked)
+        r = release.get(self.desk, 2)
+        self.assertEqual((r["since"], r["since_release"]), (head, 1))
+        self.assertEqual((r["count"], r["files_count"], r["direct_count"], r["checked"]), (0, 0, 0, 0))
+        self.assertEqual(r["commits"], [])
+
+    def test_push_by_address_after_merge_does_not_hold_direct_commits_already_sent(self):
+        from hansa import release
+        destination = self.tmp / "delivery.git"
+        self.git_out("init", "--bare", "-q", "-b", "main", str(destination))
+        self.recorded_after_merge(time.time() - 120, "first-landing.txt")
+        direct = self.commit_in_repo("fix.txt", "direct fix\n")
+        command = f"git push {shlex.quote(str(destination))} main"
+        self.hansa("lane", "target", "a", "ship", command, "--after-merge", "1")
+        self.assertTrue(self.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship", "--direct", "Send the fix")
+        first = release.get(self.desk, 1)
+        self.assertEqual(first["state"], "waiting")
+        self.assertIn(direct, [c["sha"] for c in first["direct"]])
+        self.assertTrue(release.answer(self.desk, 1, True, commit=direct, command=first["command"])["ok"])
+        d = Dispatcher(self.desk)
+        first = self.settle_release(d, 1)
+        self.assertEqual(first["state"], "done")
+        self.assertEqual(self.git_out("rev-parse", "main", cwd=destination), direct)
+
+        landed_at = first["asked"] + 1
+        head = self.recorded_after_merge(landed_at)
+        with unittest.mock.patch.object(release, "now", return_value=landed_at + 120):
+            [pending] = views.status(self.desk)["after_merge_waiting"]
+            self.assertIn("starts when the server next looks", pending["what"])
+            d.tick()
+            r = self.settle_release(d, 2)
+        self.assertEqual((r["state"], r["since"], r["count"], r["checked"], r["direct_count"]),
+                         ("done", direct, 1, 1, 0))
+        self.assertTrue(r["after_merge"])
+        self.assertEqual([c["sha"] for c in r["commits"]], [head])
+        self.assertEqual(self.git_out("rev-parse", "main", cwd=destination), head)
+
+    def test_repeat_script_release_counts_and_scans_a_mirror_only_commit(self):
+        from hansa import release
+        self.add_release_remote("mirror")
+        self.add_release_remote("public")
+        first = self.commit_in_repo("publish.sh", "git push public main\n")
+        self.with_targets(ship="sh ./publish.sh")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.tick_targets()
+
+        head = self.commit_in_repo("note.txt", "private falcon\n")
+        self.git_out("push", "-q", "mirror", "main")
         self.assertEqual(self.git_out("rev-parse", "mirror/main"), head)
+        self.assertIn("1 commit(s) since release #1", self.hansa("release", "a", "ship"))
+        requested = release.get(self.desk, 2)
+        self.assertEqual((requested["since"], requested["since_release"]), (first, 1))
+        self.assertEqual((requested["count"], requested["checked"], requested["files_count"]), (1, 1, 1))
+        self.assertEqual([c["sha"] for c in requested["commits"]], [head])
+        self.assertEqual([c["sha"] for c in requested["direct"]], [head])
+        self.assertEqual(requested["files"], ["note.txt"])
+        self.assertNotIn("remote_counts", requested)
+
         self.forbid("falcon")
         self.assertIn(f"{head[:10]} note.txt: private falcon", self.refused("release", "a", "ship"))
-        r = release.get(self.desk, 2)
-        self.assertEqual((r["since"], r["count"], r["checked"], r["remote_counts"]),
-                         ("", 2, 2, {"mirror": 0, "public": 2}))
-        self.assertEqual([c["sha"] for c in r["commits"]], [head, script])
+        r = release.get(self.desk, 3)
+        self.assertEqual((r["state"], r["count"], r["checked"]), ("forbidden", 1, 1))
+        self.assertEqual([(h["commit"], h["where"]) for h in r["hits"]], [(head, "note.txt")])
+
+        # Approval-time scanning uses the same range after the forbidden list changes.
+        self.assertTrue(release.answer(self.desk, 2, True, commit=head, command=requested["command"])["ok"])
+        self.assertEqual(self.settle_release(d, 2)["state"], "forbidden")
+        self.assertEqual(release.get(self.desk, 2)["hits"], r["hits"])
+        self.assertEqual(self.git_out("rev-parse", "public/main"), first)
+
+    def test_changed_script_release_uses_the_same_range_as_a_first_release(self):
+        from hansa import release
+        self.add_release_remote("mirror")
+        self.add_release_remote("public")
+        self.git_out("push", "-q", "public", "main")
+        script = self.commit_in_repo("publish.sh", 'git push "$1" main\n')
+        head = self.commit_in_repo("note.txt", "private falcon\n")
+        self.with_targets(ship="sh ./publish.sh mirror")
+        self.tick_targets("ship")
+        self.hansa("release", "a", "ship")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertEqual(self.git_out("rev-parse", "mirror/main"), head)
+
+        command = "sh ./publish.sh public"
+        self.with_targets(ship=command, new=command)
+        self.forbid("falcon")
+        for rid, target, previous in ((2, "ship", 1), (3, "new", None)):
+            with self.subTest(target=target):
+                said = self.refused("release", "a", target)
+                self.assertIn(f"{head[:10]} note.txt: private falcon", said)
+                self.assertNotIn("Nothing new", said)
+                r = release.get(self.desk, rid)
+                self.assertEqual(r.get("previous_release"), previous)
+                self.assertEqual((r["since"], r["since_release"]), ("", None))
+                self.assertEqual((r["state"], r["count"], r["checked"], r["remote_counts"]),
+                                 ("forbidden", 2, 2, {"mirror": 0, "public": 2}))
+                self.assertEqual([c["sha"] for c in r["commits"]], [head, script])
 
     def test_repeat_release_excludes_commits_fetched_from_its_destination_branch(self):
         from hansa import release
@@ -56803,6 +56897,7 @@ else if (ask === "task-steps")'''))
             for part in ("one remote or none", "on no remote-tracking branch", "two or more remotes",
                          "first release", "missing from at least one remote", "each remote",
                          "no tracking branches", "whole history", "--fixed",
+                         "after the target's last released commit", "changed command with an unknown destination",
                          "in the release or watch command line"):
                 self.assertIn(part, shown)
 
@@ -57741,12 +57836,12 @@ else:
         self.assertIn("#1 lane a target default at", self.hansa("release"))
         self.assertIn("default: echo x", self.hansa("explain", "lane", "a"))
         self.assertIn("default: echo x", self.hansa("lane", "target", "a"))
-        # A request recorded before targets had names is the previous release, but the script uses the first range.
+        # A successful request recorded before targets had names still sets the starting commit.
         release.change(self.desk, 1, lambda x: {"target": None})
         self.commit_in_repo("b.txt", "b\n")
         self.hansa("release", "a")
         request = release.get(self.desk, 2)
-        self.assertEqual((request["previous_release"], request["since_release"], request["count"]), (1, None, 2))
+        self.assertEqual((request["previous_release"], request["since_release"], request["count"]), (1, 1, 1))
         # the entry is left as it was saved
         self.assertEqual(self.desk.settings()["releases_without_asking"][0].get("release"), f"echo x >> {out}")
 
