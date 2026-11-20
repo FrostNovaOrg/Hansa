@@ -1167,8 +1167,13 @@ the `bin/hansa` that `serve-start.json` or `coordinator-start.json` names must
 be the same file as the running hansa's own, or as one the account's list of
 desks names (only a hansa writes that list, each server start and `hansa init`
 putting its own installation there, and it lies outside every desk); the claude
-a record's saved variables find (`HANSA_CLAUDE`, else the first on its `PATH`)
-must be the same file as the claude `hansa up` finds in its own environment; and
+a record's saved variables find (`HANSA_CLAUDE`, else the first on its `PATH`,
+else `~/.local/bin/claude`) must be the same file as one of: the claude `hansa up`
+finds in its own environment, the same way (`HANSA_CLAUDE`, `PATH`, then
+`~/.local/bin/claude`); the claude at `~/.local/bin/claude`, even when that
+environment names another; or the [Codex adapter](codex.md#desks-set-up-the-old-way)
+shipped inside the running hansa or inside an installation on the account's list
+(`contrib/codex/bin/claude-or-codex` there, by that path, not by its name); and
 the program a session's recorded words name must be that claude, as
 `notify-launch` checks it. Otherwise `hansa up` starts nothing, the server
 included, and says in one sentence which record names what, for example
@@ -1176,8 +1181,18 @@ included, and says in one sentence which record names what, for example
 (PATH) is not a hansa installation this account runs (this one, PATH, or one on
 the account's list of desks)`. So a record written in a desk's folder (a
 look-alike desk in `notes/`, say) cannot have `hansa up` run a program of its
-own. When the claude differs only because this shell's `PATH` or `HANSA_CLAUDE`
-differs from the recorded start's, run `hansa up` where they name the same claude.
+own.
+
+So `hansa up` from cron (an `@reboot` line), over ssh or after the machine
+restarted starts a claude installed at `~/.local/bin/claude` even when that
+shell's `PATH` lacks the folder: the server and the session run with the saved
+variables. A claude installed anywhere else must be found by the shell that runs
+`hansa up`: otherwise it starts nothing and says `the claude its environment
+names (PATH) is neither the claude this shell finds (...), nor the one at
+~/.local/bin/claude, nor hansa's own Codex adapter: if it is the claude meant,
+set PATH or HANSA_CLAUDE in the shell that runs hansa up so that it finds that
+claude`. In a crontab, set `PATH` (or `HANSA_CLAUDE`) on the line itself or
+above it.
 
 Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, where the
 page was last served. If something else holds that port, the server starts

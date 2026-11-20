@@ -2159,12 +2159,20 @@ def account_home() -> str:
 PROGRAMS = ("claude", "git", "srt", "node", "tmux")
 
 
+CLAUDE_STANDARD = os.path.join("~", ".local", "bin", "claude")  # where Claude Code's installer puts claude
+
+
+def claude_standard() -> str:
+    """The standard place of claude (CLAUDE_STANDARD) for this account: the last place hansa looks for it."""
+    return os.path.expanduser(CLAUDE_STANDARD)
+
+
 def program_candidates(name: str, env=None) -> list:
     """Where hansa looks for a program it runs, in order: the first that can be run is the one."""
     env = os.environ if env is None else env
     found = shutil.which(name, path=env.get("PATH", os.defpath))
     if name == "claude":
-        return [env.get("HANSA_CLAUDE"), found, os.path.expanduser("~/.local/bin/claude")]
+        return [env.get("HANSA_CLAUDE"), found, claude_standard()]
     if name == "codex":
         return [env.get("HANSA_CODEX_BIN"), found, os.path.join(account_home(), ".local", "bin", name)]
     if name == "tmux":

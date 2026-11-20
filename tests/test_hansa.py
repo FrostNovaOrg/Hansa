@@ -3705,6 +3705,85 @@ class UpTest(unittest.TestCase):
         self.record(hansa=str(other), env=mine)
         self.assertEqual(up.recorded_start_problem(self.desk), "")
 
+    def runnable(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755)
+        return path
+
+    def up_with(self, recorded: dict) -> str:
+        """hansa up on a serve record of these saved variables, the server's start and the coordinator's left out:
+        what it said on stderr, '' when it went on to start the server."""
+        from hansa import up
+        self.record(env=recorded)
+        err = io.StringIO()
+        with unittest.mock.patch.object(up, "server_up", return_value=True) as served, \
+                unittest.mock.patch.object(up, "coordinator_up", return_value=True), contextlib.redirect_stderr(err):
+            try:
+                self.say("up")
+            except SystemExit:
+                pass
+        self.assertEqual(served.called, not err.getvalue(), err.getvalue())
+        return err.getvalue()
+
+    def test_up_starts_a_recorded_claude_at_the_standard_place_or_this_shells_from_cron_or_ssh(self):
+        standard = self.runnable(Path(os.path.expanduser("~/.local/bin/claude")))  # HOME is the test's folder
+        self.assertTrue(str(standard).startswith(str(self.tmp)))
+        bare = {"PATH": "/usr/bin:/bin"}  # cron's or ssh's PATH, without the folder claude is in
+        os.environ.pop("HANSA_CLAUDE", None)
+        other = self.runnable(self.tmp / "npm" / "claude")  # another claude this shell's PATH finds
+        for shell in ({"PATH": bare["PATH"]}, {"PATH": f"{other.parent}:/usr/bin:/bin"},
+                      {"PATH": bare["PATH"], "HANSA_CLAUDE": str(other)},
+                      {"PATH": bare["PATH"], "HANSA_CLAUDE": str(self.tmp / "gone" / "claude")}):
+            for saved in ({**bare, "HANSA_CLAUDE": str(standard)}, {"PATH": f"{standard.parent}:/usr/bin"}, bare):
+                with self.subTest(shell=shell, saved=saved), unittest.mock.patch.dict(os.environ, shell):
+                    if "HANSA_CLAUDE" not in shell:
+                        os.environ.pop("HANSA_CLAUDE", None)
+                    self.assertEqual(self.up_with(saved), "")
+        # the claude this shell finds, wherever it is, as before
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{other.parent}:/usr/bin:/bin"}):
+            self.assertEqual(self.up_with({"PATH": f"{other.parent}:/usr/bin"}), "")
+
+    def test_up_refuses_a_recorded_claude_elsewhere_that_this_shell_does_not_find(self):
+        elsewhere = self.runnable(self.tmp / "opt" / "claude")
+        os.environ.pop("HANSA_CLAUDE", None)
+        for saved in ({"PATH": "/usr/bin", "HANSA_CLAUDE": str(elsewhere)}, {"PATH": f"{elsewhere.parent}:/usr/bin"}):
+            with self.subTest(saved=saved), unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+                said = self.up_with(saved)
+                self.assertIn(f"the claude its environment names ({elsewhere})", said)
+                self.assertIn("set PATH or HANSA_CLAUDE in the shell that runs hansa up", said)
+                self.assertIn("this shell finds (none)", said)
+                self.assertEqual(said.strip().count("\n"), 0, "one sentence")
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{elsewhere.parent}:/usr/bin:/bin"}):  # as said: it starts
+            self.assertEqual(self.up_with({"PATH": "/usr/bin", "HANSA_CLAUDE": str(elsewhere)}), "")
+
+    def test_up_starts_a_recorded_codex_adapter_shipped_in_an_installation_and_no_copy(self):
+        from hansa import up
+        adapter_at = os.path.join("contrib", "codex", "bin", "claude-or-codex")  # in an installation
+        shipped = Path(up.__file__).absolute().parent.parent / adapter_at  # this hansa's own
+        self.assertTrue(shipped.is_file(), shipped)
+        install = self.tmp / "other hansa"  # an installation on the account's list
+        self.runnable(install / "bin" / "hansa")
+        theirs = self.runnable(install / adapter_at)
+        self.list_hansa(install / "bin" / "hansa")
+        link = self.tmp / "links" / "claude-or-codex"
+        link.parent.mkdir()
+        link.symlink_to(shipped)  # a link to the shipped file runs that file
+        os.environ.pop("HANSA_CLAUDE", None)
+        with unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            for adapter in (shipped, theirs, link):
+                with self.subTest(adapter=str(adapter)):
+                    self.assertEqual(self.up_with({"PATH": "/usr/bin", "HANSA_CLAUDE": str(adapter)}), "")
+            copy = self.tmp / "copied" / "contrib" / "codex" / "bin" / "claude-or-codex"  # same name and bytes
+            copy.parent.mkdir(parents=True)
+            shutil.copy2(shipped, copy)
+            unlisted = self.runnable(self.tmp / "unlisted" / adapter_at)  # an installation not on the list
+            for adapter in (copy, unlisted, self.runnable(self.tmp / "any" / "program")):
+                with self.subTest(adapter=str(adapter)):
+                    said = self.up_with({"PATH": "/usr/bin", "HANSA_CLAUDE": str(adapter)})
+                    self.assertIn(f"the claude its environment names ({adapter})", said)
+                    self.assertIn("nor hansa's own Codex adapter", said)
+
     def test_up_uses_account_identity(self):
         from hansa import up
         self.record(env={"PATH": os.environ["PATH"], "USER": "saved-user", "LOGNAME": "saved-name"})

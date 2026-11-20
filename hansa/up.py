@@ -1744,24 +1744,53 @@ def installation_problem(command) -> str:
             f"{hansa_command()}, or one on the account's list of desks)")
 
 
+ADAPTER = os.path.join("contrib", "codex", "bin", "claude-or-codex")  # hansa's Codex adapter, in an installation
+
+
+def installations() -> list:
+    """The folders of the hansa installations this account runs: this one's, and each one's on the account's list of
+    desks (its bin/hansa as written there, and where that leads), without repeats."""
+    out = [Path(__file__).absolute().parent.parent]
+    for _, r in listed_desks(include_missing=True):
+        h = r.get("hansa")
+        if isinstance(h, str) and os.path.isabs(h):
+            out += [Path(h).parent.parent, Path(os.path.realpath(h)).parent.parent]
+    return list(dict.fromkeys(out))
+
+
+def accepted_claudes() -> list:
+    """The programs a desk's record may start as claude (claude_problem): the claude this hansa's own environment
+    finds (claude_bin: HANSA_CLAUDE, else the PATH, else the standard place), the claude at the standard place
+    (claude_standard) even when that environment names another or none, and the Codex adapter shipped inside each
+    installation (installations; ADAPTER, by that path, not by its name), which docs/codex.md lets HANSA_CLAUDE name."""
+    from .desk import claude_bin, claude_standard
+    try:
+        mine = [claude_bin()]
+    except RuntimeError:
+        mine = []
+    return [*mine, claude_standard(), *(str(x / ADAPTER) for x in installations())]
+
+
 def claude_problem(desk: Desk, saved_env) -> str:
     """Why a desk's record of a start is not run for the claude it would start: '' when the claude its saved
-    environment finds (HANSA_CLAUDE, else the first on its PATH: claude_bin, as the server's workers and the
-    coordinator's session would run it) is the same file as the claude this hansa finds in its own environment
-    (the principal's, who runs hansa up), or when that environment finds none (nothing starts as claude then)."""
-    from .desk import claude_bin
+    environment finds (HANSA_CLAUDE, else the first on its PATH, else the standard place: claude_bin, as the
+    server's workers and the coordinator's session would run it) is the same file as one of accepted_claudes, or
+    when it finds none (nothing starts as claude then). Guards against a record that names another program as
+    claude; it goes when such records are signed."""
+    from .desk import CLAUDE_STANDARD, claude_bin
     try:
         recorded = claude_bin(start_env(desk, saved_env if isinstance(saved_env, dict) else {}))  # as clean_env's
     except RuntimeError:
+        return ""
+    if any(_same_file(recorded, x) for x in accepted_claudes()):
         return ""
     try:
         mine = claude_bin()
     except RuntimeError:
         mine = ""
-    if _same_file(recorded, mine):
-        return ""
-    return (f"the claude its environment names ({recorded}) is not the claude this hansa finds here "
-            f"({mine or 'none'}): start hansa up where HANSA_CLAUDE or the PATH names that claude")
+    return (f"the claude its environment names ({recorded}) is neither the claude this shell finds "
+            f"({mine or 'none'}), nor the one at {CLAUDE_STANDARD}, nor hansa's own Codex adapter: if it is the claude "
+            f"meant, set PATH or HANSA_CLAUDE in the shell that runs hansa up so that it finds that claude")
 
 
 def env_inside_desk(desk: Desk, saved_env) -> str:
