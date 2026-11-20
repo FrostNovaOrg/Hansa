@@ -2724,11 +2724,12 @@ def clear_project_files(desk: Desk, wt: Path, tid: str, rev: str) -> dict:
 
 
 def note_project_files(desk: Desk, tid: str, done: dict) -> None:
-    """Add what clearing the project settings removed and put back to the task's record (project_files), for show."""
+    """Add what clearing the project settings removed and put back to the task's record (project_files), for show:
+    each path once, though the clearing after the lane's setup may meet again what the one before it did."""
     if not (done.get("removed") or done.get("restored")):
         return
-    desk.change(tid, lambda m: {"project_files": {
-        k: [*((m.get("project_files") or {}).get(k) or []), *(done.get(k) or [])] for k in ("removed", "restored")}})
+    desk.change(tid, lambda m: {"project_files": {k: list(dict.fromkeys(
+        [*((m.get("project_files") or {}).get(k) or []), *(done.get(k) or [])])) for k in ("removed", "restored")}})
     desk.event("project_files_cleared", task=tid, removed=(done.get("removed") or [])[:20],
                restored=(done.get("restored") or [])[:20])
 

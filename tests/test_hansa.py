@@ -35113,6 +35113,62 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
                 self.assert_project_files_cleared(m, record, expected)  # what the setup left, removed after it
                 self.assertTrue((self.desk.tasks_dir / m["id"] / "setup.log").exists())
 
+    def test_a_submodule_under_a_project_folder_is_held_by_the_clearing_before_a_run_and_after_the_setup(self):
+        # skills kept as a submodule: its checkout stays, unlisted; what is left beside it is still removed
+        sub = self.tmp / "skills"
+        sub.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=sub)
+        (sub / "SKILL.md").write_text("skill\n")
+        sh("git", "add", "-A", cwd=sub)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "s", cwd=sub)
+        sh("git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), ".agents/skills", cwd=self.repo)
+        (self.repo / ".gitignore").write_text(".agents/left.md\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "skills", cwd=self.repo)
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        update = "git -c protocol.file.allow=always submodule update --init -q && echo left > .agents/left.md"
+        for when in ("before", "after the setup"):
+            with self.subTest(when=when):
+                record.unlink(missing_ok=True)
+                s = self.desk.settings()
+                s["lanes"]["a"]["setup"] = update if when != "before" else ""
+                self.assertEqual(self.desk.save_settings(s), [])
+                if when == "before":
+                    sh("/bin/sh", "-c", update, cwd=wt)
+                else:  # the setup checks it out
+                    sh("git", "submodule", "deinit", "-f", "-q", ".agents/skills", cwd=wt)
+                    self.assertFalse((wt / ".agents" / "skills" / "SKILL.md").exists())
+                m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+                self.assertEqual(m["state"], "done", m)
+                [seen] = [json.loads(x) for x in record.read_text().splitlines()]
+                self.assertEqual(seen[".agents/skills/SKILL.md"], "skill\n")
+                self.assertNotIn(".agents/left.md", seen)
+                self.assertEqual((wt / ".agents" / "skills" / "SKILL.md").read_text(), "skill\n")
+                self.assertEqual(m["project_files"], {"removed": [".agents/left.md"], "restored": []})
+                [line] = [x for x in self.hansa("show", m["id"]).splitlines() if x.startswith("project settings")]
+                self.assertIn("removed 1 (.agents/left.md)", line)
+                self.assertNotIn("skills", line)
+
+    def test_a_path_cleared_before_a_run_and_again_after_the_setup_is_listed_once(self):
+        self.commit_project_files()
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        plant = "mkdir -p .codex && echo left > .codex/config.toml && echo '{}' > .claude/settings.local.json"
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = plant
+        self.assertEqual(self.desk.save_settings(s), [])
+        sh("/bin/sh", "-c", plant, cwd=wt)  # there before the run starts, and the setup leaves them again
+        m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["project_files"], {"removed": [".claude/settings.local.json", ".codex"], "restored": []})
+        [line] = [x for x in self.hansa("show", m["id"]).splitlines() if x.startswith("project settings")]
+        self.assertIn("removed 2 (.claude/settings.local.json, .codex)", line)
+
     def test_project_settings_hansa_cannot_remove_stop_the_run_before_it_starts(self):
         if os.geteuid() == 0:
             self.skipTest("root removes a file whatever its folder's mode")

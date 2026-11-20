@@ -60,7 +60,7 @@ def walk(top, places=()) -> tuple:
                     repos.append(rel)
                 continue  # a git folder (the top's own too) is not walked into
             mine = name in NAMES
-            if mine and not inside:
+            if mine and not inside and nfc(p) not in places:  # a submodule's folder is held, whatever its name
                 project.append(p)
             try:
                 if d.is_dir(follow_symlinks=False) and nfc(p) not in places:
@@ -78,6 +78,7 @@ def _remove(path: str) -> None:
 
 
 def _write(path: str, mode: str, data: bytes) -> None:
+    # As git stores it, without git's conversions or filters: a filter would run a program the repository names
     if mode == "120000":
         os.symlink(os.fsdecode(data), path)
         return
@@ -101,10 +102,12 @@ def _same(path: str, st, mode: str, data: bytes) -> bool:
 def settle(top, held: dict, places=()) -> dict:
     """Make what is at the project paths below `top` exactly `held` ({path: (git mode, bytes: content, or a link's
     target)}, the start commit's entries at those paths). {"removed": [...], "restored": [...]}, relative paths: the
-    topmost entries removed (a folder counts once), and those put back to the commit's. Raises OSError (its
-    `filename` the relative path) when one cannot be removed or put back."""
+    topmost entries removed (a folder counts once), and those put back to the commit's. `places` (the commit's
+    submodules) are held as they are: never looked into, removed or listed. Raises OSError (its `filename` the
+    relative path) when one cannot be removed or put back."""
     held = {nfc(p): v for p, v in held.items()}
-    folders = {"/".join(p.split("/")[:i]) for p in held for i in range(1, p.count("/") + 1)}
+    places = {nfc(p) for p in places}
+    folders = {"/".join(p.split("/")[:i]) for p in (*held, *places) for i in range(1, p.count("/") + 1)}
     removed, restored = [], []
 
     def put(rel, path):
@@ -118,8 +121,10 @@ def settle(top, held: dict, places=()) -> dict:
     def fix(rel):
         path = os.path.join(top, rel)
         try:
-            st = os.lstat(path)
             key = nfc(rel)
+            if key in places:
+                return
+            st = os.lstat(path)
             if stat.S_ISDIR(st.st_mode) and key in folders:
                 with os.scandir(path) as it:
                     names = sorted(e.name for e in it)
