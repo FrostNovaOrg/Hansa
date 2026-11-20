@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import account, after, build, installed, installed_text, pictures, session_vars, without_session
-from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, connected_providers, key_name, provider_entry, home_secrets, identity_problem,
+from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_log_lock, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, connected_providers, key_name, provider_entry, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems, old_codex_provider)
 from .desk import lane_env as checked_env
@@ -5530,8 +5530,7 @@ def _quiet_left_running_events(desk: Desk, tid: str) -> None:
         fh = open(desk.events_path, "r+b")
     except OSError:
         return
-    with fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    with fh, event_log_lock(desk.events_path, fh):
         found, at = [], 0
         for line in iter(fh.readline, b""):
             if b'"left_running_stopped"' in line and tid.encode() in line:

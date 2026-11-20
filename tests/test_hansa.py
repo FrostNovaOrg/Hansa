@@ -28080,7 +28080,7 @@ def save():'''))
                 finally:
                     os.umask(old)
 
-    def test_init_warns_and_preserves_existing_folder_modes_under_a_group_umask(self):
+    def test_init_makes_an_existing_desk_folder_private_and_keeps_its_parent_under_a_group_umask(self):
         old = os.umask(0o002)
         try:
             for mode in (0o775, 0o777, 0o755):
@@ -28097,16 +28097,133 @@ def save():'''))
                         main(["init", str(root), "--repo", str(self.repo)])
                     self.assertIn("desk ready", said.getvalue())
                     self.assertTrue(desk.settings_path.is_file())
-                    for folder in folders:
-                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), mode, folder)
-                    if mode & 0o022:
-                        self.assertIn("warning:", err.getvalue())
-                        self.assertIn(f"others may write in {desk.root}", err.getvalue())
-                        self.assertIn(f"chmod go-w {shlex.quote(str(desk.root))}", err.getvalue())
-                    else:
-                        self.assertNotIn("chmod go-w", err.getvalue())
+                    self.assertEqual(stat.S_IMODE(root.parent.stat().st_mode), mode)  # not hansa's to change
+                    self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                    for f in ("settings.json", "events.jsonl", "CLAUDE.md"):
+                        self.assertEqual(stat.S_IMODE((root / f).stat().st_mode), 0o600, f)
+                    self.assertNotIn("others may", err.getvalue())
         finally:
             os.umask(old)
+
+    def test_serve_start_makes_the_desk_and_its_own_files_private_but_not_the_worktrees(self):
+        desk = self.desk
+        (desk.state_dir / "web-port").write_text("1\n")
+        wt_file = desk.worktrees_dir / "a" / "kept.txt"
+        wt_file.parent.mkdir(parents=True)
+        wt_file.write_text("x")
+        for p, mode in ((desk.root, 0o755), (desk.settings_path, 0o644), (desk.events_path, 0o644),
+                        (desk.state_dir, 0o755), (desk.state_dir / "web-port", 0o644), (wt_file, 0o644)):
+            p.chmod(mode)
+        with unittest.mock.patch.object(cli, "hold_server_lock", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+            main(["--desk", str(desk.root), "serve"])  # stops at the server lock: after the desk was made private
+        self.assertNotIn("other accounts", err.getvalue())
+        for p, mode in ((desk.root, 0o700), (desk.settings_path, 0o600), (desk.events_path, 0o600),
+                        (desk.state_dir, 0o700), (desk.state_dir / "web-port", 0o600), (wt_file, 0o644)):
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), mode, p)
+
+    def test_a_desk_folder_of_another_account_is_said_once_and_by_status(self):
+        from hansa.desk import desk_privacy
+        with unittest.mock.patch.object(account, "uid", return_value=os.getuid() + 4242):
+            said = desk_privacy(self.desk, fix=True)
+            self.assertIn(f"{self.desk.root} belongs to another account", said)
+            line = views.status_text(views.status(self.desk))
+        self.assertIn("belongs to another account", line)
+        self.assertEqual(desk_privacy(self.desk, fix=True), "")
+
+    def test_a_volume_that_keeps_no_modes_is_said_and_the_desk_goes_on(self):
+        from hansa.desk import desk_privacy
+        self.desk.root.chmod(0o755)
+        with unittest.mock.patch("os.chmod"):  # as on a volume that keeps no modes
+            said = desk_privacy(self.desk, fix=True)
+        self.assertIn("does not keep file modes", said)
+        self.assertIn("hansa goes on", said)
+        self.assertIn("open to other accounts (mode 0755)", views.status_text(views.status(self.desk)))
+        self.assertEqual(desk_privacy(self.desk, fix=True), "")
+        self.assertNotIn("other accounts", views.status_text(views.status(self.desk)))
+
+    def test_event_writes_lock_a_file_in_the_state_folder_and_a_held_log_does_not_stall_them(self):
+        import hansa.desk as hdesk
+        self.desk.event("first")
+        lock = self.desk.state_dir / "events.lock"
+        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+        with unittest.mock.patch.object(hdesk, "_old_lock_held_long", set()), open(self.desk.events_path, "rb") as other:
+            fcntl.flock(other, fcntl.LOCK_SH)  # another account that opened the log read-only, and holds it
+            done = threading.Event()
+            t = threading.Thread(target=lambda: (self.desk.event("second"), self.desk.event("third"), done.set()),
+                                 daemon=True)
+            t.start()
+            self.assertTrue(done.wait(20), "event writes waited on a lock held on events.jsonl")
+        kinds = [json.loads(x)["event"] for x in self.desk.events_path.read_text().splitlines()]
+        self.assertEqual(kinds[-3:], ["first", "second", "third"])
+
+    def test_an_older_hansa_writing_under_the_old_lock_is_waited_for(self):
+        import hansa.desk as hdesk
+        self.desk.event("first")
+        released = []
+        with unittest.mock.patch.object(hdesk, "_old_lock_held_long", set()):
+            old = open(self.desk.events_path, "a+b")
+            fcntl.flock(old, fcntl.LOCK_EX)  # an older hansa process, mid-line
+
+            def release():
+                time.sleep(0.2)
+                old.write(b'{"event": "older"}\n')
+                old.flush()
+                released.append(time.monotonic())
+                fcntl.flock(old, fcntl.LOCK_UN)
+                old.close()
+            t = threading.Thread(target=release, daemon=True)
+            t.start()
+            self.desk.event("newer")
+            wrote = time.monotonic()
+            t.join(10)
+        self.assertTrue(released and wrote >= released[0])
+        kinds = [json.loads(x)["event"] for x in self.desk.events_path.read_text().splitlines()]
+        self.assertEqual(kinds[-2:], ["older", "newer"])
+
+    def test_a_desk_found_by_walking_up_that_another_account_owns_is_not_taken(self):
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(self.desk.tasks_dir)
+        root, owner = self.desk.root, account.owner
+        theirs = lambda p: os.getuid() + 4242 if Path(os.path.realpath(p)) == root else owner(p)  # noqa: E731
+        self.assertEqual(Desk.find().root, root)
+        with unittest.mock.patch.object(account, "owner", theirs):
+            with self.assertRaises(SystemExit) as said:
+                Desk.find()
+            self.assertIn(f"desk at {root} belongs to another account", str(said.exception))
+            self.assertIn("--desk", str(said.exception))
+            self.assertEqual(Desk.find(str(root)).root, root)  # named with --desk: as before
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertIsNone(Desk.find(optional=True))
+            with unittest.mock.patch.object(account, "uid", return_value=0):  # root, for the desk's account
+                self.assertEqual(Desk.find().root, root)
+
+    def test_the_page_key_file_is_made_0600_or_refused_when_another_account_owns_it(self):
+        f = self.desk.state_dir / "web-token"
+        token = self.desk.web_token()
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        f.chmod(0o644)
+        self.assertEqual(self.desk.web_token(), token)
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        with unittest.mock.patch.object(account, "uid", return_value=os.getuid() + 4242), \
+                self.assertRaises(SystemExit) as said:
+            self.desk.web_token()
+        self.assertIn("key file", str(said.exception))
+        self.assertIn("does not serve the page", str(said.exception))
+
+    def test_the_accounts_list_of_desks_and_its_lock_are_0600(self):
+        from hansa.desk import desks_file
+        listed = desks_file()
+        listed.parent.mkdir(parents=True, exist_ok=True)
+        listed.write_text("[]\n")
+        listed.chmod(0o644)
+        listed.with_suffix(".lock").write_text("")
+        listed.with_suffix(".lock").chmod(0o644)
+        self.assertEqual(up.list_desk(self.desk), "")
+        for p in (listed, listed.with_suffix(".lock")):
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600, p)
+        self.assertEqual([x["desk"] for x in json.loads(listed.read_text())], [str(self.desk.root)])
 
     def test_mod_makes_every_missing_parent_private_even_when_a_start_was_recorded_first(self):
         old = os.umask(0o002)

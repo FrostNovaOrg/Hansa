@@ -66,10 +66,8 @@ with mode 0700, including when the account's umask is 0002. New enclosing
 folders are private too. With `--user`, root makes the desk folder 0700
 before giving it to the account; enclosing folders root makes retain their
 usual modes so the account can traverse them.
-Existing folders keep their modes. In an existing group- or world-writable
-desk folder, init still makes the desk and warns:
-`warning: others may write in <folder>; run chmod go-w <folder>`.
-The command quotes a path containing spaces or shell characters.
+A desk folder that already existed (empty) is made 0700 as well; the folders
+above it keep their modes. See [Other accounts on the machine](#other-accounts-on-the-machine).
 With `--repo`, init then gives the lines `hansa lane add` gives of the lane it
 made: `lane a added: REPO, base B, providers ...`, and that the lane has no
 check, so its tasks are merged untested, with the `hansa lane set a check`
@@ -1714,6 +1712,47 @@ guessed next message in the coordinator's input box (prompt suggestions); in a
 tmux capture without colors that grey guess looked typed. With an older
 Claude Code, where a grey line still shows there, the principal should not press
 Enter on what looks like an empty box: it may send the guess as if they wrote it.
+
+### Other accounts on the machine
+
+No other account on the machine may read a desk's files, hold them, or plant a
+desk for hansa to find:
+
+- `hansa init`, in a new folder or an empty one that existed, and every start of
+  `hansa serve` make the desk's folder 0700. hansa's own files at the desk's top
+  (`settings.json`, `events.jsonl`, `asks.json`, `CLAUDE.md` and the rest) and in
+  `.hansa/` are made 0600; at `hansa serve`'s start, existing ones are brought to
+  0600 and the folders right inside `.hansa/` to 0700. That is bounded: the lanes'
+  worktrees and repositories, and what lies deeper in `.hansa/`, keep their modes
+  (`.hansa/` itself is 0700, so no other account can reach them).
+- A desk folder that belongs to another account cannot be made so: `hansa init`
+  warns, `hansa serve` says it at its start and starts anyway, and `hansa status`
+  keeps saying it in one line.
+- On a volume that does not keep file modes (some network or external disks),
+  the folder stays as the volume shows it: `hansa serve` says so at its start and
+  goes on, and `hansa status` keeps one line, `the desk's folder ... is open to
+  other accounts (mode ...)`. Other accounts may then read the desk; move it to a
+  volume that keeps modes if that matters.
+- Writes to `events.jsonl` are guarded by `.hansa/events.lock`, a file no other
+  account can open, so none can stall them by holding a lock on the log. Older
+  hansa locked the log itself. Across an upgrade, while an older `hansa serve` still
+  runs beside newer commands, a newer writer also takes that old lock when it comes
+  free within half a second, so an older and a newer process never write at once.
+  An older hansa holds it for one line; one held longer is taken to be another
+  account's (which opened the log before the desk became 0700), and the newer
+  writer then writes without it, trying it only once for each later event.
+  Restart `hansa serve` after an upgrade, as for any other change.
+- A desk found by walking up from the current folder that belongs to another
+  account is not taken: hansa says `the desk at PATH belongs to another account,
+  so hansa did not take it; if it is meant, name it with --desk PATH`. A desk named
+  with `--desk` or `HANSA_DESK`, or on the account's list of desks, is taken as
+  before, and so is root's own use of an ordinary account's desk on a Linux server
+  ([linux-root](linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account)).
+- The page's key, `.hansa/web-token`, is brought to 0600 when this account owns
+  it; when it does not, hansa refuses to serve the page (`hansa serve` does not
+  start, and `hansa web` does not open it), in one sentence: remove the file and
+  start `hansa serve` again for a new key.
+- The account's list of desks (`desks.json`) and its lock are 0600.
 
 ### Where a desk's files grow
 

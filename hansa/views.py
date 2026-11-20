@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, pictures, plugin, release, up
-from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, connected_providers, connection_users, provider_entry, key_name, allow_fix, refused_rule, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, desk_privacy, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, connected_providers, connection_users, provider_entry, key_name, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError, old_codex_provider)
 from .run import (disk_short, earlier_not_held, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
@@ -1107,6 +1107,7 @@ def status(desk: Desk) -> dict:
         "server": server,
         "page": page_of(desk, server),  # where the web page is, and whether it is served now
         "server_seconds_ago": seconds_ago,
+        "desk_private": desk_privacy(desk, fix=False),  # whether other accounts can read the desk, until it is 0700
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
@@ -1315,6 +1316,7 @@ def status_text(st: dict) -> str:
     out += [goals.summary_text(g) for g in st.get("goals", [])[:5]]
     if len(st.get("goals", [])) > 5:
         out += [f"and {len(st['goals']) - 5} more: hansa goal list"]
+    out += [st["desk_private"][0].upper() + st["desk_private"][1:]] if st.get("desk_private") else []
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
     if hold := st.get("alert_held"):

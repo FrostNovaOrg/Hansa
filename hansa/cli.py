@@ -21,7 +21,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from . import account, after, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
-from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entry, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, MODEL_NAME, Desk, connected_providers, provider_entry, SettingsError, desk_privacy, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
@@ -561,8 +561,9 @@ def cmd_init(a):
         if not ln.get("check") and not ln.get("merge_check"):
             print(_no_check(s, a.lane, ln, ln["base"]))
     keep_desk_out(desk)
-    if desk.root.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        print(f"warning: others may write in {desk.root}; run chmod go-w {shlex.quote(str(desk.root))}", file=sys.stderr)
+    private = desk_privacy(desk, fix=True)  # the desk's folder this account's alone (0700), in a folder that existed too
+    if private:
+        print(f"warning: {private}", file=sys.stderr)
     problem = up.list_desk(desk)
     if problem:
         print(desk.redact(f"hansa init: the desk was made; {problem}; its first server start "
@@ -2206,6 +2207,9 @@ def cmd_serve(a):
     moved = desk_paths_problem(desk, run_homes(), lane_repos(desk.settings()))
     if moved:  # every run it would start would be refused: say it once, here
         raise SystemExit(f"hansa: hansa serve did not start, as no run may start: {moved}")
+    private = desk_privacy(desk, fix=True)  # the desk's folder 0700, hansa's own files at its top and in .hansa/ 0600
+    if private:  # never a reason not to start: hansa status keeps saying it
+        print(f"hansa serve: {private}", file=sys.stderr, flush=True)
     held = hold_server_lock(desk)  # kept open while this server runs
     if not held:
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "

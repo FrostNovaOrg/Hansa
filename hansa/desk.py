@@ -391,6 +391,76 @@ def mkdir_private(path: Path) -> None:
         path.mkdir(mode=0o700, exist_ok=True)
 
 
+def _private_place(path: Path) -> bool:
+    """Whether a new file here is one of hansa's own at a desk: at the desk's top (a folder holding tasks/ and
+    .hansa/, as hansa init makes them before settings.json) or inside its .hansa/. Such files are made 0600,
+    whatever the umask."""
+    parent = path.parent
+    if parent.name == ".hansa":
+        return True
+    try:
+        return (parent / "tasks").is_dir() and (parent / ".hansa").is_dir()
+    except OSError:
+        return False
+
+
+def _uid() -> int:
+    from . import account
+    return account.uid()
+
+
+def _owner(path) -> int:
+    from . import account
+    return account.owner(path)
+
+
+def desk_privacy(desk: Desk, *, fix: bool) -> str:
+    """Keep other accounts out of a desk: its folder this account's and 0700, its top-level files and .hansa/'s own
+    0600 (.hansa/ and the folders right in it 0700). Bounded: neither the lanes' worktrees nor repositories, nor
+    deeper into .hansa/. fix=False only looks (hansa status). Returns '' or one sentence of what is left."""
+    root = desk.root
+    try:
+        st = os.stat(root)
+    except OSError:
+        return ""
+    if st.st_uid != _uid() and _uid() != 0:
+        return (f"the desk's folder {root} belongs to another account, so hansa cannot make it this account's "
+                f"alone: other accounts may read it, or hold its files")
+    if fix and stat.S_IMODE(st.st_mode) != 0o700:
+        with contextlib.suppress(OSError):
+            os.chmod(root, 0o700)
+    if fix:
+        places = [(root, 0o600, False), (desk.state_dir, 0o600, True)]
+        for folder, file_mode, inner in places:
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    if e.is_symlink():
+                        continue
+                    lst = e.stat(follow_symlinks=False)
+                    if lst.st_uid != _uid():
+                        continue
+                    want = (0o700 if (inner or e.name == ".hansa") else None) if e.is_dir() else file_mode
+                    if want is not None and stat.S_IMODE(lst.st_mode) & 0o077:
+                        os.chmod(e.path, want)
+                except OSError:
+                    continue
+    try:
+        mode = stat.S_IMODE(os.stat(root).st_mode)
+    except OSError:
+        return ""
+    if mode & 0o077:
+        if fix:  # chmod raised nothing, or could not: the volume keeps no modes (some network or external disks)
+            return (f"the desk's folder {root} stays mode {mode:04o}: its volume does not keep file modes, so other "
+                    "accounts on this machine may read the desk; hansa goes on")
+        return (f"the desk's folder {root} is open to other accounts (mode {mode:04o}): hansa serve makes it 0700 when "
+                "it starts; if it stays so, its volume does not keep file modes")
+    return ""
+
+
 def json_text(data) -> str:
     # Filesystem bytes represented by surrogates use JSON escapes; ordinary Unicode stays readable.
     return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8", "backslashreplace").decode("utf-8") + "\n"
@@ -420,6 +490,8 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None, *, follow_syml
         except OSError as e:
             if e.errno != errno.ENOENT and not (not follow_symlinks and e.errno == errno.ELOOP):
                 raise
+            if _private_place(path):  # hansa's own file at a desk's top or in .hansa/
+                mode = 0o600
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{_secrets.token_hex(4)}.tmp")
     made = False
     try:
@@ -496,11 +568,64 @@ def copy_file(src, dst):
     return dst
 
 
+# How long a writer waits for the old lock on the log itself (hansa before the lock moved into .hansa/ took it
+# there, for one line at a time) before writing without it; after one such wait, a process only tries it once.
+OLD_LOG_LOCK_WAIT = 0.5
+_old_lock_held_long = set()
+
+
+def event_log_lock_path(path: Path) -> Path | None:
+    """The lock that guards writes to the desk's events.jsonl: a file inside its .hansa/ (0700), which no other
+    account can open, so none can hold it. None for a log already inside .hansa/ (its own lock is safe)."""
+    path = Path(path)
+    if path.parent.name == ".hansa":
+        return None
+    return path.parent / ".hansa" / "events.lock"
+
+
+@contextlib.contextmanager
+def event_log_lock(path: Path, fh):
+    """Hold the event log's lock around a write to it (fh: the log, open). The lock is .hansa/events.lock; the old
+    lock, on the log itself, is also taken when it comes free soon: an older hansa process still running across an
+    upgrade (a hansa serve started before it) writes under that one only, so the two never write at once. One held
+    longer than OLD_LOG_LOCK_WAIT is no older hansa's (it holds it for one line), but another account's, which may
+    have opened the log before the desk became 0700: then hansa writes without it rather than stall."""
+    lock_path = event_log_lock_path(path)
+    held = None
+    if lock_path is not None:
+        with contextlib.suppress(FileExistsError):
+            lock_path.parent.mkdir(mode=0o700)
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if held is not None:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            key = str(path)
+            until = time.monotonic() + (0 if key in _old_lock_held_long else OLD_LOG_LOCK_WAIT)
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= until:
+                        _old_lock_held_long.add(key)
+                        break
+                    time.sleep(0.01)
+        else:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        if held is not None:
+            os.close(held)
+
+
 def append_event(path: Path, line: str) -> None:
-    """Append one event under a log lock. Never truncate: a failed append may leave a partial line."""
+    """Append one event under the log's lock (event_log_lock). Never truncate: a failed append may leave a partial
+    line. A new log is made 0600."""
     data = (line + "\n").encode("utf-8")
-    with open(path, "a+b", buffering=0) as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a+b", buffering=0) as fh, event_log_lock(path, fh):
         if fh.seek(0, os.SEEK_END):
             fh.seek(-1, os.SEEK_END)
             if fh.read(1) != b"\n":
@@ -3101,10 +3226,28 @@ class Desk:
             except OSError:  # a sandbox may close an enclosing desk to a run
                 continue
             if found:
-                return cls(d)
+                theirs = cls(d).foreign_desk()
+                if not theirs:
+                    return cls(d)
+                if optional:
+                    print(f"hansa: {theirs}", file=sys.stderr)
+                    return None
+                raise SystemExit(f"hansa: {theirs}")
         if optional:
             return None
         raise SystemExit("hansa: no desk here. Run inside a desk, pass --desk DIR, or set HANSA_DESK.")
+
+    def foreign_desk(self) -> str:
+        """For a desk found by walking up from the current folder: '' when it is this account's (or hansa runs as
+        root, which runs the desk's commands as its account: hansa help linux-root), else the sentence that it is
+        not taken. A desk named with --desk, HANSA_DESK or on the account's list of desks is not asked."""
+        try:
+            if _uid() == 0 or _owner(self.root) == _uid():
+                return ""
+        except OSError:
+            return ""
+        return (f"the desk at {self.root} belongs to another account, so hansa did not take it; if it is meant, "
+                f"name it with --desk {shlex.quote(str(self.root))}")
 
     def is_desk(self) -> bool:
         """Whether this folder is a desk: hansa init made its settings.json and tasks/. Raises OSError when a
@@ -3747,6 +3890,16 @@ class Desk:
     def web_token(self) -> str:
         f = self.state_dir / "web-token"
         with self.lock():
+            try:
+                st = os.stat(f)
+            except FileNotFoundError:
+                st = None
+            if st is not None:
+                if st.st_uid != _uid():
+                    raise SystemExit(f"hansa: the page's key file {f} is not this account's own file, so hansa does "
+                                     "not serve the page; remove it and start hansa serve again for a new key")
+                if stat.S_IMODE(st.st_mode) & 0o077:
+                    os.chmod(f, 0o600)
             token = f.read_text().strip() if f.is_file() else ""
             # The version belongs to the page's explicit bearer authentication protocol.
             if not re.fullmatch(r"v2_[A-Za-z0-9_-]{43}", token):
