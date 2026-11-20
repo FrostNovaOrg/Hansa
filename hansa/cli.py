@@ -2200,8 +2200,25 @@ def hold_server_lock(desk: Desk):
     return f
 
 
+OUTSIDE_WORD = "outside:"  # --host outside:ADDRESS: the principal means an address beyond this machine
+
+
+def serve_host(given: str) -> str:
+    """The address hansa serve binds the page on: this machine's own, or another one the principal names with
+    outside: before it, where the page only shows (web.start_web). Refuses any other."""
+    from .web import loopback
+    host = given.removeprefix(OUTSIDE_WORD)
+    if host != given or loopback(host):
+        return host
+    raise SystemExit(f"hansa: hansa serve did not start: {given or 'an empty address'} is not this machine's own "
+                     f"address, and beyond it the page's key travels unencrypted, so keep the default (127.0.0.1) and "
+                     f"open the page through an SSH tunnel, or if you mean it, give --host {OUTSIDE_WORD}{given} and "
+                     f"the page there will only show, changing nothing")
+
+
 def cmd_serve(a):
     from .web import start_web
+    host = serve_host(a.host)
     desk = Desk.find(a.desk)
     moved = desk_paths_problem(desk, run_homes(), lane_repos(desk.settings()))
     if moved:  # every run it would start would be refused: say it once, here
@@ -2221,37 +2238,52 @@ def cmd_serve(a):
     except OSError as e:
         print(f"hansa serve: the desk's card could not be brought up to date ({e.strerror or e})", file=sys.stderr,
               flush=True)
-    port = first_port = a.port if a.port is not None else web_port(desk)
-    port_note = ""
+    recorded = views.recorded_port(desk)
+    port = first_port = a.port if a.port is not None else recorded or up.DEFAULTS["port"]
+    port_note, held_at = "", None
     while True:
         try:
-            port = start_web(desk, a.host, port).server_address[1]
+            port = start_web(desk, host, port).server_address[1]
             break
         except (OSError, OverflowError) as e:  # OverflowError: a port past 65535
             in_use = isinstance(e, OSError) and e.errno == errno.EADDRINUSE
+            if in_use and a.port is None and recorded is not None:
+                # not elsewhere: a link, bookmark or proxy kept for this port would hand the key to whatever holds it
+                held_at = port
+                break
             if in_use and a.port is None and port < 65535:
                 port += 1
                 port_note = f" ({first_port} was taken)"
                 continue
-            said = f"hansa: hansa serve could not serve the page on host {a.host}, port {port}: " \
+            said = f"hansa: hansa serve could not serve the page on host {host}, port {port}: " \
                    f"{(e.strerror if isinstance(e, OSError) else '') or e}".rstrip(".")
             raise SystemExit(said + ("; perhaps another desk's hansa serve holds that port. Start this desk's server "
                                      "on a free port with hansa serve --port N (hansa web then finds it)" if in_use else
                                      ". Nothing was started or recorded: hansa up starts the server as before"))
-    # how hansa up brings this server back, and this account's list of desks: only a start that bound the page
+    # how hansa up brings this server back, and this account's list of desks: only a start that bound the page or
+    # found its recorded port held (it runs tasks without the page)
     up.record_start(desk, a)
 
     def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stopped)
-    write_text(desk.state_dir / "web-port", str(port))  # what hansa web opens
-    write_text(desk.state_dir / "web-host", a.host)  # with it, where hansa status says the page is
+    if held_at is None:
+        views.page_held_file(desk).unlink(missing_ok=True)
+        write_text(desk.state_dir / "web-port", str(port))  # what hansa web opens
+        write_text(desk.state_dir / "web-host", host)  # with it, where hansa status says the page is
+    else:  # what hansa status, hansa up and hansa web say while this server runs without its page
+        write_json(views.page_held_file(desk), {"port": held_at, "pid": os.getpid()})
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
     alert.start_thread(desk)  # the principal's alert channels, sent from here only (hansa/alert.py)
-    desk.event("server_started", port=port)
-    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port}{port_note} "
-          "(run `hansa web` for the address)", flush=True)
+    if held_at is None:
+        desk.event("server_started", port=port)
+        print(f"hansa serve: desk {desk.root}; web page on {host}:{port}{port_note} "
+              "(run `hansa web` for the address)", flush=True)
+    else:
+        desk.event("server_started", port=None, page_held=held_at)
+        alert.page_held(desk, held_at)
+        print(f"hansa serve: desk {desk.root}; tasks run, but {views.page_held_text(held_at)}", flush=True)
     if dropped:
         print(f"hansa serve: {serve_session_text(dropped)}", file=sys.stderr, flush=True)
     srt = try_srt_at_start(desk)  # on this server's PATH, which runs the lanes' setups and checks
@@ -2330,6 +2362,9 @@ def cmd_web(a):
                          f"{shlex.quote(str(me))} --desk {shlex.quote(str(desk.root))} web; on this machine, hansa web. "
                          + see_more("session-identity"))
     # The key goes after #: a browser sends the fragment to no server, so no proxy on the way records it.
+    held = None if a.port else views.held_port(desk, server_state(desk))
+    if held:  # the address would hand the key to whatever holds that port
+        raise SystemExit(f"hansa: nothing was printed, as {views.page_held_text(held)}, then run hansa web again")
     print(f"Open http://127.0.0.1:{a.port or web_port(desk)}/#t={desk.web_token()}", flush=True)
     if server_state(desk)["state"] == "gone":
         print("hansa serve is not running, so the page will not open until it is: start it with "
@@ -4651,9 +4686,11 @@ def main(argv=None):
     p.add_argument("--all", action="store_true", help="outside a desk: start every listed desk without the menu")
     p.epilog = see_more("bringing-up")
     p = add("serve", cmd_serve, "run the dispatcher and the web page in the foreground (what hansa up starts)")
-    p.add_argument("--host", default=up.DEFAULTS["host"])
-    p.add_argument("--port", type=int, help="the web page's port; fails if taken. Default: last served port or 8765, "
-                   "then the next free port if taken")
+    p.add_argument("--host", default=up.DEFAULTS["host"], help="this machine's own address (default 127.0.0.1); "
+                   "another one only as outside:ADDRESS, where the page only shows")
+    p.add_argument("--port", type=int, help="the web page's port; fails if taken. Default: the port it was last "
+                   "served on, where a port held by something else starts the server without the page; before "
+                   "any, 8765 or the next free port")
     p.add_argument("--every", type=float, default=up.DEFAULTS["every"], help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
     p.description += (", then wait on its input, which holds an ssh tunnel to the page open, until that input ends "

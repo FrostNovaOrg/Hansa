@@ -1147,7 +1147,7 @@ says it is gone. A lock naming only a number, as older servers wrote it, is stil
 the server's last round.
 
 Each `hansa serve` start saves `.hansa/serve-start.json`, once its page is
-bound: the absolute path of
+bound (or found its saved port held, below): the absolute path of
 its installation's `bin/hansa`, `--host`, `--every`, whether `--port` was given
 (and its value if so), and the variables
 that were set: `PATH`, `LANG`, every `LC_*` (including `LC_ALL`), `HANSA_CLAUDE`,
@@ -1164,14 +1164,25 @@ words, and for a port in use, how to pick another.
 The command path keeps links to the installation, so switching such a link
 makes future starts use the new installation.
 
-Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, or 8765
-before its first run. If it is taken, it tries each following port until one
-binds (up to 65535). It prints the chosen port, says which port was taken when
-it moves, and saves the chosen port in `.hansa/web-port`;
-`hansa web` and `hansa status` then use that address. The next start tries that
-saved port first, even if 8765 is free again. The start record preserves automatic
-port selection, so `hansa up` follows the same rule. An explicit `--port N`
-stays explicit in the start record and fails if N is taken, as before.
+Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, where the
+page was last served. If something else holds that port, the server starts
+without its page rather than on another port, where a link, bookmark or proxy
+kept for the old one would hand the page's key to whatever holds it: tasks still
+run, and the start's output, `hansa up`, `hansa status` and (once, if alerts are
+set up) the principal's alert say that port N is held and to start it with
+`--port N` on purpose; `hansa web` then prints no address. Before any port is
+saved, it tries 8765 and then each following port until one binds, says which
+was taken, and saves the one it binds in `.hansa/web-port`. The start record
+preserves automatic port selection, so `hansa up` follows the same rule. An
+explicit `--port N` stays explicit in the start record and fails if N is taken.
+
+`--host` takes this machine's own address only (127.0.0.1, another 127.x
+address, `::1`, `localhost`); any other is refused in one line. To mean it,
+write `--host outside:ADDRESS`: the page's key then travels unencrypted, so
+that page counts every request as from outside, whatever its `Host` says, and
+only shows: it saves no setting or key, answers no release and pauses nothing.
+It listens on the one address given; `localhost` names whichever address the
+system resolves first, not both 127.0.0.1 and `::1`.
 Older records did not distinguish an explicit 8765 from the default: `hansa up`
 treats an unmarked record's 8765 as automatic, keeping other recorded ports
 explicit. New records distinguish both, including an explicit `--port 8765`.
