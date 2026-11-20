@@ -624,8 +624,8 @@ def append_event(path: Path, line: str) -> None:
     """Append one event under the log's lock (event_log_lock). Never truncate: a failed append may leave a partial
     line. A new log is made 0600."""
     data = (line + "\n").encode("utf-8")
-    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "a+b", buffering=0) as fh, event_log_lock(path, fh):
+    with open(path, "a+b", buffering=0, opener=lambda p, flags: os.open(p, flags, 0o600)) as fh, \
+            event_log_lock(path, fh):
         if fh.seek(0, os.SEEK_END):
             fh.seek(-1, os.SEEK_END)
             if fh.read(1) != b"\n":
