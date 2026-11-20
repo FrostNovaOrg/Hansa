@@ -913,8 +913,9 @@ def cmd_git(a):
 def cmd_merge(a):
     desk = Desk.find(a.desk)
     # Nothing changes the task, its verification, the keys or another merge until this one is done.
-    # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
-    # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
+    # hansa's git runs none of the repository's hooks (checkout_git_settings); a program its config names that git
+    # still runs here (a merge or filter driver) and that would change the desk stops at once (HANSA_MERGING)
+    # instead of waiting for this merge forever.
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
         verification_note = (f"; verification {v['task']}: holds, with notes (report: hansa show {v['task']} --report)"

@@ -70,7 +70,7 @@ from pathlib import Path
 from . import outside, without_session
 from .desk import (WRITE_FILE, Desk, _is_int, forbidden_exceptions_ok, forbidden_pattern, lane_targets, merge_targets_problem, listed_key,
                    listed_mismatch, now, read_json, target_name, write_json, write_text)
-from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
+from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, git_settings, group_running, has_ended, leader,
                   oom_begin, oom_result, oom_text,
                   run_running, save_stopped, serve_step, recording_start, retry_start_failure,
                   merge_check_lane, merge_minutes, merge_target, pids_with_arg, proc_start, read_try, record_descendants,
@@ -400,7 +400,8 @@ def _range(repo, since: str, commit: str) -> list:
 def _git_bytes(repo, *args) -> str:
     """git's output as text, for reading a change: no program the repository names runs (an external diff, a
     text converter), and paths are not quoted."""
-    r = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=str(repo), capture_output=True,
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *git_settings(repo), *args], cwd=str(repo),
+                       capture_output=True,
                        stdin=subprocess.DEVNULL)
     if r.returncode:
         raise RuntimeError(f"git {' '.join(args[:2])} failed: {r.stderr.decode('utf-8', 'replace').strip()[:300]}")
@@ -410,7 +411,8 @@ def _git_bytes(repo, *args) -> str:
 def _git_lines(repo, *args):
     """git's output as _git_bytes reads it, line by line, without holding it all: the whole history can go out."""
     with tempfile.TemporaryFile() as err:
-        p = subprocess.Popen(["git", "-c", "core.quotePath=false", *args], cwd=str(repo), stdout=subprocess.PIPE,
+        p = subprocess.Popen(["git", "-c", "core.quotePath=false", *git_settings(repo), *args], cwd=str(repo),
+                             stdout=subprocess.PIPE,
                              stderr=err, stdin=subprocess.DEVNULL)
         try:
             for raw in p.stdout:
@@ -484,7 +486,7 @@ def _binary_blobs(repo):
     """One batch reader per scan; only blobs with a NUL in their first 8,000 bytes are binary, regardless of
     attributes. Other objects' bodies are consumed to keep the next answer aligned; missing objects have none."""
     with tempfile.TemporaryFile() as err:
-        p = subprocess.Popen(["git", "cat-file", "--batch"], cwd=str(repo), stdout=subprocess.PIPE,
+        p = subprocess.Popen(["git", *git_settings(repo), "cat-file", "--batch"], cwd=str(repo), stdout=subprocess.PIPE,
                              stderr=err, stdin=subprocess.PIPE)
 
         def binary(blob):
@@ -787,7 +789,8 @@ def last_out(desk: Desk, lane: str, repo: str, base: str, target: str = "") -> d
 
 
 def _has_commit(repo, sha: str) -> bool:
-    return subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=str(repo), capture_output=True,
+    return subprocess.run(["git", *git_settings(repo), "cat-file", "-e", f"{sha}^{{commit}}"], cwd=str(repo),
+                          capture_output=True,
                           stdin=subprocess.DEVNULL).returncode == 0
 
 
@@ -799,7 +802,8 @@ def repository_input(command: str, repository, commit: str, fixed: bool = False,
     entries = {}
 
     def load(repository, revision):
-        result = subprocess.run(["git", "ls-tree", "-r", "-z", revision], cwd=repository, capture_output=True,
+        result = subprocess.run(["git", *git_settings(repository), "ls-tree", "-r", "-z", revision], cwd=repository,
+                                capture_output=True,
                                 stdin=subprocess.DEVNULL)
         if result.returncode:
             raise RuntimeError("cannot read release input tree")

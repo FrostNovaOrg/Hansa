@@ -780,6 +780,12 @@ if os.environ.get("FAKE_WRITE"):
     open(os.environ.get("FAKE_WRITE_FILE", "notes.txt"), "w").write(os.environ["FAKE_WRITE"] + "\n")
 if os.environ.get("FAKE_WRITE_HEX"):
     open(os.environ.get("FAKE_WRITE_FILE", "blob.bin"), "wb").write(bytes.fromhex(os.environ["FAKE_WRITE_HEX"]))
+if os.environ.get("FAKE_HOOKS"):  # FOLDER:MARKER: git hooks as tracked files, each adding its name to MARKER
+    folder, marker = os.environ["FAKE_HOOKS"].split(":", 1)
+    os.makedirs(folder, exist_ok=True)
+    for name in os.environ.get("FAKE_HOOK_NAMES", "post-merge").split():
+        open(os.path.join(folder, name), "w").write(f"#!/bin/sh\necho tracked-{name} >> {marker}\n")
+        os.chmod(os.path.join(folder, name), 0o755)
 if os.environ.get("FAKE_GITLINK"):
     os.makedirs(os.environ["FAKE_GITLINK"], exist_ok=True)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
@@ -12144,8 +12150,9 @@ def save():'''))
             # Change tail.txt next time so both ranges contain its forbidden added line.
             self.commit_in_repo("tail.txt", "safe\n", message="Reset text")
         self.assertEqual(len(commands_by_scan[0]), len(commands_by_scan[1]))
-        for commands in commands_by_scan:
-            self.assertEqual([c for c in commands if "cat-file" in c], [["git", "cat-file", "--batch"]])
+        for commands in commands_by_scan:  # with the settings of hansa's own git in the lane's checkout
+            self.assertEqual([c for c in commands if "cat-file" in c],
+                             [["git", *hansa.run.checkout_git_settings(), "cat-file", "--batch"]])
 
     def test_word_scan_gitlink_updates_are_scanned_and_do_not_hide_text_files(self):
         from hansa import release
@@ -14653,17 +14660,19 @@ def save():'''))
         self.assertEqual([r for r in lane_allow(self.desk, s["lanes"]["a"], self.repo) if r.startswith("Bash")],
                          ["Bash(pnpm test:*)", "Bash(gitleaks detect:*)"])
 
-    def test_a_merge_hook_that_uses_hansa_does_not_hang_the_merge(self):
+    def test_a_merge_runs_no_hook_and_hansa_run_by_git_in_a_merge_stops_at_once(self):
         tid = self.desk.new_task("Add hello.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
         hansa = str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
         hook = self.repo / ".git" / "hooks" / "post-merge"
-        hook.write_text(f'#!/bin/sh\n"{hansa}" --desk "{self.desk.root}" add "queued by a hook" >/dev/null\n')
+        hook.write_text(f'#!/bin/sh\ntouch {self.tmp / "hook-ran"}\n'
+                        f'"{hansa}" --desk "{self.desk.root}" add "queued by a hook" >/dev/null\n')
         hook.chmod(0o755)
         r = subprocess.run([hansa, "--desk", str(self.desk.root), "merge", tid], capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
-        self.assertEqual(len(self.desk.tasks()), 1)  # the hook's hansa add was refused at once, not left waiting
+        self.assertFalse((self.tmp / "hook-ran").exists())  # hansa's git runs none of the repository's hooks
+        self.assertEqual(len(self.desk.tasks()), 1)
         r = subprocess.run([hansa, "--desk", str(self.desk.root), "add", "x"], capture_output=True, text=True, timeout=15,
                            env={**os.environ, "HANSA_MERGING": "1"})
         self.assertNotEqual(r.returncode, 0)
@@ -18506,14 +18515,20 @@ def save():'''))
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=["a"], alert={
             "command": f"env > {alerted}"})), {"ok": True, "problems": []})
         self.hansa("release", "a")
-        hook = self.repo / ".git" / "hooks" / "post-checkout"
-        hook.write_text(f"#!/bin/sh\nenv > {self.tmp / 'git-env.txt'}\n")
-        hook.chmod(0o755)
+        gits, plain = [], subprocess.run
+
+        def spy(argv, *a, **kw):  # the environment hansa gives its git (which runs no hook to show it)
+            if argv[:1] == ["git"]:
+                gits.append(kw.get("env") or {})
+            return plain(argv, *a, **kw)
         with unittest.mock.patch.dict(os.environ, self.SESSION_ENV):  # set after hansa was imported, as a test can
             self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
             alert.test(self.desk)
-            run.git("checkout", "-q", "-b", "other", cwd=self.repo)
-        for f in (seen, alerted, self.tmp / "git-env.txt"):
+            with unittest.mock.patch.object(run.subprocess, "run", spy):
+                run.git("checkout", "-q", "-b", "other", cwd=self.repo)
+        self.assertEqual(len(gits), 1)
+        self.assertEqual(set(gits[0]) & set(self.SESSION_ENV), set())
+        for f in (seen, alerted):
             names = {x.split("=", 1)[0] for x in f.read_text().splitlines() if "=" in x}
             self.assertEqual(names & set(self.SESSION_ENV), set(), f.name)
         self.assertIn("HANSA_RELEASE", seen.read_text())
@@ -49299,6 +49314,87 @@ def save():'''))
         self.assertEqual(self.settle_merge(d, t2)["state"], "merged")
         d.tick()
         self.assertIn("main moved since it was asked", release.get(self.desk, rid)["void"])
+
+    # -- the repository's git hooks never run in hansa's own git, in the lane's own checkout too ------------------
+    HOOK_NAMES = ("pre-merge-commit", "prepare-commit-msg", "commit-msg", "pre-commit", "post-commit", "post-merge",
+                  "post-checkout", "reference-transaction", "post-rewrite", "pre-auto-gc", "post-index-change")
+
+    def task_adding_hooks(self, where, **lane):
+        """A finished task on lane a whose branch adds every hook in HOOK_NAMES as a tracked, executable file in
+        .githooks, each adding its name to a marker file, and the repository set to run them: core.hooksPath set to
+        .githooks ("tracked"), or a hook of its own in .git/hooks for each that runs the tracked one ("own")."""
+        marker = self.tmp / "hooks-ran.txt"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {**(s["lanes"]["a"].get("env") or {}), "FAKE_HOOKS": f".githooks:{marker}",
+                                  "FAKE_HOOK_NAMES": " ".join(self.HOOK_NAMES)}
+        s["lanes"]["a"].update(lane)
+        self.assertEqual(self.desk.save_settings(s), [])
+        if where == "tracked":
+            self.git_out("config", "core.hooksPath", ".githooks")
+        else:
+            for name in self.HOOK_NAMES:
+                hook = self.repo / ".git" / "hooks" / name
+                hook.write_text(f"#!/bin/sh\ntest -x .githooks/{name} && .githooks/{name}\necho own-{name} >> {marker}\n")
+                hook.chmod(0o755)
+        d, tid = Dispatcher(self.desk), self.desk.new_task("Add hello.txt and hooks")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertIn(".githooks/post-merge", self.git_out("ls-tree", "-r", "--name-only", self.desk.meta(tid)["head"]))
+        return d, tid, marker
+
+    def assert_hooks_were_real(self, marker):
+        """Plain git in the lane's checkout does run them: the test's hooks are ones git would run."""
+        self.git_out("checkout", "-q", "-b", "plain-git")
+        self.assertIn("post-checkout", marker.read_text())
+
+    def merge_runs_no_hook(self, where):
+        d, tid, marker = self.task_adding_hooks(where)
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        self.assertTrue(os.access(self.repo / ".githooks" / "post-merge", os.X_OK))  # in the checkout, runnable
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        self.assert_hooks_were_real(marker)
+
+    def test_hansas_merge_runs_no_hook_the_branch_adds_with_core_hookspath(self):
+        self.merge_runs_no_hook("tracked")
+
+    def test_hansas_merge_runs_no_hook_of_the_repositorys_hooks_folder(self):
+        self.merge_runs_no_hook("own")
+
+    def landing_runs_no_hook(self, where):
+        d, tid, marker = self.task_adding_hooks(where, merge_check="test -f hello.txt")
+        self.assertIn("is not merged yet", self.hansa("merge", tid))
+        m = self.settle_merge(d, tid)
+        self.assertEqual(m["state"], "merged", m.get("merge_check_result"))
+        self.assertEqual(self.git_out("rev-parse", "main"), m["merge_check_result"]["commit"])  # landed: moved there
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        self.assert_hooks_were_real(marker)
+
+    def test_the_landing_of_a_checked_merge_runs_no_hook_with_core_hookspath(self):
+        self.landing_runs_no_hook("tracked")
+
+    def test_the_landing_of_a_checked_merge_runs_no_hook_of_the_repositorys_hooks_folder(self):
+        self.landing_runs_no_hook("own")
+
+    def fixed_release_runs_no_hook(self, where):
+        from hansa import release
+        seen = self.tmp / "released.txt"
+        d, tid, marker = self.task_adding_hooks(where)
+        self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+        marker.unlink(missing_ok=True)  # the merge has its own tests: here, the release's checkout alone
+        self.fixed_target("install", f"ls .githooks > {seen}")
+        self.hansa("release", "a", "install")
+        r = self.settle_release(d, 1)
+        self.assertEqual(r["state"], "done", r)
+        self.assertIn("post-checkout", seen.read_text())  # it ran in a checkout that holds them
+        self.assertEqual(self.checkouts(), [])
+        self.assertFalse(marker.exists(), marker.exists() and marker.read_text())
+        self.assertIsNotNone(release.get(self.desk, 1))
+        self.assert_hooks_were_real(marker)
+
+    def test_a_fixed_releases_checkout_runs_no_hook_with_core_hookspath(self):
+        self.fixed_release_runs_no_hook("tracked")
+
+    def test_a_fixed_releases_checkout_runs_no_hook_of_the_repositorys_hooks_folder(self):
+        self.fixed_release_runs_no_hook("own")
 
     # -- fixed targets, and the forbidden-word scan without the desk lock -------------------------------------------
     def fixed_target(self, name, command, tick=True):
