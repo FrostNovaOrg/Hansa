@@ -205,6 +205,11 @@ Adding, modifying, deleting, changing the mode of, or moving into or out of a pr
 worker run's end, and stops `hansa lane remove --keep`; nothing is committed and the work stays staged.
 The check reads git's index, including entries with no file on disk. Unchanged tracked settings are
 allowed; untracked files that git ignores stay in the worktree and are not committed.
+Except project settings: just before a worker or verifier starts, and again after the lane's setup,
+hansa itself (lstat, no link followed, no git) removes any file, folder, link or pipe under `.claude`,
+`.codex` or `.agents` (at any depth) or named `.mcp.json` that the run's start commit does not hold, and
+puts back the ones it holds with other content, so the run loads exactly its commit's settings;
+`hansa show` names what it removed, and a removal that fails stops the run before it starts.
 
 Empty sandbox placeholders absent from the branch's tip are left out first. These include empty
 regular files named exactly `.codex` or `.agents` at the worktree's top, even if already staged;

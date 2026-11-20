@@ -34970,6 +34970,183 @@ def save():'''))
         self.assertTrue((wt / "build" / "fsmonitor" / ".git").is_dir())
         self.assertFalse(marker.exists())
 
+    # What plant_project_files leaves that the start commit (commit_project_files) does not hold, in the order
+    # hansa removes it; and the one file it holds, changed there
+    PLANTED_REMOVED = [".agents", ".claude/hooks", ".claude/pipe", ".claude/settings.local.json", ".codex", ".mcp.json",
+                       "deep/.claude"]
+
+    def commit_project_files(self) -> dict:
+        """The repository's commit holds .claude/settings.json and .claude/commands/c.md, and ignores the other project
+        paths (as an account's global ignore may), a deeper folder and a build folder. Returns what a run must find
+        at the project paths: {path: its text, or "folder"}."""
+        (self.repo / ".claude" / "commands").mkdir(parents=True)
+        (self.repo / ".claude" / "settings.json").write_text('{"permissions": {}}\n')
+        (self.repo / ".claude" / "commands" / "c.md").write_text("cmd\n")
+        (self.repo / ".gitignore").write_text(
+            ".claude/settings.local.json\n.claude/hooks\n.codex/\n.agents/\n.mcp.json\ndeep/\nbuild/\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "project settings", cwd=self.repo)
+        return {".claude": "folder", ".claude/settings.json": '{"permissions": {}}\n', ".claude/commands": "folder",
+                ".claude/commands/c.md": "cmd\n"}
+
+    def plant_script(self) -> Path:
+        """A script that leaves, in the folder it runs in, what an earlier run, check or setup may leave there and git
+        neither sets aside nor cleans: ignored project settings (at the top and deeper), a link to a folder outside
+        with a file in it, a named pipe, a held file changed under skip-worktree, and a build cache."""
+        outside = self.tmp / "outside"
+        outside.mkdir(exist_ok=True)
+        (outside / "keep.sh").write_text("kept\n")
+        script = self.tmp / "plant.py"
+        script.write_text(f"""import os, subprocess
+subprocess.run(["git", "update-index", "--skip-worktree", ".claude/settings.json"], check=True)
+open(".claude/settings.json", "w").write('{{"hooks": "changed"}}\\n')
+open(".claude/settings.local.json", "w").write('{{"hooks": {{}}}}\\n')
+os.symlink({str(outside)!r}, ".claude/hooks")
+os.mkfifo(".claude/pipe")
+for rel in (".codex/config.toml", ".agents/skills/x/SKILL.md", ".mcp.json", "deep/.claude/settings.json",
+            "build/cache.bin"):
+    os.makedirs(os.path.dirname(rel) or ".", exist_ok=True)
+    open(rel, "w").write("left\\n")
+""")
+        return script
+
+    def project_observer(self, real, record) -> Path:
+        """A stand-in for the provider's program: notes the project paths in lane a's worktree as it starts (one JSON
+        line per start in `record`: {path: its text, "folder", "link" or "other"}), then runs `real`."""
+        path = self.tmp / "tools" / f"observe-{Path(real).name}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"""#!{sys.executable}
+import json, os, stat, sys
+wt, seen = {str(self.desk.worktrees_dir / "a")!r}, {{}}
+for top, dirs, files in os.walk(wt):
+    for n in dirs + files:
+        p = os.path.join(top, n)
+        rel = os.path.relpath(p, wt)
+        if any(c in (".claude", ".codex", ".agents", ".mcp.json") for c in rel.split(os.sep)):
+            mode = os.lstat(p).st_mode
+            seen[rel] = ("link" if stat.S_ISLNK(mode) else "folder" if stat.S_ISDIR(mode)
+                         else open(p).read() if stat.S_ISREG(mode) else "other")
+with open({str(record)!r}, "a") as f:
+    f.write(json.dumps(seen) + "\\n")
+os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
+""")
+        path.chmod(0o755)
+        return path
+
+    def assert_project_files_cleared(self, m, record, expected):
+        """The run saw only its start commit's project settings, hansa show says what was removed and put back, and
+        what is outside those names is left: the build cache, and the folder the link led to."""
+        self.assertEqual(m["state"], "done", m)
+        seen = [json.loads(x) for x in record.read_text().splitlines()]
+        self.assertTrue(seen)
+        for s in seen:
+            self.assertEqual(s, expected)
+        wt = Path(m["worktree"])
+        self.assertEqual((wt / "build" / "cache.bin").read_text(), "left\n")
+        self.assertEqual((self.tmp / "outside" / "keep.sh").read_text(), "kept\n")
+        self.assertEqual(m["project_files"], {"removed": self.PLANTED_REMOVED, "restored": [".claude/settings.json"]})
+        self.assertFalse([f for f in m.get("files") or [] if ".claude" in f or ".codex" in f], m)
+        [line] = [x for x in self.hansa("show", m["id"]).splitlines() if x.startswith("project settings")]
+        self.assertIn("removed 7 (.agents, .claude/hooks, .claude/pipe, .claude/settings.local.json, .codex and 2 more)",
+                      line)
+        self.assertIn("put back to the commit's 1 (.claude/settings.json)", line)
+
+    def test_project_settings_the_start_commit_does_not_hold_are_cleared_before_a_claude_code_run(self):
+        # what git keeps in a worktree (ignored files, a skip-worktree change, a named pipe) is not loaded by the next
+        # run: worker, verifier and follow-up alike
+        expected = self.commit_project_files()
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        for kind in ("worker", "verifier", "follow-up"):
+            with self.subTest(kind=kind):
+                record.unlink(missing_ok=True)
+                sh(sys.executable, str(self.plant_script()), cwd=wt)
+                if kind == "worker":
+                    tid = self.desk.new_task("Add hello.txt again")
+                    run_id = tid
+                elif kind == "verifier":
+                    self.hansa("verify", tid)
+                    run_id = self.desk.meta(tid)["verify"]
+                else:
+                    run_id = self.hansa("retry", tid, "Continue").split()[0]
+                self.assert_project_files_cleared(self.settle(d, run_id), record, expected)
+                self.assertTrue(any(e["event"] == "project_files_cleared" and e["task"] == run_id
+                                    for e in map(json.loads, self.desk.events_path.read_text().splitlines())))
+
+    def test_project_settings_the_start_commit_does_not_hold_are_cleared_before_a_codex_run(self):
+        from contrib.codex.tests.codexkit import FAKES
+        expected = self.commit_project_files()
+        record = self.tmp / "seen.jsonl"
+        s = self.codex_runtime_settings()
+        s["providers"]["codex"]["codex_path"] = str(self.project_observer(FAKES / "codex", record))
+        self.assertEqual(self.desk.save_settings(s), [])
+        with self.codex_runtime():
+            self.assertEqual(self.codex_attempt()["state"], "done")
+            record.unlink()
+            sh(sys.executable, str(self.plant_script()), cwd=self.desk.worktrees_dir / "a")
+            m = self.codex_attempt()
+        self.assert_project_files_cleared(m, record, expected)
+
+    def test_project_settings_the_lanes_setup_leaves_are_cleared_before_the_run_starts(self):
+        # the setup runs just before the worker, in the same process: hansa clears after it, outside the sandbox
+        from contrib.codex.tests.codexkit import FAKES
+        expected = self.commit_project_files()
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                s = self.codex_runtime_settings() if provider == "codex" else self.desk.settings()
+                if provider == "codex":
+                    s["providers"]["codex"]["codex_path"] = str(self.project_observer(FAKES / "codex", record))
+                s["lanes"]["a"]["setup"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(self.plant_script()))}"
+                self.assertEqual(self.desk.save_settings(s), [])
+                record.unlink(missing_ok=True)
+                if provider == "codex":
+                    with self.codex_runtime():
+                        m = self.codex_attempt()
+                else:
+                    m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+                self.assert_project_files_cleared(m, record, expected)  # what the setup left, removed after it
+                self.assertTrue((self.desk.tasks_dir / m["id"] / "setup.log").exists())
+
+    def test_project_settings_hansa_cannot_remove_stop_the_run_before_it_starts(self):
+        if os.geteuid() == 0:
+            self.skipTest("root removes a file whatever its folder's mode")
+        self.commit_project_files()
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        wt = self.desk.worktrees_dir / "a"
+        record = self.tmp / "seen.jsonl"
+        os.environ["HANSA_CLAUDE"] = str(self.project_observer(self.tmp / "claude", record))
+        lock = "mkdir -p .codex/locked && echo x > .codex/locked/config.toml && chmod 500 .codex/locked"
+        self.addCleanup(lambda: (wt / ".codex" / "locked").exists() and (wt / ".codex" / "locked").chmod(0o700))
+        for when in ("before", "after the setup"):
+            with self.subTest(when=when):
+                s = self.desk.settings()
+                s["lanes"]["a"]["setup"] = lock if when != "before" else ""
+                self.assertEqual(self.desk.save_settings(s), [])
+                if when == "before":
+                    sh("/bin/sh", "-c", lock, cwd=wt)
+                m = self.settle(d, self.desk.new_task("Add hello.txt again"))
+                self.assertEqual(m["state"], "failed", m)
+                self.assertTrue(m["error"].startswith("could not start: hansa could not remove .codex from the worktree, "
+                                                      "project settings its start commit does not hold"), m["error"])
+                self.assertEqual(len(re.findall(r"\. |; ", m["error"])), 0, m["error"])  # one sentence
+                self.assertFalse(record.exists())  # the provider's program never started
+                self.assertEqual(m.get("files") or [], [])
+                (wt / ".codex" / "locked").chmod(0o700)
+                shutil.rmtree(wt / ".codex")
+
+    def test_the_project_names_hansa_clears_are_those_the_codex_adapter_protects(self):
+        from contrib.codex.tests.codexkit import shim
+        from hansa import project_files, run
+        self.assertEqual({n.split("/")[0] for n in shim.NESTED_CONFIG}, set(run.PROJECT_SETTINGS_NAMES))
+        self.assertEqual(set(project_files.NAMES), {*run.PROJECT_SETTINGS_NAMES, ".mcp.json"})
+
     def test_a_branch_ref_that_leads_to_another_ref_does_not_lead_hansas_commit_onto_it(self):
         # commit hansa's end-of-session commit onto the base, while HEAD still names the session's branch
         from hansa import run
