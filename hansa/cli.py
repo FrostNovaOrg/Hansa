@@ -2272,7 +2272,7 @@ def cmd_serve(a):
         write_text(desk.state_dir / "web-port", str(port))  # what hansa web opens
         write_text(desk.state_dir / "web-host", host)  # with it, where hansa status says the page is
     else:  # what hansa status, hansa up and hansa web say while this server runs without its page
-        write_text(views.page_held_file(desk), json.dumps({"port": held_at, "pid": os.getpid()}))
+        write_json(views.page_held_file(desk), {"port": held_at, "pid": os.getpid()})
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
     alert.start_thread(desk)  # the principal's alert channels, sent from here only (hansa/alert.py)

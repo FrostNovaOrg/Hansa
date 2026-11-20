@@ -1217,7 +1217,7 @@ class FailedWriteTest(unittest.TestCase):
         task, raw = self.desk.tasks_dir / "t0001", self.desk.raw_dir("t0001")
         task.mkdir()
         brief = self.desk.lanes_dir / "a" / "brief.md"
-        common = {"desk": self.desk, "tid": "t0001", "lane": "a", "a": types.SimpleNamespace(name="a", host="localhost"),
+        common = {"desk": self.desk, "tid": "t0001", "lane": "a", "a": types.SimpleNamespace(name="a", host="localhost"), "host": "localhost",
                   "port": 8765, "d": task, "raw": raw, "argv": ["worker", "--prompt", "text"],
                   "brief": brief, "aside": brief.with_name("brief-before.md"), "text": "new text\n", "old": "old text\n",
                   "note": "follow-up note", "report": "a report", "new": "new card\n", "dst": self.root / "CLAUDE.md",
