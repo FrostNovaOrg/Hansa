@@ -155,6 +155,53 @@ def _push_words(words: list) -> set:
     return found
 
 
+def _shell_words(line: str) -> list:
+    lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    words = []
+    while True:
+        # Quoted or escaped operators are arguments. shlex holds its lookahead in _pushback_chars.
+        start = lex.instream.tell() - len(lex._pushback_chars)
+        word = lex.get_token()
+        if word is None:
+            return words
+        end = lex.instream.tell() - len(lex._pushback_chars)
+        words.append((word, line[start:end].strip()))
+
+
+def push_branch(command: str, base: str) -> tuple | None:
+    """The remote and branch of a plain push of the release commit, if both are explicit."""
+    if "\n" in command:
+        return None
+    try:
+        words = _shell_words(command)
+    except ValueError:
+        return None
+    if [word for word, _ in words[:2]] != ["git", "push"]:
+        return None
+    flags = {"-q", "--quiet", "-v", "--verbose", "--porcelain", "--progress", "--no-progress",
+             "-f", "--force", "--force-with-lease", "--atomic", "--no-verify"}
+    args = [(word, spelling) for word, spelling in words[2:] if word not in flags]
+    if args and args[0][0] in ("--repo", "--"):
+        args = args[1:]
+    if len(args) != 2:
+        return None
+    (remote, _), (refspec, spelling) = args
+    remote = remote.removeprefix("--repo=")
+    source, colon, destination = refspec.removeprefix("+").partition(":")
+    _, _, expands = _input_word(spelling)
+    source_is_base = source in (base, f"refs/heads/{base}") and not expands
+    source_is_commit = colon and (source == "HEAD" or
+                                  (source in ("$HANSA_RELEASE_COMMIT", "${HANSA_RELEASE_COMMIT}") and expands))
+    branch = (destination if colon else source).removeprefix("refs/heads/")
+    if (not (source_is_base or source_is_commit) or (destination.startswith("refs/") and not destination.startswith("refs/heads/"))
+            or not re.fullmatch(r"[\w./-]+", remote) or remote.startswith("-")
+            or not re.fullmatch(r"[\w./-]+", branch) or branch.startswith("-")):
+        return None
+    return remote, branch
+
+
 def _paths(command: str, pushes: bool | None = None):
     """Read quoted words too, including a shell command passed as one word to bash -c."""
     pending, seen = [command], set()
@@ -164,19 +211,7 @@ def _paths(command: str, pushes: bool | None = None):
             continue
         seen.add(line)
         try:
-            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
-            lex.whitespace_split = True
-            lex.commenters = ""
-            words = []
-            while True:
-                # Keep the spelling too: a quoted or escaped '>' is an argument, not a redirection.
-                # shlex reads one character ahead and holds it in _pushback_chars.
-                start = lex.instream.tell() - len(lex._pushback_chars)
-                word = lex.get_token()
-                if word is None:
-                    break
-                end = lex.instream.tell() - len(lex._pushback_chars)
-                words.append((word, line[start:end].strip()))
+            words = _shell_words(line)
         except ValueError:
             words = [(word, word) for word in line.split()]
         sending = _push_words(words) if pushes is not None else set()

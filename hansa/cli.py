@@ -1904,13 +1904,21 @@ def cmd_release(a):
     r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
                     session=notify.session_here(), target=target, direct=a.direct)
     who = release.what(r)
+    count = f"{r['count']} commit(s)"
+    if r.get("since_release"):
+        count += f" since release #{r['since_release']}"
+    elif r.get("push_destination"):
+        count += f" going to {r['push_destination']}"
+    elif r.get("remote_counts"):
+        remotes = ", ".join(f"{n} not on remote {remote}" for remote, n in r["remote_counts"].items())
+        count += f" missing from at least one remote ({remotes}"
+        count += ")" if r.get("previous_release") else "; no release of it went out before)"
+    else:
+        count += " on no remote-tracking branch"
+        if not r.get("previous_release"):
+            count += " (no release of it went out before)"
     head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}"
-            + (f" by target {r['target']}" if r.get("target") else "") + ", "
-            + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
-               f"{r['count']} commit(s) missing from at least one remote ("
-               + ", ".join(f"{count} not on remote {remote}" for remote, count in r["remote_counts"].items())
-               + "; no release of it went out before)" if r.get("remote_counts") else
-               f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
+            + (f" by target {r['target']}" if r.get("target") else "") + f", {count}"
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
     details = "".join("\n" + x for x in [*release.outside.lines(r), *release.direct_lines(r)])
@@ -4201,10 +4209,12 @@ def main(argv=None):
                      "one of its named release targets (hansa lane target L NAME \"...\"); TARGET is needed when "
                      "the lane has more than one; name the target before a one-word note that could be a target "
                      "name (hansa release L TARGET hotfix). "
-                     "hansa records the commit, the target and its command, the note, the commits that go out (with "
-                     "one remote or none: on no remote-tracking branch and not in that target's last release; the "
-                     "whole history when there is no remote-tracking branch) and the files they change. For a "
-                     "target's first release with two or more remotes, including a --fixed target, every base "
+                     "hansa records the commit, the target and its command, the note, the commits that go out and "
+                     "the files they change. After a target's first release, a push to a known branch leaves out "
+                     "commits in its tracking branch and in the last release if the command still matches. For a "
+                     "first release or a command with an unknown destination, with one remote or none the commits "
+                     "are those on no remote-tracking branch (the whole history when there is none). With two or "
+                     "more remotes, including for a --fixed target, every base "
                      "commit missing from at least one remote's tracking branches is counted, shown, scanned and "
                      "checked for direct commits; the heading gives each remote's missing count, and a remote with "
                      "no tracking branches lacks the whole history. A word "
