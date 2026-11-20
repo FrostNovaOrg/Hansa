@@ -239,6 +239,19 @@ dialog.picture-view { max-width:100vw; max-height:100vh; width:auto; padding:8px
 dialog.picture-view::backdrop { background:rgba(0,0,0,.7); }
 dialog.picture-view img { display:block; max-width:calc(100vw - 16px); max-height:calc(100vh - 64px); object-fit:contain; margin:0 auto; }
 dialog.picture-view p { margin:6px 0 0; display:flex; justify-content:space-between; gap:8px; overflow-wrap:anywhere; }
+/* A picture larger than the view: a tap or click on it shows it at its real size in a frame that scrolls both ways, another fits it again */
+dialog.picture-view .picture-frame { max-width:calc(100vw - 16px); max-height:calc(100vh - 64px); overflow:auto; margin:0 auto; }
+dialog.picture-view[data-size] .picture-frame, dialog.picture-view[data-size=fit] img { max-height:calc(100vh - 92px); }
+dialog.picture-view[data-size=fit] img { cursor:zoom-in; }
+dialog.picture-view[data-size=real] img { max-width:none; max-height:none; cursor:zoom-out; }
+dialog.picture-view p.picture-hint { display:block; font-size:12px; }
+/* At phone width the viewer's Close and the picture counts get a press area of 44px, their look unchanged */
+@media (max-width:640px) {
+  dialog.picture-view p button.link, button.link[data-goal-pictures], button.link[data-release-picture] { display:inline-flex; align-items:center; min-height:44px; vertical-align:middle; }
+  dialog.picture-view p button.link { justify-content:center; min-width:44px; }
+  .release-pictures { align-items:center; }
+  dialog.picture-view[data-size] .picture-frame, dialog.picture-view[data-size=fit] img { max-height:calc(100vh - 116px); }
+}
 @media (max-width:640px) {
   .task-steps { flex-wrap:wrap; overflow-x:visible; }
   .task-step { flex:1 1 140px; }
@@ -560,7 +573,7 @@ const T = ZH ? {
   taskSteps:"任务步骤", taskQueued:"排队", taskRun:n => `运行 ${n}`, taskLaneCheck:"工作线检查", taskVerification:"核验", taskMergeCheck:"合并检查", taskMerged:"已合并",
   taskRunning:"进行中", taskCompleted:"已完成", taskFailed:"失败", taskCancelled:"已取消", taskWait:"等待", taskFirstResult:"首次结果",
   taskMinutes:n => `${n} 分钟`, taskSeconds:n => `${n} 秒`, taskExit:n => `退出码 ${n}`, taskVerifies:"核验任务", taskReplaces:"接替任务", taskVerificationUnavailable:"核验记录不可用",
-  pictures:"图片", verifierSaw:"核验者看到的", pictureCount:n => `${n} 张图片`, picturesMore:n => `另有 ${n} 个任务`, pictureMissing:"图片无法加载", pictureClose:"关闭",
+  pictures:"图片", verifierSaw:"核验者看到的", pictureCount:n => `${n} 张图片`, picturesMore:n => `另有 ${n} 个任务`, pictureMissing:"图片无法加载", pictureClose:"关闭", pictureRealSize:"点按图片查看原尺寸", pictureFit:"再点按图片恢复适应屏幕",
   asks:"待办", todos:"待办", todosIntro:"仅展示。请在对话中回复，由协调员记录结果并关闭；所有事项永久保留。",
   todoWhat:"待办内容", todoWork:"工作", todoLoading:"正在加载待办…", todoPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件待办`, todoWhy:"为何只有你能做", todoHolds:"工作等待此事", todoContinues:"工作继续", todoSince:"提出时间", todoOutcome:"结果", todoClosed:"关闭时间", todoOpen:"未完成", todoDone:"已关闭", principalDetails:"详情",
   providers:"模型服务商", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
@@ -763,7 +776,7 @@ const T = ZH ? {
   taskSteps:"Task steps", taskQueued:"Queued", taskRun:n => `Run ${n}`, taskLaneCheck:"Lane check", taskVerification:"Verification", taskMergeCheck:"Merge check", taskMerged:"Merged",
   taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result", notKnown:"not known",
   taskMinutes:n => `${n} min`, taskSeconds:n => `${n} s`, taskExit:n => `exit ${n}`, taskVerifies:"Verifies", taskReplaces:"Replaces", taskVerificationUnavailable:"Verification record unavailable",
-  pictures:"Pictures", verifierSaw:"What the verifier saw", pictureCount:n => `${n} picture${n === 1 ? "" : "s"}`, picturesMore:n => `and ${n} more`, pictureMissing:"picture could not be loaded", pictureClose:"Close",
+  pictures:"Pictures", verifierSaw:"What the verifier saw", pictureCount:n => `${n} picture${n === 1 ? "" : "s"}`, picturesMore:n => `and ${n} more`, pictureMissing:"picture could not be loaded", pictureClose:"Close", pictureRealSize:"Tap or click the picture to see it at its real size", pictureFit:"Tap or click it again to fit it to the screen",
   asks:"To-dos", todos:"To-dos", todosIntro:"Read-only. Answer in the conversation; the coordinator records the outcome and closes each item. Every item is kept.",
   todoWhat:"What", todoWork:"Work", todoLoading:"Loading to-dos…", todoPage:(p, n, total) => `Page ${p} of ${n} · ${total} to-dos`, todoWhy:"Why only you", todoHolds:"Work waits", todoContinues:"Work goes on", todoSince:"Since", todoOutcome:"Outcome", todoClosed:"Closed at", todoOpen:"Open", todoDone:"Closed", principalDetails:"Details",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
@@ -1624,13 +1637,32 @@ function pictureList(tid, list, heading) {
   })));
 }
 // The picture large, inside the page: a click or tap anywhere on it, Escape or Close closes it, and focus goes back.
+// One larger than the view is shown fitted first; a click or tap on the picture shows it at its real size inside the
+// view, which then scrolls both ways, and another fits it again (data-size, with a hint that says so).
 function pictureView(src, name, from) {
-  const close = () => { view.close?.(); view.remove(); from?.focus(); };
-  const view = h("dialog", {class:"picture-view", "aria-label":name, onclick:close,
-    oncancel:e => { e.preventDefault(); close(); }}, h("img", {src, alt:name}),
+  const img = h("img", {src, alt:name}), frame = h("div", {class:"picture-frame"}, img);
+  const hint = h("p", {class:"picture-hint muted", hidden:true});
+  const size = value => { view.setAttribute("data-size", value); hint.hidden = false;
+    hint.textContent = value === "real" ? T.pictureFit : T.pictureRealSize; };
+  // A fitted picture shown smaller than it is can be switched; one at its real size stays switchable.
+  const check = () => {
+    if (view.getAttribute("data-size") === "real") return;
+    if (img.naturalWidth > img.clientWidth + 1 || img.naturalHeight > img.clientHeight + 1) size("fit");
+    else { view.removeAttribute("data-size"); hint.hidden = true; }
+  };
+  const close = () => { window.removeEventListener?.("resize", check); view.close?.(); view.remove(); from?.focus(); };
+  const view = h("dialog", {class:"picture-view", "aria-label":name, oncancel:e => { e.preventDefault(); close(); },
+    onclick:e => {
+      if (e.target !== img || !view.getAttribute("data-size")) return close();
+      size(view.getAttribute("data-size") === "real" ? "fit" : "real");
+      if (view.getAttribute("data-size") === "fit") { frame.scrollLeft = 0; frame.scrollTop = 0; }
+    }}, frame, hint,
     h("p", {}, h("span", {}, name), h("button", {type:"button", class:"link"}, T.pictureClose)));
+  img.addEventListener("load", check);
+  window.addEventListener("resize", check);
   document.body.append(view);
   if (view.showModal) view.showModal(); else view.setAttribute("open", "");
+  if (img.complete && img.naturalWidth) check();
   view.querySelector("button")?.focus();
   return view;
 }

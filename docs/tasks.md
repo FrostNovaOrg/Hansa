@@ -535,7 +535,9 @@ the copy fails, nothing of that run is kept and `hansa show` says so in one line
 its check and its verdict never depend on its pictures.
 
 On the page, open the task to see **Pictures** under its report and **What the verifier saw**
-at its verification step, if those runs left pictures. Open a picture for a larger view.
+at its verification step, if those runs left pictures. Open a picture for a larger view. One larger than the
+screen opens fitted to it; tap or click the picture to see it at its real size, scrolling both ways, and again to
+fit it. At phone width the view's Close and the picture counts are at least 44 px tall to press.
 
 The folder was the worker's, so hansa treats every name and byte in it as hostile: it opens the folder and each
 file without following a link, reads a file only once it has checked that what it opened is the regular file it

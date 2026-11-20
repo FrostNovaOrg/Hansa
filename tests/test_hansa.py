@@ -8194,6 +8194,21 @@ def save():'''))
                 self.assertEqual(out["escape"], {"closed": True, "focusBack": True})
                 self.assertTrue(out["clickCloses"])
                 self.assertEqual(out["reread"], 0)
+                zoom, real, fit = out["zoom"], ("Tap or click the picture to see it at its real size" if en else
+                                                 "点按图片查看原尺寸"), ("Tap or click it again to fit it" if en else "再点按图片恢复")
+                self.assertEqual(zoom["first"]["size"], "fit", "shown fitted first")
+                self.assertIn(real, zoom["first"]["hint"])
+                self.assertEqual(zoom["focused"], "button", "Close has the focus, as before")
+                self.assertEqual(zoom["real"]["size"], "real")
+                self.assertIn(fit, zoom["real"]["hint"])
+                self.assertTrue(zoom["real"]["open"], "a tap on the picture does not close it")
+                self.assertEqual(zoom["fitAgain"]["size"], "fit")
+                self.assertTrue(zoom["fitAgain"]["src"].startswith("blob:"))
+                self.assertEqual(zoom["escape"], {"closed": True, "focusBack": True})
+                self.assertTrue(zoom["outsideCloses"])
+                self.assertEqual((zoom["fits"]["size"], zoom["fits"]["hint"]), (None, None), "one that fits: no switch, no hint")
+                self.assertTrue(zoom["fitsClickCloses"])
+                self.assertEqual(zoom["reads"], 0, "switching size fetches nothing")
                 self.assertEqual(out["none"], {"headings": 0, "text": True})
                 self.assertEqual(len(out["missing"]), 1)
                 self.assertIn("lost.png", out["missing"][0]["text"])
@@ -8203,6 +8218,17 @@ def save():'''))
                 self.assertRegex(css, r"\.task-pictures li \{[^}]*max-width:100%")
                 self.assertRegex(css, r"dialog\.picture-view img \{[^}]*max-width:calc\(100vw")
                 self.assertRegex(css, r"dialog\.picture-view img \{[^}]*max-height:calc\(100vh")
+                self.assertRegex(css, r"dialog\.picture-view\[data-size=real\] img \{[^}]*max-width:none; max-height:none")
+                self.assertRegex(css, r"dialog\.picture-view \.picture-frame \{[^}]*overflow:auto")
+                # at phone width a press area of 44px for Close and the picture counts; desktop keeps button.link as it was
+                phone = re.search(r"@media \(max-width:640px\) \{\n  dialog\.picture-view p button\.link.*?\n\}", css, re.S)
+                self.assertIsNotNone(phone)
+                for selector in ("dialog.picture-view p button.link", "button.link[data-goal-pictures]",
+                                 "button.link[data-release-picture]"):
+                    self.assertRegex(phone[0], re.escape(selector) + r"[^{]*\{[^}]*min-height:44px")
+                self.assertRegex(phone[0], r"dialog\.picture-view p button\.link \{[^}]*min-width:44px")
+                self.assertRegex(phone[0], r"\.release-pictures \{[^}]*align-items:center")
+                self.assertRegex(css, r"\nbutton\.link \{[^}]*min-height:0;")
 
     def goal_with_pictures(self):
         """Goal g1 whose chain is t0001 with three kept pictures and a verification that holds with one."""
@@ -50048,6 +50074,30 @@ else if (ask === "pictures") (async () => {
   const again = document.body.kids.find(k => k.tag === "dialog");
   await descendants(again, "img")[0].click();
   out.clickCloses = !document.body.kids.includes(again);
+  // A picture larger than the view (1280 wide shown 374 wide, as on a phone) and one that fits: what a tap on it does
+  const readsBefore = pictureGets().length;
+  const opened = async (natural, shown) => {
+    await thumb.click();
+    const view = document.body.kids.find(k => k.tag === "dialog"), img = descendants(view, "img")[0];
+    [img.naturalWidth, img.naturalHeight] = natural; [img.clientWidth, img.clientHeight] = shown;
+    img.on.load?.({target:img});
+    const hint = find(view, el => el.className.split(" ").includes("picture-hint"));
+    const state = () => ({size:view.attrs["data-size"] ?? null, hint:hint && !hint.hidden ? hint.textContent : null,
+      open:document.body.kids.includes(view), src:img.attrs.src});
+    return {view, img, state};
+  };
+  const big = await opened([1280, 800], [374, 234]);
+  out.zoom = {first:big.state(), focused:document.activeElement?.tag};
+  await big.img.click(); out.zoom.real = big.state();
+  await big.img.click(); out.zoom.fitAgain = big.state();
+  await big.img.click(); big.view.on.cancel({preventDefault() {}});  // Escape at real size
+  out.zoom.escape = {closed:!document.body.kids.includes(big.view), focusBack:document.activeElement === thumb};
+  const big2 = await opened([1280, 800], [374, 234]);
+  await big2.view.click(); out.zoom.outsideCloses = !document.body.kids.includes(big2.view);
+  const small = await opened([200, 150], [200, 150]);
+  out.zoom.fits = small.state();
+  await small.img.click(); out.zoom.fitsClickCloses = !small.state().open;
+  out.zoom.reads = pictureGets().length - readsBefore;
   // closing and opening the fold again reads nothing again
   const reads = pictureGets().length; await count.click(); await flush();
   const foldButton = find(ids["#tab-goals"], el => el.attrs["aria-controls"] === fold.id && el !== count);
