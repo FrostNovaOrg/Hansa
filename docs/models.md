@@ -13,6 +13,8 @@ These are the models and effort levels the maintainers use on their own desks an
 
 The principal sets the model and effort under Settings → Coordinator on the web page, and saved changes take effect the next time the coordinator starts. [Settings on the web page](desk.md#settings-on-the-web-page)
 
+The coordinator's helpers (scout, reviewer, operator) need not run on the coordinator's model: the principal can give them a cheaper one under the same settings (Helpers' model; empty means the coordinator's model).
+
 ## Workers and verifiers
 
 - Claude Opus 5.5

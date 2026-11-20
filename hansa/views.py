@@ -2639,6 +2639,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         "What you can look up: hansa explain lane <name> | provider <name> | server | notify | history",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']})",
+        helpers_model_line(s),
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), the floor of free space under "
         "which nothing new starts (hansa disk-floor), the available memory floor (hansa memory-floor), "
@@ -2646,6 +2647,17 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         "pause/resume.",
         release_settings_line(s),
         alert.explain_line(s, desk)])
+
+
+def helpers_model_line(s: dict) -> str:
+    """For hansa explain: the model of the coordinator's helpers and where it comes from."""
+    hm = s.get("helpers_model") or ""
+    where = (f"{hm}, the principal's setting (web page)" if hm else
+             f"the coordinator's model ({s['coordinator'].get('model') or 'its provider default'}), as the principal "
+             "set none of their own (web page)")
+    return (f"helpers (scout, reviewer, operator): {where}; it applies from the coordinator's next start. One call may "
+            "name another model (the Agent tool's model: an alias such as sonnet or haiku); the setting is the "
+            "principal's, you cannot change it (hansa ask)")
 
 
 def release_settings_line(s: dict) -> str:

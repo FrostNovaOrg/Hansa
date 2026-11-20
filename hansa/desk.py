@@ -90,7 +90,7 @@ PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
                   "release_direct", "alert", "alert_language", "alert_push", "coordinator_compact", "coordinator_alert", "desk_name",
-                  "settings_from_outside")
+                  "settings_from_outside", "helpers_model")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -194,6 +194,9 @@ CODEX_FIELDS = {"codex_path": None, "codex_home": None, "ca_file": "", "web_sear
                 "disabled_features": ["apps", "plugins", "browser_use", "computer_use", "image_generation",
                                       "multi_agent", "hooks"]}
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
+# A model name as hansa coordinator gives it to Claude Code (--model, and the helpers' definitions): checked at the
+# start, and on save for the helpers' model (helpers_model)
+MODEL_NAME = re.compile(r"[A-Za-z0-9._:/\[\]][A-Za-z0-9._:/\[\]-]*")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
 MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK", "HANSA_RUN")
 # A lane's env reaches only what runs in the sandbox (run.in_sandbox, run.env_file): srt, the worker's Claude
@@ -309,6 +312,9 @@ def default_settings() -> dict:
                   "acceptance": None, "failure": ""},
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "max"},
+        # The model of the coordinator's helpers (scout, reviewer, operator): hansa coordinator writes it into their
+        # definitions at its start. The principal's, on the page; empty: the coordinator's model
+        "helpers_model": "",
         # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
         "coordinator_compact": dict(COMPACT_DEFAULTS),
         # When the principal is alerted that the coordinator's session cannot be reached (COORDINATOR_ALERT). The
@@ -708,7 +714,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
-             "coordinator_alert", "alert_language", "alert_push", "bench", "desk_name", "settings_from_outside"}
+             "coordinator_alert", "alert_language", "alert_push", "bench", "desk_name", "settings_from_outside",
+             "helpers_model"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     name_problem = desk_name_problem(s.get("desk_name", ""))
     if name_problem:
@@ -986,6 +993,11 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         if co.get("effort", "") not in EFFORTS:
             p.append(rule("coordinator: effort is not a known level", "effort", "effort", scope="coordinator",
                           choices=[e for e in EFFORTS if e]))
+
+    hm = s.get("helpers_model", "")
+    if hm != "" and (not isinstance(hm, str) or len(hm) > 200 or not MODEL_NAME.fullmatch(hm)):
+        p.append(rule("helpers_model: the helpers' model must be empty (the coordinator's model) or a model name "
+                      "(letters, digits and ._:-/[], not starting with -)", "helpers_model", "model_name"))
 
     prices = s.get("prices")
     if not isinstance(prices, dict):

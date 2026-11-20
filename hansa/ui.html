@@ -624,7 +624,7 @@ const T = ZH ? {
   savedProviders:"服务商设置用于工作智能体、核验者的新运行，以及协调员的下次启动。",
   savedRest:"休息分钟数用于下次开始的休息，已有休息的结束时间不变。",
   savedSecurity:"禁读规则用于工作智能体、核验者和协调员的下次启动；正在运行的进程保留原有访问权限。",
-  savedCoordinator:"协调员模型、服务商、思考强度与工作中压缩阈值从协调员下次启动起生效。",
+  savedCoordinator:"协调员模型、服务商、思考强度、助手的模型与工作中压缩阈值从协调员下次启动起生效。",
   savedIdle:"空闲压缩阈值在协调员的 mod 下次判断时读取。",
   savedReleases:"发布规则用于下次相关的任务标题、合并或发布检查。",
   savedAlerts:"提醒设置用于下次提醒检查。", alertDefaultUsed:(what, m) => `${what}：留空，使用默认值 ${m} 分钟。`,
@@ -819,7 +819,7 @@ const T = ZH ? {
   savedProviders:"Provider settings apply to new runs of workers and verifiers, and the coordinator's next start.",
   savedRest:"Rest minutes apply when the next rest begins; existing rest end times stay the same.",
   savedSecurity:"Not-read rules apply at the next worker, verifier or coordinator start; running processes keep their existing access.",
-  savedCoordinator:"Coordinator model, provider, effort and working compaction threshold apply at the coordinator's next start.",
+  savedCoordinator:"Coordinator model, provider, effort, helpers' model and working compaction threshold apply at the coordinator's next start.",
   savedIdle:"Idle compaction reads its threshold at the coordinator mod's next decision.",
   savedReleases:"Release rules apply at the next relevant task-title, merge or release check.",
   savedAlerts:"Alert settings apply at the next alert check.", alertDefaultUsed:(what, m) => `${what}: left empty, so the default, ${m} minutes, applies.`,
@@ -946,6 +946,8 @@ Object.assign(T, ZH ? {
   compactIdleWarning:"警告：空闲压缩阈值大于或等于工作压缩阈值，空闲时不会触发压缩。",
   historyKeySet:"已设置（密钥不显示）", historyKeyCleared:"已清除（密钥不显示）",
   providerName:"服务商名称", priceName:"模型名称", baseModel:"模型（空＝用服务商的）",
+  helpersModel:"助手的模型（空＝协调员的模型）",
+  helpersModelHint:"侦察员、审阅员与操作员三个助手所用的模型，从协调员下次启动起生效。协调员可在某一次调用时另选模型；这项设置只有你能改。",
   cooldown:"额度用完后休息（分钟）", contextTitle:"上下文压缩", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
   protectedPaths:"不可读取的路径", protectedHint:"每行一个绝对路径。常见登录信息、密钥与浏览器数据已内置保护。",
   protectedAdd:"你自己加的（内置列表以外）", protectedPlaceholder:"在这里加你自己的，每行一个完整路径，比如 /Users/me/.config/myproject/keys",
@@ -1047,6 +1049,8 @@ Object.assign(T, ZH ? {
   compactIdleWarning:"Warning: the idle compaction threshold is at or above the working threshold, so compaction will not happen when idle.",
   historyKeySet:"set (values withheld)", historyKeyCleared:"cleared (values withheld)",
   providerName:"Provider name", priceName:"Model name", baseModel:"Model (blank = the provider's)",
+  helpersModel:"Helpers' model (blank = the coordinator's model)",
+  helpersModelHint:"The model of the coordinator's three helpers (scout, reviewer, operator), from the coordinator's next start. The coordinator may name another for one call; only you change this setting.",
   cooldown:"Rest after a usage limit (minutes)", contextTitle:"Context management", compactHint:"100,000–1,000,000 tokens. See the explanation for when each applies.",
   protectedPaths:"Paths workers must not read", protectedHint:"One absolute path per line. Common logins, keys and browser data are already protected.",
   protectedAdd:"Your own additions (besides the built-in list)", protectedPlaceholder:"Add your own here, one full path per line, e.g. /Users/me/.config/myproject/keys",
@@ -2371,7 +2375,7 @@ function settingsReplyProblems(reply) {
     providers:T.providers, provider:T.provider, provider_name:T.providerName, coordinator:T.coordinatorGroup, prices:T.prices,
     workers_may_not_read:T.protectedPaths, releases_without_asking:T.autoRelease, release_direct:T.directPolicy,
     release_mailboxes:T.mailboxTitle, settings_from_outside:T.outsideTitle, release_forbidden:T.forbiddenWords, release_forbidden_except:T.exceptionsTitle,
-    alert_language:T.alertLanguage, alert:T.alertCommandTitle, coordinator_alert:T.alertTiming,
+    alert_language:T.alertLanguage, alert:T.alertCommandTitle, coordinator_alert:T.alertTiming, helpers_model:T.helpersModel,
     kind:T.kind, model:T.model, effort:T.effort, base_url:T.endpoint, config_dir:T.loginDir, connection:T.connection,
     codex_path:T.codexPath, codex_home:T.codexHome, ca_file:T.caFile, web_search:T.webSearch, disabled_features:T.codexFeatures,
     ...Object.fromEntries(Object.entries(MINUTES_LABELS).map(([k, v]) => [k, T[v]]))};
@@ -2433,6 +2437,7 @@ Object.assign(T, ZH ? {
     name:"请使用小写字母、数字和 '-'。", object:"必须是一组设置。", key:"密钥单独保存，请使用本页的密钥栏。",
     unknown_fields:"未知字段：{fields}。", kind:"请选择订阅或兼容接口。", required:"必须填写。", effort:"必须是 {choices} 之一，或留空使用默认值。",
     https:"必须以 https:// 开头。", path:"必须是以 / 开头的完整路径。", provider:"未找到这家服务商。",
+    model_name:"留空（用协调员的模型）或填写模型名称：字母、数字与 ._:-/[]，不以 - 开头。",
     connection_missing:"没有名为“{connection}”的服务商。", connection_chain:"“{connection}”使用其他服务商的连接。请指定有自己连接的服务商。"},
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}：未找到 ${provider}。`,
   // A Codex field's refusal (desk.py, codex_problems): its rule, the paths it names, and a folder spelled two ways.
@@ -2470,6 +2475,7 @@ Object.assign(T, ZH ? {
     name:"Use lowercase letters, digits and '-'.", object:"Must be a settings object.", key:"Keys are saved separately; use the key box on this page.",
     unknown_fields:"Unknown fields: {fields}.", kind:"Choose Subscription or Compatible endpoint.", required:"Required.", effort:"Must be one of {choices}, or blank for the default.",
     https:"Must start with https://.", path:"Must be a full path starting with /.", provider:"Unknown provider.",
+    model_name:"Blank (the coordinator's model) or a model name: letters, digits and ._:-/[], not starting with -.",
     connection_missing:"No provider named “{connection}”.", connection_chain:"“{connection}” uses another provider's connection. Name a provider with its own connection."},
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}: unknown provider ${provider}.`,
   validationCodex:{path:() => "must be a full path starting with /, without control characters.",
@@ -2517,7 +2523,7 @@ const SETTINGS_GROUPS = [
 ];
 settingsGroup = keptChoice("sessionStorage", "hansa.settingsSection", SETTINGS_GROUPS.map(([key]) => key), settingsGroup);
 const GROUP_KEYS = {
-  providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:["desk_name", "settings_from_outside"],
+  providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact", "helpers_model"], lanes:["desk_name", "settings_from_outside"],
   security:["workers_may_not_read", "workers_may_not_read_added"],
   releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
   alerts:["alert", "alert_language", "coordinator_alert", "alert_push"], prices:["prices"]
@@ -2541,7 +2547,7 @@ function settingsSavedMessage(settings) {
     changed("providers") ? T.savedProviders : null,
     changed("cool_minutes") ? T.savedRest : null,
     changed("workers_may_not_read") ? T.savedSecurity : null,
-    changed("coordinator") || compactChanged("working_at") ? T.savedCoordinator : null,
+    changed("coordinator") || changed("helpers_model") || compactChanged("working_at") ? T.savedCoordinator : null,
     compactChanged("idle_at") ? T.savedIdle : null,
     GROUP_KEYS.releases.some(changed) ? T.savedReleases : null,
     (GROUP_KEYS.alerts.some(changed) || pushDraftDirty()) ? T.savedAlerts : null,
@@ -2818,7 +2824,7 @@ function problemTarget(problem) {
       || problem.startsWith(T.pushDuplicate("").split("“")[0])
       || (ZH && (Object.values(T.pushSaveProblems).includes(problem) || /需要.*HTTPS|^请粘贴/.test(problem)))
       || pushForeignProblem(problem) ? "alerts"
-    : /^(desk_name|settings_from_outside)/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
+    : /^(desk_name|settings_from_outside)/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^(coordinator|helpers_model)/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
     : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
   return group ? {group} : null;
@@ -3389,7 +3395,8 @@ function renderSettings(problems = settingsProblems) {
         field(T.provider, pick(S.coordinator, "provider", Object.keys(S.providers),
           Object.keys(S.providers).map(name => entryKind(name) === "codex" ? `${name} (${T.coordinatorNoCodex})` : name),
           Object.keys(S.providers).map(name => entryKind(name) === "codex"))),
-        field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)))),
+        field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)),
+        field(T.helpersModel, bind(S, "helpers_model"), T.helpersModelHint))),
       section(T.contextTitle, fields(
         field(T.compactIdle, bind(S.coordinator_compact, "idle_at", "number"), T.defaultTokens(settingsDefaults.coordinator_compact?.idle_at)),
         field(T.compactWorking, bind(S.coordinator_compact, "working_at", "number"), T.defaultTokens(settingsDefaults.coordinator_compact?.working_at))),
