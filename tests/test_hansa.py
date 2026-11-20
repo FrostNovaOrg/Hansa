@@ -11961,11 +11961,32 @@ def save():'''))
         return self.git_out("rev-parse", "HEAD")
 
     def test_word_scan_gitlink_row_1_task_merges_but_forbidden_entry_name_is_refused(self):
+        from hansa import run
         self.forbid(r"re:\bAI\b")
-        tid = self.done_with(env={"FAKE_GITLINK": "vendor/lib"})
+        # a task cannot add a submodule (a repository inside the worktree): it fails and nothing is committed
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_GITLINK": "vendor/lib"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add a dependency"))
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at vendor/lib;", m["error"])
+        self.assertEqual(m["head"], "")
+        # one the base holds already (a commit made there directly): a task that leaves it as it is merges
+        (self.repo / "vendor/lib").mkdir(parents=True)
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{self.git_out('rev-parse', 'HEAD')},vendor/lib",
+           cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add dependency", cwd=self.repo)
+        tid = self.done_with(env={})
         self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
         self.assertTrue(self.git_out("ls-tree", "main", "vendor/lib").startswith("160000 commit "))
-        tid = self.done_with(env={"FAKE_GITLINK": "vendor/AI"})
+        # the merge's scan still sees a submodule entry's name, in a commit hansa recorded for a task (one recorded
+        # before tasks were refused a submodule, say)
+        tid = self.done_with(env={})
+        wt = Path(self.desk.meta(tid)["worktree"])
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{self.git_out('rev-parse', 'HEAD')},vendor/AI",
+           cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add AI", cwd=wt)
+        self.desk.update(tid, head=self.git_out("rev-parse", "HEAD", cwd=wt))
         self.assertIn("file name: vendor/AI", self.refused("merge", tid))
 
     def test_word_scan_gitlink_row_2_release_is_asked_even_without_the_submodule_object(self):
@@ -34451,6 +34472,14 @@ def save():'''))
         m = run.finish(self.desk, tid, 0)
         self.assertIn("many0, many1, many2, many3, many4 (and 2 more)", m["error"])
         self.assertFalse((self.tmp / "ran-many").exists())
+        # a submodule the run's own commit brought in is refused as well: checked against where the run started
+        tid, wt, base = self.started_run()
+        sh("git", "update-index", "--add", "--cacheinfo", f"160000,{base},vendor/lib", cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "Add a dependency", cwd=wt)
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("repository inside it, at vendor/lib;", m["error"])
+        self.assertEqual(m["head"], "")
 
     def test_hansas_git_calls_never_look_into_a_repository_inside_the_worktree(self):
         from hansa import run

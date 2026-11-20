@@ -2661,7 +2661,7 @@ def _changed_gitlinks(held: dict, index: dict) -> list:
 
 def refuse_repos_inside(desk: Desk, wt: Path, revs) -> dict:
     """Refuse (RepositoryInside) a worktree that holds a repository inside it, or whose index adds, changes or removes
-    a submodule, against the commits `revs` (the branch's tip, and a merge hansa made there). Checked before hansa's
+    a submodule, against the commits `revs` (the run's start, and a merge hansa made there). Checked before hansa's
     git scans the worktree at a run's end; returns the submodules they hold ({path: ids})."""
     held = gitlinks(desk, wt, *revs)
     found = sorted({*repos_inside(desk, wt, held), *_changed_gitlinks(held, index_gitlinks(desk, wt))})
@@ -6071,8 +6071,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         # A run may hold only the merge hansa made (retry --update).
         merged = check_no_operation(
             desk, wt, meta.get("base", "") if meta.get("update") and meta.get("update_conflicts") else "")
-        if set_up and not setup:  # before git scans the worktree
-            refuse_repos_inside(desk, wt, (head, merged))
+        if set_up and not setup:  # before git scans the worktree; against the run's start: a commit of its own
+            # cannot bring a submodule in either
+            refuse_repos_inside(desk, wt, ((meta.get("run_start") or {}).get("commit") or head, merged))
         if wgit(desk, wt, "status", "--porcelain", NO_SUBMODULES) and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
                 ref = f"refs/hansa/scratch/{tid}"
