@@ -892,14 +892,15 @@ def tmp_writable() -> bool:
     return True
 
 
-SECRETS = ("SECRET-TEXT", "org-123", "/x/transcript-77.jsonl", "sess-identity-77", "/y/cwd-77")
+TURN_SESSION_ID = "77777777-7777-4777-8777-777777777777"  # the session's id in the hooks' input, as Claude Code gives it
+SECRETS = ("SECRET-TEXT", "org-123", "/x/transcript-77.jsonl", TURN_SESSION_ID, "/y/cwd-77")
 
 
 def turn_hook_input(event: str, error=None) -> str:
     """A Stop or StopFailure hook's input as Claude Code gives it, with what the record must not keep (SECRETS)."""
     return json.dumps({"hook_event_name": event, **({"error": error} if error is not None else {}),
                        "last_assistant_message": "SECRET-TEXT", "error_details": "org-123",
-                       "session_id": "sess-identity-77", "transcript_path": "/x/transcript-77.jsonl",
+                       "session_id": TURN_SESSION_ID, "transcript_path": "/x/transcript-77.jsonl",
                        "cwd": "/y/cwd-77", "stop_hook_active": False})
 
 
@@ -915,12 +916,29 @@ def check_turn_hooks(test, words: list, desk, pid: int) -> None:
     code = Path(__file__).resolve().parent.parent
     test.assertEqual(shlex.split(commands["Stop"][0]),
                      [str(code / "bin" / "hansa"), "--desk", str(desk.root), "coordinator-turn", "--pid", str(pid)])
-    path = desk.state_dir / "coordinator-turns" / f"{pid}.json"
+    # the hook's own command, each input run by a shell that stands for the session: the --pid the hook names is
+    # its session's, an ancestor of the hook; here that shell's ($$), which the desk records as the coordinator's
+    # session (unrecorded: no conversation is kept)
+    session = subprocess.Popen(["/bin/sh", "-c", 'while IFS= read -r line; do printf "%s\\n" "$line" | '
+                                + commands["Stop"][0].replace(f"--pid {pid}", '--pid "$$"') + ' 2>&1; echo "rc=$?"; done'],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, cwd=desk.root)
+    test.addCleanup(lambda: (session.stdin.close(), session.wait(timeout=60)))
+    write_json(desk.state_dir / "coordinator-start.json",
+               {"kind": "unrecorded", "why": "a test", "session": {"pid": session.pid,
+                                                                  "start": hansa.run.proc_start(session.pid)}})
+    path = desk.state_dir / "coordinator-turns" / f"{session.pid}.json"
+
+    def run_hook(text):
+        session.stdin.write(text.replace("\n", " ") + "\n")
+        session.stdin.flush()
+        said = []
+        while not (line := session.stdout.readline()).startswith("rc="):
+            test.assertTrue(line, said)
+            said.append(line)
+        return int(line[3:]), "".join(said)
 
     def hook(text):
-        r = subprocess.run(["/bin/sh", "-c", commands["Stop"][0]], input=text, capture_output=True, text=True,
-                           cwd=desk.root, timeout=60)
-        test.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        test.assertEqual(run_hook(text), (0, ""))
         return read_json(path, None)
 
     ok = hook(turn_hook_input("Stop"))
@@ -940,8 +958,11 @@ def check_turn_hooks(test, words: list, desk, pid: int) -> None:
                      (True, None, 0, None, back["at"]))
     path.unlink()
     for text in ("", "not json {", json.dumps({"error": "rate_limit", "last_assistant_message": "SECRET-TEXT"}),
-                 "[1, 2]"):
-        test.assertIsNone(hook(text), text)  # nothing written
+                 "[1, 2]", json.dumps({"hook_event_name": "Stop"})):  # the last: not in the shape Claude Code gives
+        code, said = run_hook(text)
+        test.assertEqual(code, 1, text)
+        test.assertIn("coordinator-turn wrote nothing", said)
+        test.assertIsNone(read_json(path, None), text)  # nothing written
     hook(turn_hook_input("StopFailure", "rate_limit"))
     for f in desk.root.rglob("*"):  # the events too
         if f.is_file():
@@ -3988,10 +4009,27 @@ class UpTest(unittest.TestCase):
         self.assertIn("hansa up", items[0]["line"])
 
 
+def helper_as_shipped(given: str) -> str:
+    """A helper's definition in the desk as hansa ships it: its read-only hook's command (helper_bash.py, as the hansa
+    that wrote it runs it) back to the placeholder hansa fills in."""
+    return re.sub(r'command: "[^"\n]*helper_bash\.py"', 'command: "HANSA_HELPER_BASH"', given)
+
+
 class CoordinatorUpTest(unittest.TestCase):
     """How the coordinator's session is recorded (hansa notify on, notify-launch) and started again (hansa up),
     with the process readers, tmux and exec faked: the tests run with neither tmux nor claude."""
-    setUp, say = UpTest.setUp, UpTest.say  # UpTest's desk and environment, the coordinator's part not faked
+    say = UpTest.say
+
+    def setUp(self):
+        UpTest.setUp(self)  # UpTest's desk and environment, the coordinator's part not faked
+        # the claude this desk uses, as hansa doctor finds it: notify-launch starts only that one (a stand-in)
+        stand_in = self.tmp / "desk-bin" / "claude"
+        stand_in.parent.mkdir()
+        stand_in.write_text("#!/bin/sh\nexit 0\n")
+        stand_in.chmod(0o755)
+        env = unittest.mock.patch.dict(os.environ, {"HANSA_CLAUDE": str(stand_in)})
+        env.start()
+        self.addCleanup(env.stop)
 
     SESS = {"pid": 4242, "start": "boot:77"}
     KEY = "sk-desk-secret-123456"
@@ -4377,6 +4415,7 @@ class CoordinatorUpTest(unittest.TestCase):
     def coordinator_start_said(self, desk):
         """What hansa coordinator says before it would start Claude Code (no claude in this test)."""
         err = io.StringIO()
+        os.environ.pop("HANSA_ROLE", None)  # notify on's, from the session: hansa coordinator starts from a terminal
         with unittest.mock.patch("hansa.run.claude_bin", side_effect=RuntimeError("no claude in this test")), \
                 contextlib.redirect_stderr(err), self.assertRaisesRegex(SystemExit, "no claude in this test"):
             main(["--desk", str(desk.root), "coordinator"])
@@ -4988,21 +5027,34 @@ class CoordinatorUpTest(unittest.TestCase):
                     "conversation": None})
         first, cleared = self.uuid(1), self.uuid(2)
 
-        def hook(event, sid, pid=os.getpid(), **more):
-            data = {"hook_event_name": event, "session_id": sid, "transcript_path": str(self.transcript(sid)), **more}
-            with unittest.mock.patch("sys.stdin", io.StringIO(json.dumps(data))):
-                main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", str(pid)])
+        def hook(event, sid, pid=os.getpid(), refused=False, folder="-desk", **more):
+            data = {"hook_event_name": event, "session_id": sid, "transcript_path": str(self.transcript(sid, folder)),
+                    **more}
+            # the session the hook runs in: this process stands for it, an ancestor of the hook
+            with unittest.mock.patch("sys.stdin", io.StringIO(json.dumps(data))), \
+                    unittest.mock.patch.object(up, "ancestors", return_value=[os.getpid()]), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                if refused:
+                    with self.assertRaises(SystemExit):
+                        main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", str(pid)])
+                    self.assertIn("coordinator-turn wrote nothing", err.getvalue())
+                else:
+                    main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", str(pid)])
             return up.read_coordinator(self.desk).get("conversation")
         self.assertEqual(hook("Stop", first), {"id": first, "transcript": str(self.transcript(first))})
         self.assertTrue((self.desk.state_dir / "coordinator-turns" / f"{os.getpid()}.json").is_file())  # as before
         self.assertEqual(hook("SessionStart", cleared, source="clear"),
                          {"id": cleared, "transcript": str(self.transcript(cleared))})
-        self.assertEqual(hook("StopFailure", first, error="rate_limit")["id"], first)
-        self.assertEqual(hook("Stop", "not-an-id")["id"], first)  # nothing that is not a session's id
-        self.assertEqual(hook("Stop", cleared, pid=4242)["id"], first)  # another session's: not the recorded one
+        # a turn's end never moves the record to another conversation: only the SessionStart after a /clear does
+        self.assertEqual(hook("StopFailure", first, refused=True, error="rate_limit")["id"], cleared)
+        self.assertEqual(hook("Stop", "not-an-id", refused=True)["id"], cleared)  # nothing that is not a session's id
+        self.assertEqual(hook("Stop", cleared, pid=4242, refused=True)["id"], cleared)  # not the recorded session
+        self.assertEqual(hook("SessionStart", first, source="startup", refused=True)["id"], cleared)  # not a /clear
+        # a /clear names a transcript beside the recorded one's
+        self.assertEqual(hook("SessionStart", self.uuid(9), folder="-elsewhere", source="clear")["id"], cleared)
         with unittest.mock.patch.object(up, "alive", return_value=False):  # after a restart
             said, calls, _ = self.coordinator_up()
-        self.assertEqual(self.pane_words(calls[1])[-2:], ["--resume", first])
+        self.assertEqual(self.pane_words(calls[1])[-2:], ["--resume", cleared])
         # the hooks hansa coordinator and the launcher give: a SessionStart after a /clear runs coordinator-turn too
         hooks = cli.turn_hooks(self.desk, 77)
         self.assertEqual(hooks["SessionStart"], [{"matcher": "clear", "hooks": hooks["Stop"][0]["hooks"]}])
@@ -5139,7 +5191,8 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertEqual(ran, [(me, sock, {"wait": False})])
         rules = cli.launch_rules(self.desk, str(self.tmp))
         settings = json.dumps({"hooks": cli.turn_hooks(self.desk, os.getpid())})
-        self.assertEqual(started, {"prog": "claude", "argv": ["claude", "--messaging-socket-path", sock, "--name",
+        # the claude this desk uses (HANSA_CLAUDE's), under the name the words give it
+        self.assertEqual(started, {"prog": os.environ["HANSA_CLAUDE"], "argv": ["claude", "--messaging-socket-path", sock, "--name",
                                                               "desk b", "--continue", "--disallowedTools", *rules,
                                                               "--settings", settings]})
         rec = up.read_coordinator(self.desk)
@@ -5154,7 +5207,8 @@ class CoordinatorUpTest(unittest.TestCase):
         fake, seen = self.fake_claude()
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk",
                             str(self.desk.root), "notify-launch", str(fake), "--name", "desk b"],
-                           cwd=self.own_folder(), capture_output=True, text=True, timeout=120)
+                           cwd=self.own_folder(), capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "HANSA_CLAUDE": str(fake)})  # the claude this desk uses
         self.assertEqual(r.returncode, 0, r.stderr)
         words = seen.read_text().split("\0")[:-1]
         pid = json.loads((self.desk.state_dir / "coordinator-start.json").read_text())["session"]["pid"]
@@ -5262,6 +5316,7 @@ class CoordinatorUpTest(unittest.TestCase):
         ran = []
         with unittest.mock.patch.object(account, "desk_account", return_value="desk-owner"), \
                 unittest.mock.patch.object(account, "run", lambda who, argv, root, **kw: ran.append((who, argv, kw))), \
+                unittest.mock.patch.object(hansa.up, "ancestors", return_value=[123, 77]), \
                 unittest.mock.patch("sys.stdin", io.StringIO(turn_hook_input("StopFailure", "billing_error"))):
             self.assertEqual(main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", "77"]), 0)
         self.assertEqual([(w, argv) for w, argv, _ in ran], [("desk-owner", ["coordinator-turn", "--pid", "77"])])
@@ -5373,7 +5428,8 @@ class CoordinatorUpTest(unittest.TestCase):
         own = ["--disallowedTools", "WebFetch", "Bash(rm:*)", "--settings", '{"env": {"A": "1"}}',
                "--permission-mode", "auto", "--add-dir", str(extra), "--name", "desk b"]
         rec = {"kind": "notify", "hansa": up.hansa_command(), "argv": [str(fake), *own], "folder": str(folder),
-               "tmux": {}, "env": {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(self.tmp)},
+               "tmux": {}, "env": {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(self.tmp),
+                                   "HANSA_CLAUDE": str(fake)},  # the claude this desk uses
                "session": {"pid": 0}}
         said, calls, ok = self.coordinator_up(rec)
         self.assertTrue(ok, said)
@@ -5428,6 +5484,278 @@ class CoordinatorUpTest(unittest.TestCase):
                          ["--disallowedTools", "WebFetch", "--name", "n"])
         self.assertEqual(up.without_rules(["a", "--disallowedTools", *mine, "--", "--disallowedTools"], mine),
                          ["a", "--", "--disallowedTools"])
+
+    def test_notify_launch_starts_only_the_desks_claude_never_a_program_its_words_name(self):
+        from hansa import up
+        for words in (["/bin/sh", "-c", "touch owned"], ["python3", "-c", "print(1)"]):
+            with self.subTest(words=words), \
+                    unittest.mock.patch("os.execvpe") as ran, \
+                    unittest.mock.patch.object(plugin, "version", return_value="") as asked, \
+                    unittest.mock.patch.object(notify, "start", return_value="started") as followed, \
+                    self.assertRaisesRegex(SystemExit, "starts only the claude this desk uses.*nothing was started"):
+                main(["--desk", str(self.desk.root), "notify-launch", *words])
+            ran.assert_not_called()
+            asked.assert_not_called()  # not even run with --version
+            followed.assert_not_called()
+            self.assertEqual(up.read_coordinator(self.desk), {})  # nothing recorded for hansa up to replay
+
+    def test_hidden_commands_refuse_a_call_from_a_claude_code_session_and_run_nothing(self):
+        from hansa import up
+        calls = {"notify-launch": ["claude", "--name", "x"],
+                 "notify-follow": ["--key", "1-abcdef12", "--socket", str(self.tmp / "other.sock"), "--nonce", "n",
+                                   "--pid", "1"],
+                 "notify-feed": [], "coordinator-desk": ["--by", "0"]}
+        for cmd, words in calls.items():
+            with self.subTest(cmd=cmd), \
+                    unittest.mock.patch.dict(hansa.SESSION, {"CLAUDECODE": "1", "CLAUDE_PID": "4242"}), \
+                    unittest.mock.patch("os.execvpe") as ran, \
+                    unittest.mock.patch.object(notify, "follow") as followed, \
+                    unittest.mock.patch.object(notify, "cmd_feed") as fed, \
+                    unittest.mock.patch.object(cli, "coordinator_desk") as prepared, \
+                    self.assertRaisesRegex(SystemExit, f"{cmd} is a step of hansa's own.*not a command for a Claude "
+                                                       "Code session or its helpers; nothing was run or written"):
+                main(["--desk", str(self.desk.root), cmd, *words])
+            for m in (ran, followed, fed, prepared):
+                m.assert_not_called()
+            self.assertEqual(up.read_coordinator(self.desk), {})
+        self.assertEqual(cli.hidden_refusal("status"), "")
+
+    def test_the_sessions_hooks_act_only_for_the_session_they_run_in(self):
+        """coordinator-turn and coordinator-cleared run with the session's variables, as its Bash tool does: they act
+        only for the coordinator's session the desk recorded, an ancestor of the call, in its own conversation."""
+        from hansa import up
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        sid = "77777777-7777-4777-8777-777777777777"
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": [], "folder": str(self.desk.root), "session": me,
+                    "conversation": {"id": sid, "transcript": "/x/t.jsonl"}})
+        turns = self.desk.state_dir / "coordinator-turns"
+        failure = json.dumps({"hook_event_name": "StopFailure", "error": "rate_limit", "session_id": sid,
+                              "transcript_path": "/x/t.jsonl"})
+        cases = (("1", [os.getpid()], failure, "not run by the coordinator's session it names"),  # a made-up pid
+                 (str(os.getpid()), [], failure, "not run by the coordinator's session"),  # not an ancestor
+                 ("4242", [4242], failure, "not the coordinator's session this desk recorded"),
+                 (str(os.getpid()), [os.getpid()], failure.replace(sid, "88888888-7777-4777-8777-777777777777"),
+                  "another conversation"),
+                 (str(os.getpid()), [os.getpid()], json.dumps({"hook_event_name": "StopFailure", "error": "x"}),
+                  "not a Stop, StopFailure or SessionStart hook's"))
+        for pid, line, text, why in cases:
+            with self.subTest(pid=pid, why=why), \
+                    unittest.mock.patch.dict(hansa.SESSION, {"CLAUDECODE": "1", "CLAUDE_PID": str(os.getpid())}), \
+                    unittest.mock.patch.object(up, "ancestors", return_value=line), \
+                    unittest.mock.patch.object(sys, "stdin", io.StringIO(text)), \
+                    contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as e:
+                main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", pid])
+            self.assertEqual(e.exception.code, 1)
+            self.assertIn(why, err.getvalue())
+            self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+            self.assertFalse(turns.exists())  # nothing written
+        # its own session, an ancestor, in the recorded conversation: written as before
+        with unittest.mock.patch.object(up, "ancestors", return_value=[123, os.getpid()]), \
+                unittest.mock.patch.object(sys, "stdin", io.StringIO(failure)):
+            self.assertEqual(main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", str(os.getpid())]), 0)
+        self.assertEqual(read_json(turns / f"{os.getpid()}.json")["fails"], 1)
+        # coordinator-cleared: only under the recorded session
+        cleared = self.desk.mod_dir / "cleared.json"
+        with unittest.mock.patch.object(up, "ancestors", return_value=[123]), \
+                self.assertRaisesRegex(SystemExit, "coordinator-cleared recorded nothing: it is not run by the "
+                                                   "coordinator's session"):
+            main(["--desk", str(self.desk.root), "coordinator-cleared"])
+        self.assertFalse(cleared.exists())
+        self.desk.mod_dir.mkdir(parents=True, exist_ok=True)
+        with unittest.mock.patch.object(up, "ancestors", return_value=[123, os.getpid()]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            main(["--desk", str(self.desk.root), "coordinator-cleared"])
+        self.assertTrue(cleared.exists(), out.getvalue())
+
+    def test_hansa_coordinator_from_a_session_refuses_only_words_that_change_permissions_tools_or_settings(self):
+        from hansa import up
+        refused = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode",
+                   "--permission-prompts", "--permission-prompt-tool", "--allowedTools", "--allowed-tools",
+                   "--disallowedTools", "--disallowed-tools", "--tools", "--settings", "--setting-sources", "--add-dir",
+                   "--mcp-config", "--strict-mcp-config", "--plugin-dir", "--plugin-url", "--agent", "--agents",
+                   "--bare", "--safe-mode", "--restricted", "--chrome")
+        self.assertEqual(up.SESSION_REFUSED_WORDS, refused)
+        for env, session in (({}, {"CLAUDECODE": "1"}), ({"HANSA_ROLE": "coordinator"}, {}),
+                             ({"HANSA_TASK": "t1"}, {}), ({}, {})):
+            for words in ([], ["-p", "hi"], ["--name", "b", "--model", "opus"], *(
+                    [w, "x"] for w in refused), ["-p", "hi", "--permission-mode=bypassPermissions"]):
+                inside = bool(env or session)
+                word = next((w.partition("=")[0] for w in words if w.partition("=")[0] in refused), "")
+                with self.subTest(env=env, session=session, words=words), \
+                        unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.dict(hansa.SESSION, session), \
+                        unittest.mock.patch("hansa.run.claude_bin", side_effect=RuntimeError("no claude here")) as found, \
+                        unittest.mock.patch("os.execvpe") as ran, contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(SystemExit) as e:
+                    main(["--desk", str(self.desk.root), "coordinator", *words])
+                ran.assert_not_called()
+                if inside and word:  # one sentence naming the word; nothing prepared or started
+                    self.assertEqual(e.exception.code, f"hansa: {word} changes the new session's permissions, tools "
+                                                       "or settings, so hansa coordinator takes it only from the "
+                                                       "principal's own terminal; nothing was started")
+                    found.assert_not_called()
+                else:  # as from the principal's terminal: it goes on to start claude
+                    self.assertIn("no claude here", str(e.exception.code))
+                    found.assert_called()
+        # after a --, claude's words are the prompt's
+        self.assertEqual(up.session_start_word(["--name", "x", "--", "--settings"]), "")
+
+    def test_status_says_when_the_recorded_start_switches_permission_questions_off(self):
+        from hansa import up
+        start = self.desk.state_dir / "coordinator-start.json"
+        for rec, found in (
+                ({"kind": "coordinator", "words": ["--dangerously-skip-permissions", "--name", "x"]},
+                 "--dangerously-skip-permissions"),
+                ({"kind": "coordinator", "words": ["--permission-mode", "bypassPermissions"]},
+                 "--permission-mode bypassPermissions"),
+                ({"kind": "notify", "argv": ["claude", "--settings", "{}"], "folder": str(self.tmp)}, "--settings"),
+                ({"kind": "coordinator", "words": ["--name", "x", "--permission-mode", "default"]}, "")):
+            with self.subTest(rec=rec):
+                write_json(start, rec)
+                line = up.unasked_line(self.desk)
+                if found:
+                    self.assertIn(found, line)
+                    self.assertIn("without asking the principal", line)
+                    self.assertIn(line, views.status_text(views.status(self.desk)))
+                else:
+                    self.assertEqual(line, "")
+
+    def test_status_says_while_the_desks_session_settings_are_an_older_hansas(self):
+        from hansa import up
+        mine = self.desk.root / ".claude" / "settings.json"
+        mine.parent.mkdir(exist_ok=True)
+        current = cli.permissions(self.desk)
+        for allow, said in ((["Bash(hansa:*)"], True),  # as an older hansa wrote it
+                            ([*current["allow"], "Bash(hansa:*)"], True),  # the new rules beside the wide one
+                            (current["allow"][1:], True),  # one of the card's commands missing
+                            ([*current["allow"], "Bash(hansa notify:*)"], True),  # one an earlier version gave
+                            ([*current["allow"], "Bash(hansa desks:*)"], True),
+                            (current["allow"], False)):  # as hansa coordinator writes it now
+            with self.subTest(allow=allow[:2], said=said):
+                write_json(mine, {"permissions": {**current, "allow": allow}})
+                line = up.old_rules_line(self.desk)
+                status = views.status_text(views.status(self.desk))
+                if said:
+                    self.assertIn("settings from an older hansa", line)
+                    self.assertIn("start it again with hansa coordinator", line)
+                    self.assertIn(line, status.splitlines())
+                else:
+                    self.assertEqual(line, "")
+                    self.assertNotIn("settings from an older hansa", status)
+        # hansa coordinator's part in the desk writes the new rules: the line goes away
+        write_json(mine, {"permissions": {"allow": ["Bash(hansa:*)"], "deny": []}})
+        self.assertTrue(up.old_rules_line(self.desk))
+        cli.coordinator_desk(self.desk, os.getuid())
+        self.assertEqual(up.old_rules_line(self.desk), "")
+
+    def test_the_allow_rules_are_exactly_the_principals_list(self):
+        from hansa import up
+        whole = ("status", "show", "diff", "git", "wait", "explain", "cost", "changelog", "decisions", "help", "add",
+                 "retry", "verify", "cancel", "close", "merge", "gaps", "goal", "decide", "ask", "notes", "pause",
+                 "resume", "ping", "release", "concurrency", "hide", "bench", "doctor")
+        bash = [x for x in cli.permissions(self.desk)["allow"] if x.startswith("Bash(")]
+        self.assertEqual(bash, [*(f"Bash(hansa {c}:*)" for c in whole), "Bash(hansa desks)", "Bash(hansa desks --json)",
+                                "Bash(hansa lane)", "Bash(hansa lane set:*)", "Bash(hansa lane brief:*)",
+                                "Bash(hansa lane try:*)"])
+
+        def allowed(command):  # Claude Code's grammar: X:* is X alone or X, a space and anything; X alone is exact
+            return any(command == r[5:-3] or command.startswith(r[5:-3] + " ") if r.endswith(":*)")
+                       else command == r[5:-1] for r in bash)
+        for command in ("hansa lane set a check x", "hansa lane brief a", "hansa lane brief a --file f", "hansa lane",
+                        "hansa lane try a --log", "hansa desks", "hansa desks --json", "hansa bench rebuild",
+                        "hansa status", "hansa add 'x' --lane a", "hansa doctor --json", "hansa release --stop 3",
+                        "hansa goal add x", "hansa gaps mark n1 fixed why"):
+            self.assertTrue(allowed(command), command)
+        for command in ("hansa desks --forget X", "hansa desks --json --forget X", "hansa lane add b --repo /r",
+                        "hansa lane remove a", "hansa lane target a prod 'make deploy'", "hansa lanes", "hansa lane-x",
+                        "hansa lane settle", "hansa notify on", "hansa notify", "hansa disk-floor 5",
+                        "hansa memory-floor 2", "hansa up", "hansa serve", "hansa web", "hansa coordinator",
+                        "hansa coordinator -p hi", "hansa init /x", "hansa --desk X status", "hansa -h",
+                        "hansa statusx", "hansa", *(f"hansa {h}" for h in cli.HIDDEN_COMMANDS),
+                        *(f"hansa {h} --pid 1" for h in cli.HIDDEN_COMMANDS)):
+            self.assertFalse(allowed(command), command)
+        # hansa configures no auto mode anywhere
+        code = Path(__file__).resolve().parent.parent / "hansa"
+        self.assertFalse([f.name for f in code.rglob("*") if f.is_file() and f.suffix in (".py", ".md", ".json")
+                          and "autoMode" in f.read_text(encoding="utf-8", errors="replace")])
+
+    def test_hansa_role_given_in_a_session_cannot_record_the_principal(self):
+        with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "page"}):
+            with unittest.mock.patch.dict(hansa.SESSION, {"CLAUDECODE": "1"}):
+                self.assertEqual(cli.acting_role("cli"), "coordinator")
+                main(["--desk", str(self.desk.root), "pause", "why"])
+            self.assertEqual(cli.acting_role("terminal"), "terminal")  # outside a session: never "page" either
+        events = [json.loads(x) for x in (self.desk.root / "events.jsonl").read_text().splitlines() if x.strip()]
+        paused = [e for e in events if e.get("event") == "paused"]
+        self.assertTrue(paused, events[-3:])
+        self.assertNotIn("page", json.dumps(paused[-1]))
+        self.assertIn("coordinator", json.dumps(paused[-1]))
+
+    def test_notify_capture_is_honoured_only_under_the_tests_switch(self):
+        captured = self.tmp / "captured.jsonl"
+        sent = []
+
+        class Sock:
+            def __init__(self, *a): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def settimeout(self, t): pass
+            def connect(self, p): sent.append(p)
+            def sendall(self, b): pass
+        with unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_CAPTURE": str(captured)}):
+            os.environ.pop("HANSA_TESTS", None)
+            with unittest.mock.patch.object(notify.socket, "socket", Sock):
+                notify.post(str(self.tmp / "inbox.sock"), "hello")
+            self.assertFalse(captured.exists())
+            self.assertEqual(sent, [str(self.tmp / "inbox.sock")])
+            os.environ["HANSA_TESTS"] = "1"
+            notify.post(str(self.tmp / "inbox.sock"), "hello")
+            self.assertTrue(captured.exists())
+
+    def test_the_read_only_helpers_shell_runs_reading_commands_only(self):
+        from hansa import helper_bash
+        for ok in ("hansa show t1", "hansa diff t1 --stat", "hansa git a log -3", "grep -rn 'a|b' hansa",
+                   "find . -name '*.py'", "hansa goal list", "hansa gaps", "hansa notes", "cat tasks/t1/result.md"):
+            self.assertEqual(helper_bash.refusal(ok), "", ok)
+        for no in ("hansa merge t1", "hansa add x", "hansa notify-launch claude", "hansa --desk X status",
+                   "hansa goal add x", "hansa gaps mark n1 fixed why", "hansa ask x", "grep x f | sh", "rm -rf x",
+                   "find . -delete", "find . -exec rm {} ;", "echo $(id)", "cat f > g", "hansa show t1; hansa merge t1"):
+            self.assertNotEqual(helper_bash.refusal(no), "", no)
+        # each form that runs a program or writes a file, with why it is refused
+        for no, why in (("rg --pre=rm x f", "rg --pre runs"), ("rg --pre rm x f", "rg --pre runs"),
+                        ("rg --pre-glob '*.x' x f", "rg --pre-glob runs"), ("rg --pr=rm x f", "rg --pr runs"),
+                        ("rg -z x f", "rg -z runs"), ("rg -nz x f", "rg -nz runs"), ("rg --search-zip x f", "runs"),
+                        ("rg --hostname-bin=sh x f", "rg --hostname-bin runs"),
+                        ("file -C -m magic", "file -C runs"), ("file --compile -m magic", "file --compile runs"),
+                        ("file --comp -m magic", "file --comp runs"),
+                        ("find . -execdir rm {} +", "find runs or writes"), ("find . -ok rm {} ;", "more than one"),
+                        ("find . -fprint out", "find runs or writes"), ("find . -fls out", "find runs or writes"),
+                        ("sort -o out f", "sort is not one of"), ("sort --compress-program=sh f", "sort is not one of"),
+                        ("sed -i s/a/b/ f", "sed is not one of"), ("sed -n w/out f", "sed is not one of"),
+                        ("awk 'BEGIN{system(\"id\")}'", "awk is not one of"), ("xargs rm", "xargs is not one of"),
+                        ("tee out", "tee is not one of"), ("less f", "less is not one of"), ("man ls", "man is not one of"),
+                        ("tar xf a.tar", "tar is not one of"), ("git log", "git is not one of"),
+                        ("git -c core.pager=sh log", "git is not one of"), ("env grep x f", "env is not one of"),
+                        ("command grep x f", "command is not one of"), ("FOO=1 grep x f", "is not one of"),
+                        ("/tmp/x/grep a f", "/tmp/x/grep is not one of"), ("cat <<EOF", "redirects"),
+                        ("grep x f > out", "redirects"), ("grep x f 2>/dev/null", "redirects"),
+                        ("cat f >> out", "redirects"), ("grep x <(id)", "redirects"), ("echo `id`", "expands"),
+                        ("grep x f && rm f", "more than one"), ("hansa --desk X show t1", "options go after")):
+            self.assertIn(why, helper_bash.refusal(no), no)
+        self.assertIn("changes something", helper_bash.refusal("hansa desks --forget /x"))
+        self.assertIn("changes something", helper_bash.refusal("hansa desks --json --forget /x"))
+        for ok in ("hansa desks", "hansa desks --json", "rg -n x f", "rg --passthru x f", "rg -- --pre f", "file f", "diff a b", "tail -n 5 f", "wc -l f",
+                   "hansa explain lane a", "hansa changelog a"):
+            self.assertEqual(helper_bash.refusal(ok), "", ok)
+        script = Path(helper_bash.__file__)
+        for command, code in (("hansa merge t1", 2), ("hansa show t1", 0), ("rg --pre=rm x f", 2)):
+            r = subprocess.run([sys.executable, "-I", str(script)], input=json.dumps(
+                {"tool_name": "Bash", "tool_input": {"command": command}}), capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, code, r.stderr)
+        for name in ("scout.md", "reviewer.md"):
+            given = cli.helper_text((Path(cli.__file__).with_name("agents") / name).read_text(), "")
+            self.assertIn("PreToolUse", given)
+            self.assertIn(f'command: {json.dumps(shlex.join([sys.executable, "-I", str(script)]))}', given)
 
     def test_a_rule_claude_code_would_split_stops_the_launch_as_it_stops_hansa_coordinator(self):
         odd = Desk(self.tmp / "odd) desk")
@@ -6259,7 +6587,7 @@ class DeskTest(unittest.TestCase):
         session = unittest.mock.patch.dict(hansa.SESSION, clear=True)  # what hansa took out as it was imported here
         session.start()
         self.addCleanup(session.stop)
-        os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
+        os.environ.update(HANSA_TESTS="1", HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
                           HANSA_NOTIFY_GATHER="0.5",
                           XDG_STATE_HOME=str(self.tmp / "state"),  # serve never writes the account's real desk list
                           XDG_RUNTIME_DIR=str(self.tmp))  # the inboxes' folder (notify.socket_path), not the account's
@@ -27083,7 +27411,7 @@ def save():'''))
         self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (code / "card.md").read_text())
         agents = self.desk.root / ".claude" / "agents"
         for name in ("scout.md", "reviewer.md"):  # the desk's helpers come along
-            self.assertEqual((agents / name).read_text(), (code / "agents" / name).read_text())
+            self.assertEqual(helper_as_shipped((agents / name).read_text()), (code / "agents" / name).read_text())
         self.assertIn("effort: medium", (agents / "scout.md").read_text())
 
     def record_folder(self, folder):
@@ -27502,18 +27830,18 @@ def save():'''))
         # every desk, new or existing: empty, the coordinator's model, the definitions as hansa ships them
         self.assertEqual(self.desk.settings()["helpers_model"], "")
         self.assertEqual(self.start_coordinator()[0], 0)
-        self.assertEqual({n: (agents / n).read_text() for n in shipped}, shipped)
+        self.assertEqual({n: helper_as_shipped((agents / n).read_text()) for n in shipped}, shipped)
         self.assertFalse(any(x.startswith("model:") for t in shipped.values() for x in t.splitlines()))
         # the principal's value, on the page: the definitions get it at the coordinator's next start, not before
         self.assertEqual(self.page_save(lambda s: s.update(helpers_model="sonnet")), {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["helpers_model"], "sonnet")
-        self.assertEqual({n: (agents / n).read_text() for n in shipped}, shipped)
+        self.assertEqual({n: helper_as_shipped((agents / n).read_text()) for n in shipped}, shipped)
         exit_code, out, err = self.start_coordinator()
         self.assertEqual(exit_code, 0, err)
         self.assertIn("--model opus", out)  # the coordinator's own model is its own
         for name, text in shipped.items():
             with self.subTest(helper=name):
-                given = (agents / name).read_text()
+                given = helper_as_shipped((agents / name).read_text())
                 head = given.split("\n---\n", 1)[0].splitlines()
                 self.assertIn('model: "sonnet"', head)  # in the definition's frontmatter
                 # the rest, efforts, tools and limits among it, as hansa ships it
@@ -27525,7 +27853,7 @@ def save():'''))
         # emptied again: back to the coordinator's model
         self.assertEqual(self.page_save(lambda s: s.update(helpers_model="")), {"ok": True, "problems": []})
         self.assertEqual(self.start_coordinator()[0], 0)
-        self.assertEqual({n: (agents / n).read_text() for n in shipped}, shipped)
+        self.assertEqual({n: helper_as_shipped((agents / n).read_text()) for n in shipped}, shipped)
 
     def test_the_helpers_model_is_checked_as_the_coordinators_model_is(self):
         for good in ("haiku", "claude-sonnet-5-5", "opus[1m]", "kimi-k2:latest", "vendor/model.v2"):
@@ -27960,7 +28288,8 @@ def save():'''))
             self.assertEqual(r.returncode, 0, r.stderr)
         s = json.loads(mine.read_text())
         root = str(self.desk.root).lstrip("/")
-        self.assertIn("Bash(hansa:*)", s["permissions"]["allow"])
+        self.assertEqual([x for x in s["permissions"]["allow"] if x.startswith("Bash(")],
+                         hansa.up.allow_rules())
         self.assertNotIn("Bash(bh:*)", s["permissions"]["allow"])
         self.assertIn(f"Read(//{root}/.hansa/**)", s["permissions"]["deny"])
         self.assertEqual(s["env"], {"KEEP": "1"})  # other settings there stay
@@ -29092,7 +29421,10 @@ def save():'''))
     def cleared_hook(self) -> str:
         """The coordinator's SessionStart hook after a /clear, run here: what it printed."""
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        from hansa import up
+        session = up.still_runs(up.read_coordinator(self.desk))  # the session hansa coordinator recorded
+        self.assertTrue(session)
+        with contextlib.redirect_stdout(out), unittest.mock.patch.object(up, "ancestors", return_value=[session]):
             main(["--desk", str(self.desk.root), "coordinator-cleared"])
         return out.getvalue()
 
@@ -31101,7 +31433,8 @@ def save():'''))
             self.assertFalse(denied(cmd), cmd)
         for cmd in ("git log --grep push", "git grep push"):  # refused here, read through hansa git
             self.assertTrue(denied(cmd), cmd)
-        self.assertIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
+        self.assertIn("Bash(hansa status:*)", cli.permissions(self.desk)["allow"])
+        self.assertNotIn("Bash(hansa:*)", cli.permissions(self.desk)["allow"])
 
     def test_a_lanes_env_refuses_the_shells_own_names_and_its_file_is_the_desks_alone(self):
         from hansa import run
