@@ -42,17 +42,20 @@ release L [TARGET] [note]` (TARGET needed when there is more than one, and befor
 note that could be a target name, as in `hansa release a public staging`)
 records the request (a new request for the same target replaces one still
 waiting): the target, the commit, the command, the note, the
-commits that go out (with one remote or none: on no remote-tracking branch of the repository
-and not in that target's last release; the whole history when it has no
-remote-tracking branch) and the files they change, a file the command names
+commits that go out (in the first-release range with one remote or none, those on no
+remote-tracking branch of the repository, or the whole history when it has no tracking branch)
+and the files they change, a file the command names
 (such as `./deploy.sh`) marked. On a one-target lane, an unknown word that `hansa lane target`
 would accept as a new target name is refused, to keep a mistyped target from releasing the only one;
 a quoted note with spaces can still omit TARGET. The reply names any waiting request it replaces
-and, if it had a one-time code, says that code no longer works. At the same commit as the target's
-last finished release, if the request is not refused, the reply first says there is nothing new,
-names that release and says it was asked to run again;
-asking again stays allowed. These remarks appear in the command's reply, not in the alert.
-For a target's first release with two or more remotes, including a `--fixed` target,
+and, if it had a one-time code, says that code no longer works. If a request is accepted at the same
+commit as the last release it uses as a starting point, the reply first says there is nothing new,
+names that release and says it was asked to run again. These remarks appear in the command's reply,
+not in the alert.
+When the command still matches, the range starts after the target's last released commit.
+After a target's first release, an explicit push to a named remote and branch also leaves out commits in
+that branch's local tracking ref. A changed command with an unknown destination uses the first-release range.
+When that range has two or more remotes, including for a `--fixed` target,
 every base commit missing from at least one remote's tracking branches is counted, shown,
 scanned and checked for direct commits, even if another remote already has it;
 the heading gives each remote's missing count (for example, `0 not on remote mirror, 3 not on remote public`),
@@ -340,7 +343,7 @@ with them unless asked with `--direct "<why>"`, then records the reason and wait
 yes even for a ticked target. The refusal names the first ten commits and their count and records
 nothing; `--direct` with no direct commits is refused. The page and `hansa release` show the recorded
 commits and reason. The ask and `hansa release` show the count and at most the first ten direct
-commits, with a copyable `git -C REPO log --oneline COMMIT [^SINCE] --` command for the full
+commits, with a copyable `git log --oneline` command for the full
 commit range (including task commits). This also reaches commits beyond the 200 stored on a request;
 the full range is read from git, so the repository must still have those commits. Waiting alerts
 give only their count, never subjects; posted completion lines already omit commit subjects.

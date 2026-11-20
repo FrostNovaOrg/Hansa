@@ -103,7 +103,10 @@ changes history. They do not commit: hansa commits each task's changes on its
 own branch, and merges only what the coordinator merges. The lane's setup,
 before the worker, and its check, after it, run in the same sandbox (with
 `srt`): the lane's network and write lists hold for them too, so a setup that
-downloads needs its registry on the network list.
+downloads needs its registry on the network list. Setup, check, merge check and
+`hansa lane try` keep `.claude`, `.codex`, `.agents` and `.mcp.json` read-only
+at every depth on macOS, while Linux protects the top-level names even when
+absent and the nested entries hansa finds when it prepares the command.
 
 The shell startup names kept from workers and verifiers are `~/.bashrc`,
 `~/.bash_profile`, `~/.bash_login`, `~/.bash_logout`, `~/.bash_aliases`,
@@ -198,7 +201,9 @@ Verifications, follow-ups, resumes and wrap-ups use the same list, including whe
 command predates an upgrade. Newly introduced built-ins stay outside the list.
 `hansa ping` uses an empty list.
 
-The coordinator's `scout` and `reviewer` subagents get `Read` and `Bash`.
+The coordinator's `scout` and `reviewer` subagents get `Read` and `Bash`. A hook in
+each definition checks that its Bash command only reads. If the hook's Python interpreter
+is missing, Claude Code blocks the command.
 `operator` also gets `Edit` and `Write`. All three exclude messaging, agent discovery and
 the background-task tools Claude Code can add alongside Bash. Launch these helpers as ordinary
 subagents, omitting `name` and `team_name`. The coordinator's agent-launch hook blocks named
@@ -311,9 +316,19 @@ use exactly that commit, never what the branch's name leads to: while the
 branch does not hold it, merge, verify and retry refuse with a line saying
 what it holds instead, and `hansa show` says so. In the lane's own checkout, a `commondir` in its `.git`
 stops every hansa git command there until it is removed by hand; hansa does
-not remove it. hansa's own git in a worktree runs with `core.fsmonitor` off,
-hooks from an empty folder and commit and tag signing off, whatever a
-setting there says; in the lane's own checkout its hooks run as before.
+not remove it. hansa's own git, in a worktree and in the lane's own checkout
+(its merges, the landing of a checked merge, a fixed release's checkout), runs
+with `core.fsmonitor` off, hooks from an empty folder and commit and tag
+signing off, whatever a setting there says: the repository's git hooks never
+run there. Put what such a hook did in the lane's setup or a release target's
+command; git runs its hooks as usual in that command (a `pre-push` hook of
+`git push`, say).
+A repository inside the worktree (one a worker made, anywhere below its top,
+outside an ignored folder) is never looked into by hansa's git: at a run's end
+the task fails, nothing is committed, and its error names up to five of them to
+remove; before a run starts, and when a worktree is cleaned, hansa removes
+them itself. Tasks do not change submodules: hansa's git never looks into one,
+and a run that changes one fails the same way.
 That empty folder, `hansa-no-hooks-*` in the temporary folder, is made once
 by each hansa process that needs it and removed as the process exits. One a
 process could not remove (it became another program, as `hansa coordinator`

@@ -114,7 +114,7 @@ wait as asked are left out, while their end alerts still go out.
 Each queued alert has a level: passive for a release that finished successfully and recovery notices;
 active for release_waiting, ask,
 a failed, void or forbidden release, release_stopped and test; urgent for server_stuck, coordinator, sandbox, disk,
-credit and model. A batch takes the highest (passive < active < urgent); Bark maps that level to its own attention levels.
+credit, model and page_held (hansa serve started without its page, as its port was held). A batch takes the highest (passive < active < urgent); Bark maps that level to its own attention levels.
 One run at a time (.hansa/alert.lock), and at
 most MOST_RUNS in an hour: beyond that, what comes waits and goes out in one run when the hour frees a run, with a
 line saying how many were held back. An entry of the queue that cannot be read is dropped, and recorded once
@@ -170,9 +170,9 @@ from . import without_session
 from .desk import Desk, SettingsError, provider_entry, desk_name_problem, now, read_json, write_json
 
 KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator", "credit",
-         "model", "test")
+         "model", "page_held", "test")
 LEVELS = ("passive", "active", "urgent")  # increasing attention; a batch takes the highest
-URGENT = ("server_stuck", "coordinator", "sandbox", "disk", "credit", "model")
+URGENT = ("server_stuck", "coordinator", "sandbox", "disk", "credit", "model", "page_held")
 GATHER = 20  # seconds: alerts that come within this of each other go out in one run
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
@@ -805,6 +805,17 @@ def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
     if result:
         return {**result, "ok": all(channel["ok"] for channel in result["channels"])}
     return {"ok": False, "problems": ["the test alert was not sent"]}
+
+
+def page_held(desk: Desk, port: int) -> bool:
+    """hansa serve started without its page, as the port it was last served on is held by something else: once for
+    that start, in views.page_held_text's sentence. False when no alert channel is set up."""
+    from .views import page_held_text
+    with desk.lock():
+        if configured(desk):
+            write_json(queue_file(desk), [x for x in _clean(desk) if x.get("kind") != "page_held"])
+        return add(desk, "page_held", page_held_text(port)[0].upper() + page_held_text(port)[1:],
+                   zh=page_held_text(port, zh=True))
 
 
 def stuck_check(desk: Desk, told: float) -> float:

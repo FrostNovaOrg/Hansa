@@ -18,6 +18,12 @@ class SrtSettings(Scratch):
     def sandbox_problem(self, fs):
         return shim.sandbox_problem(fs, str(self.wt), str(self.home), str(FAKES / "codex"))
 
+    def test_project_config_names_agree_with_hansa_lane_commands(self):
+        # .mcp.json is already mandatory in srt. Core names it explicitly too.
+        with mock.patch.object(hansa_run.account, "LINUX", False):
+            self.assertEqual(set(hansa_run.project_write_deny(self.wt)),
+                             {*shim.config_deny(str(self.wt)), str(self.wt / ".mcp.json"), f"{self.wt}/**/.mcp.json"})
+
     def test_settings_given_to_srt(self):
         run, _ = self.run_worker("success.jsonl")
         self.assertEqual(run["subtype"], "success")

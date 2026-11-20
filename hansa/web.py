@@ -6,7 +6,9 @@ The page keeps the address's token in sessionStorage for its origin and tab,
 and sends it explicitly in Authorization. Changes also need X-Hansa: 1.
 The HTML shell is public; every API request requires the bearer token.
 A request from outside this machine (from_outside: a proxy's) may only read, answer or stop releases,
-and pause or resume while the principal's switch, settings_from_outside, is off.
+and pause or resume while the principal's switch, settings_from_outside, is off. A page bound beyond
+this machine's own address (hansa serve --host outside:ADDRESS) counts every request as from outside,
+whatever its Host says, and changes nothing.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import gzip
 import hashlib
 import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -95,6 +98,7 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
 
 # A Host the browser sends for this machine's own address, the SSH tunnel's: any port, any letter case
 LOOPBACK_HOST = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:[0-9]{1,5})?", re.IGNORECASE)
+ORIGIN_ADDRESS = re.compile(r"https?://(localhost|[0-9.]+|\[[0-9a-f:.]*:[0-9a-f:.]*\])(?::[0-9]{1,5})?", re.IGNORECASE)
 # Headers a proxy adds; and every X-Forwarded-* header
 PROXY_HEADERS = ("forwarded", "x-real-ip", "via")
 SETTINGS_LOCAL_ONLY = ("settings and keys change only from this machine's own address (127.0.0.1 or localhost, "
@@ -107,16 +111,42 @@ OUTSIDE_LOCAL_ONLY = ('POST {path} was refused from outside this machine; to all
                       '"Allow changing settings from outside this machine" in Settings, Lanes, General, '
                       "on the page opened at this machine's own address (through the SSH tunnel)")
 
+# A page served beyond this machine's own address (hansa serve --host outside:ADDRESS) changes nothing
+WIDE_READ_ONLY = ("this page only shows, as hansa serve serves it beyond this machine's own address; make changes "
+                  "on the page at this machine's own address (127.0.0.1, through the SSH tunnel)")
+
+
+def loopback(host: str) -> bool:
+    """Whether hansa serve's --host is this machine's own address only (127.0.0.1, ::1, localhost)."""
+    import ipaddress
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip().strip("[]")).is_loopback
+    except ValueError:
+        return False
+
 
 def from_outside(headers) -> bool:
-    """Whether a request to the page came from outside this machine: it is local only with one Host, a loopback
-    name, and none of the headers a proxy adds. Whatever cannot be read is from outside."""
+    """Check for a single loopback Host and for proxy or browser headers that mark an outside request."""
     try:
-        names = [str(k).lower() for k in headers.keys()]
-        hosts = [v for k, v in headers.items() if str(k).lower() == "host"]
-        if any(n in PROXY_HEADERS or n.startswith("x-forwarded-") for n in names):
-            return True
-        return not (len(hosts) == 1 and isinstance(hosts[0], str) and LOOPBACK_HOST.fullmatch(hosts[0].strip()))
+        hosts = []
+        for name, value in headers.items():
+            name = str(name).lower()
+            if name in PROXY_HEADERS or name.startswith("x-forwarded-"):
+                return True
+            if name == "host":
+                hosts.append(value)
+            elif name == "origin":
+                origin = ORIGIN_ADDRESS.fullmatch(value.strip(" \t"))
+                if not origin:
+                    return True
+                host = origin[1].strip("[]").lower()
+                if host != "localhost" and not ipaddress.ip_address(host).is_loopback:
+                    return True
+            elif name == "sec-fetch-site" and value.strip(" \t").lower() == "cross-site":
+                return True
+        return not (len(hosts) == 1 and LOOPBACK_HOST.fullmatch(hosts[0].strip()))
     except Exception:
         return True
 
@@ -206,6 +236,11 @@ def _top_up_provider(desk: Desk, name: str) -> dict:
 
 def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
     token = desk.web_token()
+    # Beyond this machine's own address a client names any Host it likes: every request there is from outside.
+    everyone_outside = not loopback(host)
+
+    def outside(headers) -> bool:
+        return everyone_outside or from_outside(headers)
 
     class Page(http.server.BaseHTTPRequestHandler):
         server_version = "hansa"
@@ -214,13 +249,39 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
         def log_message(self, *args):
             pass
 
+        def parse_request(self):
+            return super().parse_request() and self._valid_framing()
+
+        def handle_expect_100(self):
+            # The base parser can send 100 Continue before parse_request returns.
+            return self._valid_framing() and super().handle_expect_100()
+
+        def _valid_framing(self):
+            # Check before dispatch so unread bytes cannot become the next request on a kept connection.
+            lengths = {value.strip(" \t") for value in self.headers.get_all("Content-Length", [])}
+            encoded = "Transfer-Encoding" in self.headers
+            if (self.headers.defects or (encoded and (lengths or self.command == "POST"))
+                    or any(not re.fullmatch(r"[0-9]+", length) for length in lengths)
+                    or len({length.lstrip("0") for length in lengths}) > 1):
+                return self._refuse_length()
+            if self.command in ("GET", "HEAD") and (encoded or any(length.lstrip("0") for length in lengths)):
+                self.close_connection = True
+                self._bad_request("unexpected_body", "body", "request body is not allowed")
+                return False
+            return True
+
+        def _refuse_length(self):
+            self.close_connection = True
+            self._bad_request("invalid_length", "Content-Length", "body needs a nonnegative Content-Length")
+            return False
+
         def _authed(self) -> bool:
             return hmac.compare_digest(self.headers.get("Authorization", "").encode(),
                                        ("Bearer " + token).encode())
 
         def _settings_refused(self) -> bool:
             """A request from outside this machine, while the principal's switch is off."""
-            return from_outside(self.headers) and desk.settings().get("settings_from_outside") is not True
+            return outside(self.headers) and desk.settings().get("settings_from_outside") is not True
 
         def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False,
                   headers=None):
@@ -256,7 +317,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             for k, v in (headers or {}).items():
                 self.send_header(k, v)
             self.end_headers()
-            if code != 304:
+            if code != 304 and self.command != "HEAD":
                 self.wfile.write(data)
 
         def _bad_request(self, code: str, field: str, problem: str):
@@ -344,7 +405,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 # and whether this request came from outside this machine, where the page cannot save them
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0],
-                                        "from_outside": from_outside(self.headers)})
+                                        "from_outside": outside(self.headers)})
             if url.path == "/api/cost/calendar":
                 return self._send(200, cost.calendar(desk))
             if url.path == "/api/cost":
@@ -392,12 +453,12 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if not self._authed() or self.headers.get("X-Hansa") != "1":
                 self.close_connection = True  # the unread body cannot become the next HTTP/1.1 request
                 return self._send(403, {"error": "forbidden"})
-            length = self.headers.get("Content-Length", "0")
-            if self.headers.get("Transfer-Encoding") or not re.fullmatch(r"[0-9]+", length):
-                self.close_connection = True
-                return self._bad_request("invalid_length", "Content-Length", "body needs a nonnegative Content-Length")
+            length = self.headers.get("Content-Length", "0").strip(" \t").lstrip("0") or "0"
             try:
-                data = self.rfile.read(int(length)) or b"{}"
+                try:
+                    data = self.rfile.read(int(length)) or b"{}"
+                except (OverflowError, ValueError):
+                    return self._refuse_length()
                 try:
                     body = json.loads(data)
                 except ValueError:
@@ -405,6 +466,9 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if not isinstance(body, dict):
                     return self._bad_request("invalid_type", "body", "body must be a JSON object")
                 path = urllib.parse.urlparse(self.path).path
+                if everyone_outside:  # the key and the page's answers travel unencrypted there: it only shows
+                    return self._send(200, {"ok": False, "code": "page_read_only", "problems": [WIDE_READ_ONLY],
+                                            "problem_details": [{"code": "page_read_only", "values": {}}]})
                 if path not in OUTSIDE_OPEN_POSTS and self._settings_refused():
                     settings = path in ("/api/settings", "/api/key")
                     code = "settings_local_only" if settings else "outside_local_only"

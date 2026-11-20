@@ -69,9 +69,12 @@ the adapter's former `logs/` folder, or the folder previously selected by
 
 The adapter uses temporary output for worker runs and provider checks. Standard
 output and error use unnamed, mode 600 regular files, closed when the adapter
-exits. The adapter reads events while the run proceeds and uses standard error
-when needed for its final answer. Temporary srt settings are in the run's own
-folder and removed with it.
+exits. The report comes from the latest nonempty completed agent message in
+Codex's JSON event stream. The report and its final newline fit in the
+40,000-character display limit, with a short note when the adapter cuts it.
+On a failed turn the adapter keeps the failure diagnostic, using standard
+error when needed. Temporary srt settings are in the run's own folder and
+removed with it.
 
 The answer still contains the report, thread id and token accounting. Live
 progress and hansa's task results remain available through the usual commands

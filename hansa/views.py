@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, pictures, plugin, release, up
-from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, connected_providers, connection_users, provider_entry, key_name, allow_fix, refused_rule, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, desk_privacy, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, connected_providers, connection_users, provider_entry, key_name, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError, old_codex_provider)
 from .run import (disk_short, earlier_not_held, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
@@ -678,6 +678,40 @@ def web_address(desk: Desk) -> tuple:
     return host, port
 
 
+def recorded_port(desk: Desk) -> int | None:
+    """The port this desk's hansa serve last served the page on (web-port, written as it binds it); None before
+    it ever did, or when the record cannot be read."""
+    try:
+        return int((desk.state_dir / "web-port").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def page_held_file(desk: Desk) -> Path:
+    """Written by a hansa serve that started without its page, as its recorded port was held by something else."""
+    return desk.state_dir / "web-held"
+
+
+def held_port(desk: Desk, server: dict) -> int | None:
+    """The recorded port that kept the running hansa serve from serving its page; None when it serves it, or
+    when the record is a stopped server's."""
+    rec = read_json(page_held_file(desk), {}) or {}
+    if not isinstance(rec, dict) or server.get("state") == "gone" or rec.get("pid") != server.get("pid"):
+        return None
+    port = rec.get("port")
+    return port if isinstance(port, int) and not isinstance(port, bool) else None
+
+
+def page_held_text(port: int, zh: bool = False) -> str:
+    """One sentence for a page that did not start elsewhere: its port is held by something else."""
+    if zh:
+        return (f"网页没有启动：上次网页所在的端口 {port} 被别的程序占用；如果有意换一个端口，"
+                "请停止服务器后用 hansa serve --port N（N 为空闲端口）启动")
+    return (f"the web page did not start: port {port}, where it was served last time, is held by something else; "
+            "to serve the page on another port on purpose, stop this server and start it with hansa serve --port N "
+            "(N a free port)")
+
+
 def page_address(host: str, port) -> str:
     """The page's address without its key, as hansa status gives it: a server listening on every address
     (0.0.0.0, ::) at 127.0.0.1 (or ::1)."""
@@ -691,6 +725,8 @@ def page_text(page: dict) -> str:
     listening on every address (0.0.0.0, ::) is given at 127.0.0.1 (or ::1), an address one can open."""
     every = page["host"] in ("0.0.0.0", "", "::")
     at = page_address(page["host"], page["port"]) + (" (it listens on every address)" if every else "")
+    if page["up"] and page.get("held"):
+        return "web page: not served: " + page_held_text(page["held"]).removeprefix("the web page did not start: ")
     if page["up"] and not page.get("answers", True):
         return (f"web page: {at}, but hansa serve is not answering now (its process is stopped or stuck: "
                 "hansa status says more), so neither is the page")
@@ -705,7 +741,8 @@ def page_of(desk: Desk, server: dict) -> dict:
     host, port = web_address(desk)
     stuck = server["state"] == "stuck"  # its rounds stopped coming; its page answers while its process does
     return {"host": host, "port": port, "up": server["state"] != "gone", "stuck": stuck,
-            "answers": not stuck or bool(server.get("answers")), "served": (desk.state_dir / "web-port").exists()}
+            "answers": not stuck or bool(server.get("answers")), "served": (desk.state_dir / "web-port").exists(),
+            "held": held_port(desk, server)}
 
 
 def killed_last(m: dict) -> dict:
@@ -1107,6 +1144,7 @@ def status(desk: Desk) -> dict:
         "server": server,
         "page": page_of(desk, server),  # where the web page is, and whether it is served now
         "server_seconds_ago": seconds_ago,
+        "desk_private": desk_privacy(desk, fix=False),  # whether other accounts can read the desk, until it is 0700
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
@@ -1117,6 +1155,8 @@ def status(desk: Desk) -> dict:
                                                                         r.get("name") or ""))
                   for r in followers] if hearing else [],
         "coordinator_start": "" if hearing else up.coordinator_line(desk),  # what hansa up does about the session
+        "old_rules": up.old_rules_line(desk),  # the desk's session settings are an older hansa's
+        "start_words": up.unasked_line(desk),  # the recorded start switches permission questions off
         "card_note": up.card_note(desk),  # the recorded session's folder does not load the card (the desk's CLAUDE.md)
         "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
         "heard": notify.hears(desk),  # whether the session asking is one of them
@@ -1315,6 +1355,7 @@ def status_text(st: dict) -> str:
     out += [goals.summary_text(g) for g in st.get("goals", [])[:5]]
     if len(st.get("goals", [])) > 5:
         out += [f"and {len(st['goals']) - 5} more: hansa goal list"]
+    out += [st["desk_private"][0].upper() + st["desk_private"][1:]] if st.get("desk_private") else []
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
     if hold := st.get("alert_held"):
@@ -1358,6 +1399,8 @@ def status_text(st: dict) -> str:
     if session := st.get("coordinator_session"):
         out.append(up.session_line(session))
     out += [st["coordinator_start"]] if st.get("coordinator_start") and not st.get("notifying") else []
+    out += [st["start_words"]] if st.get("start_words") else []
+    out += [st["old_rules"]] if st.get("old_rules") else []
     out += st.get("turns") or []
     out += st.get("unreached") or []
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
@@ -2812,7 +2855,7 @@ def cost_turns_text(rep: dict) -> str:
 def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool = False) -> str:
     """hansa diff: a task's changes against its base, limited to these paths when given. new: only what this
     attempt added on top of the attempt it continues from (hansa retry), without the base merged into it."""
-    from .run import git, git_first_line, wgit
+    from .run import GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF, GIT_REVIEW_NO_PROGRAMS, NO_SUBMODULES, git, git_first_line, wgit
     m = desk.meta(tid)
     # git interprets paths from the checkout where it runs, which may be another lane's repository.
     # Reject absolute paths and traversal before git so these mistakes get the same useful explanation.
@@ -2825,6 +2868,7 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
     wt = Path(m["worktree"])
     since, head, notice = m["base"], "", ""
     read = lambda *args: wgit(desk, wt, *args)
+    review_config, review_diff = (), (*GIT_REVIEW_NO_PROGRAMS, NO_SUBMODULES)
     if not wt.exists():
         lanes = desk.settings()["lanes"]
         notice = (f"hansa: {tid}'s lane {m['lane']} was removed" if m["lane"] not in lanes else
@@ -2834,6 +2878,7 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
         for name, lane in lanes.items():
             if not branch_holds(lane["repo"], m):
                 read = lambda *args: git(*args, cwd=lane["repo"])
+                review_config, review_diff = GIT_REVIEW_CONFIG, GIT_REVIEW_DIFF
                 notice += f"; showing the diff from lane {name}'s repository {lane['repo']}\n"
                 break
         else:
@@ -2857,11 +2902,12 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
                     if m.get("update_conflicts"):
                         # Compare the resolved merge with git's recreated conflicted tree, then show
                         # work after that merge. Comparing either parent would count the base's work.
-                        parts.append(read("show", "--format=", "--remerge-diff", mode, merge, *selected))
+                        parts.append(read(*review_config, "show", *review_diff, "--format=", "--remerge-diff",
+                                          mode, merge, *selected))
                         head += f"; resolution of merge {merge[:10]} and later changes, without the base's own changes"
                     else:
                         head += f", without the base merged into it at {merge[:10]}"
-        parts.append(read("diff", mode, since, m["head"], *selected))
+        parts.append(read(*review_config, "diff", *review_diff, mode, since, m["head"], *selected))
         out = desk.redact("\n".join(x for x in parts if x))
     except (RuntimeError, OSError) as e:
         return desk.redact(f"{notice}hansa: {git_first_line(e)}; the diff is not shown")

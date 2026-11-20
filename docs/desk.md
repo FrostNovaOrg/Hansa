@@ -66,10 +66,8 @@ with mode 0700, including when the account's umask is 0002. New enclosing
 folders are private too. With `--user`, root makes the desk folder 0700
 before giving it to the account; enclosing folders root makes retain their
 usual modes so the account can traverse them.
-Existing folders keep their modes. In an existing group- or world-writable
-desk folder, init still makes the desk and warns:
-`warning: others may write in <folder>; run chmod go-w <folder>`.
-The command quotes a path containing spaces or shell characters.
+A desk folder that already existed (empty) is made 0700 as well; the folders
+above it keep their modes. See [Other accounts on the machine](#other-accounts-on-the-machine).
 With `--repo`, init then gives the lines `hansa lane add` gives of the lane it
 made: `lane a added: REPO, base B, providers ...`, and that the lane has no
 check, so its tasks are merged untested, with the `hansa lane set a check`
@@ -164,8 +162,8 @@ Afterwards the same tab keeps its key in session storage (the first way) or need
 
 From outside, while **Allow changing settings from outside this machine** (`settings_from_outside`, off by default) is off, the page may only read, answer or stop releases, and pause or resume dispatch. Saving settings and keys, testing alerts or pushes, recognizing push addresses, checking providers (Ping) and confirming top-ups require the switch; turn it on in **Settings → Lanes → General** from the machine's own address through the SSH tunnel.
 Settings shows this restriction at the top of every section and locks its fields, while text remains readable and copyable.
-A request counts as from outside if its `Host` is not a loopback name (`127.0.0.1`, `localhost`, `[::1]`) or it carries `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`.
-A proxy that hides both its outside host name and these headers would not be recognised as outside: do not set one up that way.
+A request counts as from outside if its `Host` is not a loopback name (`127.0.0.1`, `localhost`, `[::1]`), or it carries `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, a non-loopback `Origin` or `Sec-Fetch-Site: cross-site`.
+If a proxy rewrites `Host` to loopback, add a forwarding header so requests without those browser headers still count as outside.
 
 ## Status, work and cost on the web page
 
@@ -941,10 +939,8 @@ or tmux server.
 Below it, **Allow changing settings from outside this machine**
 (`settings_from_outside`, off by default) decides whether a request that reaches
 `hansa serve` from outside this machine may save settings and provider keys,
-test alerts or pushes, recognize push addresses, check providers (Ping) and confirm top-ups. A
-request counts as from outside unless its `Host` is `127.0.0.1`, `localhost` or
-`[::1]` (any port or letter case) and it has no proxy header (`Forwarded`,
-`X-Forwarded-*`, `X-Real-IP`, `Via`). While the switch is off, such a request
+test alerts or pushes, recognize push addresses, check providers (Ping) and confirm top-ups.
+While the switch is off, a request [from outside](#opening-the-page-from-outside-the-machine)
 may only read, answer or stop releases, and pause or resume dispatch. Other POST
 requests get HTTP 200 with `ok: false`: code `settings_local_only` for settings
 and keys, `outside_local_only` for the others, before any action runs. An allowlist
@@ -1149,7 +1145,7 @@ says it is gone. A lock naming only a number, as older servers wrote it, is stil
 the server's last round.
 
 Each `hansa serve` start saves `.hansa/serve-start.json`, once its page is
-bound: the absolute path of
+bound (or found its saved port held, below): the absolute path of
 its installation's `bin/hansa`, `--host`, `--every`, whether `--port` was given
 (and its value if so), and the variables
 that were set: `PATH`, `LANG`, every `LC_*` (including `LC_ALL`), `HANSA_CLAUDE`,
@@ -1166,14 +1162,25 @@ words, and for a port in use, how to pick another.
 The command path keeps links to the installation, so switching such a link
 makes future starts use the new installation.
 
-Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, or 8765
-before its first run. If it is taken, it tries each following port until one
-binds (up to 65535). It prints the chosen port, says which port was taken when
-it moves, and saves the chosen port in `.hansa/web-port`;
-`hansa web` and `hansa status` then use that address. The next start tries that
-saved port first, even if 8765 is free again. The start record preserves automatic
-port selection, so `hansa up` follows the same rule. An explicit `--port N`
-stays explicit in the start record and fails if N is taken, as before.
+Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, where the
+page was last served. If something else holds that port, the server starts
+without its page rather than on another port, where a link, bookmark or proxy
+kept for the old one would hand the page's key to whatever holds it: tasks still
+run, and the start's output, `hansa up`, `hansa status` and (once, if alerts are
+set up) the principal's alert say that port N is held and to start it with
+`--port N` on purpose; `hansa web` then prints no address. Before any port is
+saved, it tries 8765 and then each following port until one binds, says which
+was taken, and saves the one it binds in `.hansa/web-port`. The start record
+preserves automatic port selection, so `hansa up` follows the same rule. An
+explicit `--port N` stays explicit in the start record and fails if N is taken.
+
+`--host` takes this machine's own address only (127.0.0.1, another 127.x
+address, `::1`, `localhost`); any other is refused in one line. To mean it,
+write `--host outside:ADDRESS`: the page's key then travels unencrypted, so
+that page counts every request as from outside, whatever its `Host` says, and
+only shows: it saves no setting or key, answers no release and pauses nothing.
+It listens on the one address given; `localhost` names whichever address the
+system resolves first, not both 127.0.0.1 and `::1`.
 Older records did not distinguish an explicit 8765 from the default: `hansa up`
 treats an unmarked record's 8765 as automatic, keeping other recorded ports
 explicit. New records distinguish both, including an explicit `--port 8765`.
@@ -1618,8 +1625,18 @@ session runs, the session's id (a UUID) and the transcript's path from the
 hook's input, in the start record (`.hansa/coordinator-start.json`,
 `conversation`), when that record is of this session (pid `N`, started when
 the record says) and the conversation changed; that is what `hansa up`
-resumes. Missing or malformed input writes nothing, and the command always
-exits 0. As root on an account's desk, root passes only the event and the
+resumes. A turn's end only fills in the transcript of the conversation the
+record names; only the `SessionStart` after a `/clear` gives it a new id, and
+only with a transcript beside the recorded one's.
+
+Both hooks act only for the session they run in: `N` must be an ancestor
+process of the command and the coordinator's session the start record names
+(`coordinator-cleared` looks for that session among its ancestors), and a
+`Stop` or `StopFailure` input must name the conversation that record names.
+Input not in the shape Claude Code gives (the event, the session's id, the
+transcript's absolute path) or any other call writes nothing and exits 1 with
+one line; other problems write nothing and exit 0. As root on an account's
+desk, root checks the ancestry and passes only the event and the
 error type to the account's hansa, which writes the turn's record; root keeps
 no start record. `hansa serve` removes, as it starts,
 the records of sessions whose process is gone (`up.sweep_turns`); it leaves
@@ -1714,6 +1731,47 @@ guessed next message in the coordinator's input box (prompt suggestions); in a
 tmux capture without colors that grey guess looked typed. With an older
 Claude Code, where a grey line still shows there, the principal should not press
 Enter on what looks like an empty box: it may send the guess as if they wrote it.
+
+### Other accounts on the machine
+
+No other account on the machine may read a desk's files, hold them, or plant a
+desk for hansa to find:
+
+- `hansa init`, in a new folder or an empty one that existed, and every start of
+  `hansa serve` make the desk's folder 0700. hansa's own files at the desk's top
+  (`settings.json`, `events.jsonl`, `asks.json`, `CLAUDE.md` and the rest) and in
+  `.hansa/` are made 0600; at `hansa serve`'s start, existing ones are brought to
+  0600 and the folders right inside `.hansa/` to 0700. That is bounded: the lanes'
+  worktrees and repositories, and what lies deeper in `.hansa/`, keep their modes
+  (`.hansa/` itself is 0700, so no other account can reach them).
+- A desk folder that belongs to another account cannot be made so: `hansa init`
+  warns, `hansa serve` says it at its start and starts anyway, and `hansa status`
+  keeps saying it in one line.
+- On a volume that does not keep file modes (some network or external disks),
+  the folder stays as the volume shows it: `hansa serve` says so at its start and
+  goes on, and `hansa status` keeps one line, `the desk's folder ... is open to
+  other accounts (mode ...)`. Other accounts may then read the desk; move it to a
+  volume that keeps modes if that matters.
+- Writes to `events.jsonl` are guarded by `.hansa/events.lock`, a file no other
+  account can open, so none can stall them by holding a lock on the log. Older
+  hansa locked the log itself. Across an upgrade, while an older `hansa serve` still
+  runs beside newer commands, a newer writer also takes that old lock when it comes
+  free within half a second, so an older and a newer process never write at once.
+  An older hansa holds it for one line; one held longer is taken to be another
+  account's (which opened the log before the desk became 0700), and the newer
+  writer then writes without it, trying it only once for each later event.
+  Restart `hansa serve` after an upgrade, as for any other change.
+- A desk found by walking up from the current folder that belongs to another
+  account is not taken: hansa says `the desk at PATH belongs to another account,
+  so hansa did not take it; if it is meant, name it with --desk PATH`. A desk named
+  with `--desk` or `HANSA_DESK`, or on the account's list of desks, is taken as
+  before, and so is root's own use of an ordinary account's desk on a Linux server
+  ([linux-root](linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account)).
+- The page's key, `.hansa/web-token`, is brought to 0600 when this account owns
+  it; when it does not, hansa refuses to serve the page (`hansa serve` does not
+  start, and `hansa web` does not open it), in one sentence: remove the file and
+  start `hansa serve` again for a new key.
+- The account's list of desks (`desks.json`) and its lock are 0600.
 
 ### Where a desk's files grow
 
