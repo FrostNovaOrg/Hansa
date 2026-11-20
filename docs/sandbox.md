@@ -202,7 +202,9 @@ hook lets a worker's launch through only with `prompt`, `description`, `subagent
 `model`, `effort` and `run_in_background`, and only for a subagent type whose definition holds
 no more than `name`, `description`, `tools`, `disallowedTools`, `model`, `effort`, `color` and
 `maxTurns`. Anything else (a name, a team, isolation, a field hansa does not know yet) is refused
-before anything is sent, as is every launch when the hook cannot run. A subagent has no tool
+before anything is sent, as is every launch when the hook cannot run, or when hansa cannot list
+the agent definitions or read one's front matter exactly as Claude Code does (unindented, unquoted
+keys, each once, and a plain name), since the type it defines is then unknown. A subagent has no tool
 its worker lacks: the worker's list, its denies and this hook hold inside it too. A repository
 that sets `disableAllHooks` does not turn the hook off, but the principal's managed settings
 (`disableAllHooks`, `allowManagedHooksOnly`) do, and then every form of `Agent` is open. The hook

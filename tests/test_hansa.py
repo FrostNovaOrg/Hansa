@@ -38753,6 +38753,75 @@ os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])
         (agents / "unreadable.md").rmdir()
         self.assertEqual(self.guard_says(blind, {"prompt": "x", "subagent_type": "reader"}, cwd)[0], 2)
 
+    def test_an_agent_definition_is_read_exactly_as_claude_code_reads_it_or_every_launch_is_refused(self):
+        from hansa import run
+        [command] = [h["hooks"][0]["command"] for h in run.worker_hooks()["PreToolUse"]
+                     if h["matcher"] == "^Agent$|^Task$"]
+        reaching = "name: far\ndescription: x\nisolation: remote\n"
+        # Forms hansa does not read exactly: Claude Code may read isolation: remote in them (Bun's YAML reads an
+        # indented block, and its second try turns leading tabs into spaces), so no type is taken to be plain.
+        unread = {
+            "spaces": "---\n name: far\n description: x\n isolation: remote\n---\n",
+            "tabs": "---\n\tname: far\n\tdescription: x\n\tisolation: remote\n---\n",
+            "first key indented": "---\n  name: far\nisolation: remote\n---\n",
+            "indented comment first": "---\n  # x\nname: far\nisolation: remote\n---\n",
+            "quoted key": '---\nname: far\ndescription: x\n"isolation": remote\n---\n',
+            "single-quoted key": "---\nname: far\ndescription: x\n'isolation': remote\n---\n",
+            "tab after the key": "---\nname: far\ndescription: x\nisolation:\tremote\n---\n",
+            "space before the colon": "---\nname: far\ndescription: x\nisolation : remote\n---\n",
+            "a comment after the name": "---\nname: other # far\ndescription: x\nisolation: remote\n---\n",
+            "the name going on": "---\nname: other\n  far\ndescription: x\nisolation: remote\n---\n",
+            "a name with a tag": "---\nname: !!str far\ndescription: x\nisolation: remote\n---\n",
+            "a key twice": "---\nname: other\nname: far\ndescription: x\nisolation: remote\n---\n",
+            "flow mapping": "---\n{name: far, description: x, isolation: remote}\n---\n",
+            "merge key": "---\nname: far\ndescription: x\n<<: {isolation: remote}\n---\n",
+            "explicit key": "---\nname: far\ndescription: x\n? isolation\n: remote\n---\n",
+            "lone carriage return": "---\nname: far\ndescription: x\risolation: remote\n---\n",
+            "line separator": "---\nname: far\ndescription: x\u2028isolation: remote\n---\n",
+            "next line": "---\nname: far\ndescription: x\x85isolation: remote\n---\n",
+            "second byte-order mark": "---\nname: far\ndescription: x\n\ufeffisolation: remote\n---\n",
+        }
+        # Forms read exactly: what Claude Code reads in them is what hansa reads.
+        read = {
+            "crlf": ("---\r\n" + reaching.replace("\n", "\r\n") + "---\r\n", True),
+            "byte-order mark": ("\ufeff---\n" + reaching + "---\n", True),
+            "quoted name": ("---\nname: 'far'\ndescription: x\nisolation: remote\n---\n", True),
+            "tab-indented list under a key": ("---\nname: far\ndescription: x\ntools:\n\t- Read\nhooks:\n  x: 1\n---\n", True),
+            # Claude Code reads only the first block, which ends at the first ---, even inside a line
+            "second block": ("---\nname: far\ndescription: x\n---\n---\nisolation: remote\n---\n", False),
+            "--- inside a value": ("---\nname: far\ndescription: a---b\nisolation: remote\n---\n", False),
+            "--- after the opening's spaces": ("---  \nname: far\ndescription: x\n---\nisolation: remote\n", False),
+        }
+        for label, (text, refused) in [*((k, (v, None)) for k, v in unread.items()), *read.items()]:
+            with self.subTest(form=label):
+                checkout = self.tmp / f"checkout-{abs(hash(label))}"
+                agents = checkout / ".claude" / "agents"
+                agents.mkdir(parents=True)
+                (agents / "reader.md").write_text("---\nname: reader\ndescription: reads\n---\nRead.\n")
+                (agents / "other.md").write_bytes(text.encode("utf-8"))  # its line ends as written
+                [started] = [h["hooks"][0]["command"] for h in run.worker_hooks(checkout)["PreToolUse"]
+                             if h["matcher"] == "^Agent$|^Task$"]
+                for guard in (command, started):
+                    far, said = self.guard_says(guard, {"prompt": "x", "subagent_type": "far"}, checkout)
+                    plain = self.guard_says(guard, {"prompt": "x", "subagent_type": "reader"}, checkout)[0]
+                    if refused is None:  # not read exactly: no launch at all
+                        self.assertEqual((far, plain), (2, 2))
+                        self.assertIn("cannot read every agent definition exactly", said)
+                    else:
+                        self.assertEqual((far, plain), (2 if refused else 0, 0))
+        # A folder of definitions that cannot be listed is not passed over: its types are unknown
+        checkout = self.tmp / "checkout-closed"
+        closed = checkout / ".claude" / "agents" / "closed"
+        closed.mkdir(parents=True)
+        (closed / "far.md").write_text("---\n" + reaching + "---\n")
+        closed.chmod(0)
+        self.addCleanup(closed.chmod, 0o700)
+        if os.access(closed, os.R_OK):  # root reads it all the same
+            self.skipTest("this account can list a folder whatever its mode")
+        for guard in (command, *[h["hooks"][0]["command"] for h in run.worker_hooks(checkout)["PreToolUse"]
+                                 if h["matcher"] == "^Agent$|^Task$"]):
+            self.assertEqual(self.guard_says(guard, {"prompt": "x", "subagent_type": "reader"}, checkout)[0], 2)
+
     def test_a_worker_is_told_which_agent_types_of_its_start_commit_reach_further(self):
         seen = self.tmp / "argv.jsonl"
         (self.repo / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
